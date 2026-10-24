@@ -109,9 +109,7 @@ fn posix_client_owns_system_v_argument_and_environment_layout() {
         stack[offset..offset + 8].copy_from_slice(&resolved.to_le_bytes());
     }
 
-    let word = |offset: usize| {
-        u64::from_le_bytes(stack[offset..offset + 8].try_into().unwrap())
-    };
+    let word = |offset: usize| u64::from_le_bytes(stack[offset..offset + 8].try_into().unwrap());
     assert_eq!(word(0), 2);
     let argv0 = (word(8) - image_base) as usize;
     let argv1 = (word(16) - image_base) as usize;
@@ -150,4 +148,70 @@ fn posix_stack_encoder_rejects_invalid_or_oversized_vectors() {
 #[test]
 fn native_process_image_replacement_uses_the_post_posix_syscall_range() {
     assert_eq!(mnu_abi::SyscallNumber::ProcessImageReplace as u64, 665);
+}
+
+#[test]
+fn userspace_loader_metadata_describes_the_program_instead_of_the_native_container() {
+    use mochios_posix_client::process_image::{Executable, encode_initial_stack_for_image};
+    let image = Executable {
+        entry: 0x20123456,
+        program_headers: 0x20000040,
+        program_header_size: 56,
+        program_header_count: 4,
+        interpreter_base: 0x70000000,
+    };
+    let mut output = [0u8; process_image::MAX_IMAGE_BYTES];
+    let length = encode_initial_stack_for_image(
+        &[b"program"],
+        &[b"A=B"],
+        b"program",
+        [7; 16],
+        &[],
+        Some(image),
+        &mut output,
+    )
+    .unwrap();
+    let startup = process_image::decode(&output[..length]).unwrap();
+    let words = startup
+        .stack()
+        .chunks_exact(8)
+        .map(|b| u64::from_le_bytes(b.try_into().unwrap()))
+        .collect::<Vec<_>>();
+    let aux = words[5..]
+        .chunks_exact(2)
+        .take_while(|pair| pair[0] != 0)
+        .map(|pair| (pair[0], pair[1]))
+        .collect::<Vec<_>>();
+    for pair in [
+        (3, image.program_headers),
+        (4, 56),
+        (5, 4),
+        (7, image.interpreter_base),
+        (9, image.entry),
+    ] {
+        assert_eq!(
+            aux.iter()
+                .filter(|value| value.0 == pair.0)
+                .copied()
+                .collect::<Vec<_>>(),
+            [pair]
+        );
+    }
+    assert!(!startup.relocations().any(|r| matches!(
+        r.kind,
+        RelocationKind::ElfProgramHeaders
+            | RelocationKind::ElfProgramHeaderSize
+            | RelocationKind::ElfProgramHeaderCount
+            | RelocationKind::ElfEntry
+    )));
+    assert!(
+        startup
+            .relocations()
+            .any(|r| r.kind == RelocationKind::StackAddress)
+    );
+    assert!(
+        startup
+            .relocations()
+            .any(|r| r.kind == RelocationKind::PageSize)
+    );
 }

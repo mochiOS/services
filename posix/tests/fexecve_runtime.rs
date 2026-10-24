@@ -1,5 +1,10 @@
 #![allow(dead_code)]
-use core::ffi::{c_char, c_int};
+use core::ffi::{c_char, c_int, c_void};
+use core::ptr;
+unsafe extern "C" {
+    fn malloc(length: usize) -> *mut c_void;
+    fn free(pointer: *mut c_void);
+}
 use mochios_posix_client::newlib_errno::*;
 use mochios_posix_client::{
     ObjectHandleAttachment, OpenAtBase,
@@ -35,9 +40,12 @@ struct State {
     closed: Vec<u32>,
     entered: usize,
     bytes: Vec<u8>,
+    prepared: Vec<u8>,
     mutate: Option<(usize, usize)>,
 }
 thread_local! {static STATE:RefCell<State>=RefCell::new(State::default());static DEFER:Cell<u32>=const{Cell::new(0)};}
+#[path = "../../../user/crates/newlib-runtime/src/exec_image.rs"]
+mod exec_image;
 #[path = "../../../user/crates/newlib-runtime/src/exec_inputs.rs"]
 mod exec_inputs;
 #[path = "../../../user/crates/newlib-runtime/src/exec_handle.rs"]
@@ -174,6 +182,31 @@ mod syscall {
                 }
                 Ok(len)
             }
+            SyscallNumber::MemoryObjectCreate => {
+                assert!(super::DEFER.get() > 0);
+                assert_eq!(len, mnu_abi::MEMORY_OBJECT_RESIZABLE);
+                super::STATE.with_borrow_mut(|s| {
+                    if s.failure == 9 {
+                        return Err(super::ENOMEM);
+                    }
+                    s.prepared = vec![0; p as usize];
+                    Ok(28)
+                })
+            }
+            SyscallNumber::HandleDuplicate => {
+                assert!(super::DEFER.get() > 0);
+                assert_eq!(
+                    (p, len),
+                    (28, super::posix_protocol::CHECK_EXECUTABLE_RIGHTS)
+                );
+                super::STATE.with_borrow(|s| {
+                    if s.failure == 11 {
+                        Err(super::EACCES)
+                    } else {
+                        Ok(29)
+                    }
+                })
+            }
             SyscallNumber::FindProcessByName => {
                 assert_eq!(
                     unsafe { std::slice::from_raw_parts(p as *const u8, len as usize) },
@@ -191,8 +224,23 @@ mod syscall {
         len: u64,
         offset: u64,
     ) -> Result<u64, i32> {
+        if n == SyscallNumber::HandleWriteAt {
+            assert_eq!(h, 28);
+            assert_eq!(super::DEFER.get(), 0);
+            return super::STATE.with_borrow_mut(|s| {
+                if s.failure == 10 {
+                    return Err(super::EIO);
+                }
+                let count = (len as usize).min(17);
+                let start = offset as usize;
+                assert!(start + count <= s.prepared.len());
+                s.prepared[start..start + count]
+                    .copy_from_slice(unsafe { std::slice::from_raw_parts(p as *const u8, count) });
+                Ok(count as u64)
+            });
+        }
         assert_eq!(n, SyscallNumber::HandleReadAt);
-        assert_eq!(h, 19);
+        assert!(h == 19 || h == 29);
         assert_eq!(super::DEFER.get(), 0);
         super::STATE.with_borrow_mut(|s| {
             s.reads += 1;
@@ -202,10 +250,11 @@ mod syscall {
             if s.failure == 3 {
                 return Ok(len + 1);
             }
-            let start = (offset as usize).min(s.bytes.len());
-            let count = (s.bytes.len() - start).min(len as usize).min(17);
+            let bytes = if h == 19 { &s.bytes } else { &s.prepared };
+            let start = (offset as usize).min(bytes.len());
+            let count = (bytes.len() - start).min(len as usize).min(17);
             unsafe {
-                std::ptr::copy_nonoverlapping(s.bytes[start..].as_ptr(), p as *mut u8, count);
+                std::ptr::copy_nonoverlapping(bytes[start..].as_ptr(), p as *mut u8, count);
             }
             Ok(count as u64)
         })
@@ -238,11 +287,23 @@ mod syscall {
         });
         let objects = unsafe { &mut *(objects as *mut mnu_abi::IpcObjectHandles) };
         assert_eq!(objects.count, 1);
-        assert_eq!(objects.handles[0].handle, 19);
+        super::STATE.with_borrow(|s| {
+            assert_eq!(
+                objects.handles[0].handle,
+                if s.prepared.is_empty() { 19 } else { 29 }
+            )
+        });
         assert_eq!(objects.handles[0].rights, HANDLE_RIGHT_READ);
         super::STATE.with_borrow(|s| {
             use sha2::Digest;
-            assert_eq!(digest, <[u8; 32]>::from(sha2::Sha256::digest(&s.bytes)));
+            assert_eq!(
+                digest,
+                <[u8; 32]>::from(sha2::Sha256::digest(if s.prepared.is_empty() {
+                    &s.bytes
+                } else {
+                    &s.prepared
+                }))
+            );
             if s.failure == 4 {
                 return Err(super::EAGAIN);
             }
@@ -269,7 +330,9 @@ mod syscall {
             startup: &[u8],
             ceiling: u64,
         ) -> Result<core::convert::Infallible, mochi_user_syscall::SysError> {
-            assert_eq!((h, ceiling), (19, 123456789));
+            assert_eq!(ceiling, 123456789);
+            super::super::STATE
+                .with_borrow(|s| assert_eq!(h, if s.prepared.is_empty() { 19 } else { 29 }));
             super::super::STATE.with_borrow(|s| {
                 assert_eq!(
                     key,
@@ -329,8 +392,8 @@ fn actual_fd_path_preserves_original_references_and_cleans_every_failed_stage() 
     for (failure, error, drops, entered) in [
         (0, ENOEXEC, 1, 1),
         (1, EACCES, 0, 0),
-        (2, EIO, 1, 0),
-        (3, EIO, 1, 0),
+        (2, EIO, 0, 0),
+        (3, EIO, 0, 0),
         (4, EAGAIN, 1, 0),
         (5, EACCES, 1, 0),
         (6, EIO, 1, 0),
@@ -480,6 +543,82 @@ fn executable_open_needs_read_and_transfer_but_no_shared_cursor_authority() {
         STATE.with_borrow(|s| {
             assert_eq!(s.entered, usize::from(allowed));
             assert_eq!(s.closed, [19]);
+        });
+    }
+}
+
+#[test]
+fn real_compiler_pie_uses_a_readonly_prepared_image_and_closes_all_temporary_handles() {
+    struct Temporary(std::path::PathBuf);
+    impl Drop for Temporary {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+    let directory = Temporary(std::env::temp_dir().join(format!(
+            "mochios-pie-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        )));
+    std::fs::create_dir(&directory.0).unwrap();
+    let binary = directory.0.join("image");
+    let compiled = std::process::Command::new("x86_64-elf-gcc")
+        .args([
+            "-fpie",
+            "-ffreestanding",
+            "-fno-stack-protector",
+            "-nostdlib",
+            "-Wl,-pie,--no-dynamic-linker,-e,_start,-z,noexecstack",
+        ])
+        .arg(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/native_static_pie.c"))
+        .arg("-o")
+        .arg(&binary)
+        .output()
+        .unwrap();
+    assert!(
+        compiled.status.success(),
+        "{}",
+        String::from_utf8_lossy(&compiled.stderr)
+    );
+    let bytes = std::fs::read(binary).unwrap();
+    let pie = mochios_posix_client::pie::Pie::parse(&bytes).unwrap();
+    assert!(pie.output_length().unwrap() > 4096);
+    for (failure, error) in [
+        (0, ENOEXEC),
+        (4, EAGAIN),
+        (5, EACCES),
+        (6, EIO),
+        (7, EIO),
+        (8, EIO),
+        (9, ENOMEM),
+        (10, EIO),
+        (11, EACCES),
+    ] {
+        reset(failure);
+        STATE.with_borrow_mut(|s| s.bytes = bytes.clone());
+        assert_eq!(
+            implementation::replace(0, ptr::null(), ptr::null(), &table()),
+            Err(error),
+            "failure={failure}"
+        );
+        STATE.with_borrow(|s| {
+            assert_eq!(s.bytes, bytes);
+            assert!(!s.closed.contains(&19));
+            assert_eq!(
+                s.closed.iter().filter(|h| **h == 28).count(),
+                usize::from(failure != 9)
+            );
+            assert_eq!(
+                s.closed.iter().filter(|h| **h == 29).count(),
+                usize::from(![9, 10, 11].contains(&failure))
+            );
+            assert_eq!(s.entered, usize::from(failure == 0));
+            if ![9, 10].contains(&failure) {
+                assert_eq!(&s.prepared[16..18], &2u16.to_le_bytes());
+            }
         });
     }
 }
