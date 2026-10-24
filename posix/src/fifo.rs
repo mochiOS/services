@@ -41,10 +41,21 @@ pub struct Observation {
     pub writers: usize,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Readiness {
+    pub open_ready: bool,
+    pub readable: bool,
+    pub writable: bool,
+    pub end_of_stream: bool,
+    pub hangup: bool,
+    pub write_error: bool,
+}
+
 struct Description {
     id: DescriptionId,
     access: Access,
     ready: bool,
+    writer_seen: bool,
 }
 
 #[derive(Default)]
@@ -76,11 +87,15 @@ impl Channel {
             id,
             access,
             ready: nonblocking || opposite_present,
+            writer_seen: access == Access::Read && opposite_present,
         });
         self.last_id = next;
         for entry in &mut self.descriptions {
             if entry.access != access {
                 entry.ready = true;
+                if access == Access::Write {
+                    entry.writer_seen = true;
+                }
             }
         }
         Ok(id)
@@ -98,6 +113,27 @@ impl Channel {
             buffered_bytes: self.data.len(),
             readers,
             writers: self.descriptions.len() - readers,
+        })
+    }
+
+    /// Report POSIX-facing readiness separately from native completion signals:
+    /// an initial reader can read EOF without yet reporting a poll hangup.
+    pub fn readiness(&self, id: DescriptionId) -> Result<Readiness, Error> {
+        let entry = self.description(id)?;
+        let state = self.observe(id)?;
+        Ok(Readiness {
+            open_ready: entry.ready,
+            readable: entry.ready && entry.access == Access::Read && !self.data.is_empty(),
+            writable: entry.ready
+                && entry.access == Access::Write
+                && state.readers != 0
+                && self.data.len() < BUFFER_CAPACITY,
+            end_of_stream: entry.ready && entry.access == Access::Read && state.writers == 0,
+            hangup: entry.ready
+                && entry.access == Access::Read
+                && entry.writer_seen
+                && state.writers == 0,
+            write_error: entry.ready && entry.access == Access::Write && state.readers == 0,
         })
     }
 

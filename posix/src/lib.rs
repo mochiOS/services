@@ -4,6 +4,7 @@ use mochios_posix_protocol as protocol;
 
 pub mod pty;
 pub mod fifo;
+pub mod fifo_provider;
 pub mod pty_factory;
 pub mod pty_observation;
 pub mod pty_metadata;
