@@ -47,11 +47,27 @@ mod native {
         u64::from_le_bytes(h.finalize()[..8].try_into().unwrap())
     }
     fn authorize(handle: u32) {
+        let mut hash = Sha256::new();
+        let mut offset = 0u64;
+        let mut bytes = [0; mnu_abi::provider::MAX_DATA_LEN];
+        loop {
+            let count = p::handle::read_at(handle, &mut bytes, offset).unwrap();
+            if count == 0 {
+                break;
+            }
+            offset += count as u64;
+            assert!(offset <= 64 * 1024 * 1024);
+            hash.update(&bytes[..count]);
+        }
+        let digest: [u8; 32] = hash.finalize().into();
+        authorize_digest(handle, &digest);
+    }
+    fn authorize_digest(handle: u32, digest: &[u8; 32]) {
         let endpoint =
             u32::try_from(p::process::find_by_name("capability.service").unwrap()).unwrap();
         let mut request = [0; 300];
         let length =
-            p::capability::encode_authorize_exec_object_request(KEY, &mut request).unwrap();
+            p::capability::encode_authorize_exec_object_request(KEY, digest, &mut request).unwrap();
         let mut objects = p::ipc::IpcObjectHandles::default();
         objects.count = 1;
         objects.handles[0] = p::ipc::IpcObjectHandle {
@@ -70,6 +86,23 @@ mod native {
     fn child(case: usize) {
         unsafe {
             alarm(60);
+        }
+        if case == 4 {
+            // The calling thread owns this Provider and never serves it. Any
+            // broker-side I/O would deadlock the global authorization loop.
+            let endpoint = p::ipc::create_handle().unwrap();
+            let object = p::handle::create_provider_object(
+                endpoint,
+                200,
+                mnu_abi::HANDLE_RIGHT_READ | mnu_abi::HANDLE_RIGHT_TRANSFER,
+            )
+            .unwrap();
+            authorize_digest(object, &[0; 32]);
+            p::handle::close(object).unwrap();
+            p::handle::close(endpoint).unwrap();
+            unsafe {
+                _exit(0);
+            }
         }
         let client = Client::from_launch_context().unwrap();
         let path = "/tmp/object-exec-200";
@@ -182,6 +215,7 @@ mod native {
             "changed image bytes cannot use the digest-bound permit",
             "authority revoked after authorization cannot be restored",
             "retained FileHandle works after ambient read authority is dropped",
+            "unresponsive caller-owned Provider cannot block the broker",
         ]
         .iter()
         .enumerate()

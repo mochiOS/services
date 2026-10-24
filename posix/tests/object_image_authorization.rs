@@ -1,15 +1,11 @@
-//! Execute the broker's actual admission/hash/authorization logic with controlled
-//! native boundaries. Real IPC and image replacement are separate native tests.
+//! Execute the broker's actual admission/authorization logic. No I/O on a
+//! supplied Provider is allowed in this serialized service.
 extern crate alloc;
 extern crate self as mochi_user_platform;
 extern crate self as mochi_user_syscall;
-use sha2::{Digest, Sha256};
 use std::cell::RefCell;
-
 pub const EACCES: u64 = (-13i64) as u64;
-pub const EFBIG: u64 = (-27i64) as u64;
 pub const EINVAL: u64 = (-22i64) as u64;
-pub const EIO: u64 = (-5i64) as u64;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SysError(i64);
 impl SysError {
@@ -19,21 +15,15 @@ impl SysError {
 }
 #[derive(Default)]
 struct State {
-    bytes: Vec<u8>,
-    chunk: usize,
     allowed: bool,
-    read_calls: usize,
-    fail_read: bool,
-    oversize_read: bool,
-    generated_size: Option<u64>,
     issued: Vec<(u64, String, Vec<u8>)>,
     issue_error: Option<SysError>,
 }
-thread_local! { static STATE: RefCell<State> = RefCell::new(State::default()); }
+thread_local! {static STATE:RefCell<State>=RefCell::new(State::default());}
 pub mod capability {
     pub use mochios_capability_protocol::decode_authorize_exec_object_request;
-    pub fn check_thread(sender: u64, cap: &str) -> Result<u64, crate::SysError> {
-        assert_eq!((sender, cap), (77, "process.spawn"));
+    pub fn check_thread(sender: u64, name: &str) -> Result<u64, crate::SysError> {
+        assert_eq!((sender, name), (77, "process.spawn"));
         Ok(crate::STATE.with_borrow(|s| u64::from(s.allowed)))
     }
 }
@@ -42,153 +32,110 @@ pub mod ipc {
 }
 pub mod handle {
     pub const HANDLE_RIGHT_READ: u64 = mnu_abi::HANDLE_RIGHT_READ;
-    pub fn read_at(handle: u32, output: &mut [u8], offset: u64) -> Result<usize, crate::SysError> {
-        assert_eq!(handle, 19);
-        crate::STATE.with_borrow_mut(|s| {
-            s.read_calls += 1;
-            if s.fail_read {
-                return Err(crate::SysError(-123));
-            }
-            if s.oversize_read {
-                return Ok(output.len() + 1);
-            }
-            let size = s.generated_size.unwrap_or(s.bytes.len() as u64);
-            let count = size
-                .saturating_sub(offset)
-                .min(output.len() as u64)
-                .min(s.chunk as u64) as usize;
-            if s.generated_size.is_some() {
-                output[..count].fill(0x5a);
-            } else {
-                output[..count].copy_from_slice(
-                    &s.bytes[offset.min(size) as usize..offset.min(size) as usize + count],
-                );
-            }
-            Ok(count)
-        })
+    pub fn read_at(_: u32, _: &mut [u8], _: u64) -> Result<usize, crate::SysError> {
+        panic!("broker read an untrusted Provider")
     }
 }
 pub mod service {
     pub fn authorize_exec_for_requester(
         sender: u64,
-        identity: &str,
+        key: &str,
         fields: &[u8],
         caps: &[u8],
     ) -> Result<u64, crate::SysError> {
         assert!(caps.is_empty());
         crate::STATE.with_borrow_mut(|s| {
-            if let Some(error) = s.issue_error {
-                return Err(error);
+            if let Some(e) = s.issue_error {
+                return Err(e);
             }
-            s.issued.push((sender, identity.into(), fields.to_vec()));
+            s.issued.push((sender, key.into(), fields.to_vec()));
             Ok(0)
         })
     }
 }
 #[path = "../../capability/src/object_image.rs"]
 mod object_image;
-
-fn request() -> Vec<u8> {
-    let mut output = vec![0; 300];
-    let len = mochios_capability_protocol::encode_authorize_exec_object_request(
+fn request(digest: [u8; 32]) -> Vec<u8> {
+    let mut b = vec![0; 300];
+    let n = mochios_capability_protocol::encode_authorize_exec_object_request(
         "opaque:retained",
-        &mut output,
+        &digest,
+        &mut b,
     )
     .unwrap();
-    output.truncate(len);
-    output
+    b.truncate(n);
+    b
 }
 fn attachment() -> ipc::IpcObjectHandles {
-    let mut objects = ipc::IpcObjectHandles::default();
-    objects.count = 1;
-    objects.handles[0] = ipc::IpcObjectHandle {
+    let mut a = ipc::IpcObjectHandles::default();
+    a.count = 1;
+    a.handles[0] = ipc::IpcObjectHandle {
         handle: 19,
         reserved: 0,
         rights: handle::HANDLE_RIGHT_READ,
     };
-    objects
+    a
 }
 fn reset() {
     STATE.with_borrow_mut(|s| {
         *s = State {
-            bytes: (0..17001).map(|n| (n % 251) as u8).collect(),
-            chunk: 17,
             allowed: true,
             ..Default::default()
         }
     });
 }
-
 #[test]
-fn short_positional_reads_bind_exact_digest_without_identity_or_grant_overrides() {
-    for size in [0, 1, 4095, 4096, 4097, 17001] {
+fn caller_digest_can_only_select_bytes_within_its_current_security_domain() {
+    for digest in [[0; 32], [0x5a; 32], [0xff; 32]] {
         reset();
-        STATE.with_borrow_mut(|s| s.bytes.truncate(size));
-        object_image::authorize(77, &request(), &attachment()).unwrap();
-        STATE.with_borrow(|s| {
-            assert_eq!(s.issued.len(),1);
-            let (sender,key,fields)=&s.issued[0];assert_eq!((*sender,key.as_str()),(77,"opaque:retained"));
-            let digest: [u8;32]=Sha256::digest(&s.bytes).into();
-            let hex=digest.iter().map(|b|format!("{b:02x}")).collect::<String>();
-            use mnu_abi::exec::*;
-            let expected=format!("{EXEC_AUTHORIZATION_KIND_PREFIX}{EXEC_AUTHORIZATION_KIND_IMAGE_REPLACE_INHERIT}\0{EXEC_AUTHORIZATION_CLASS_PREFIX}unprivileged\0{EXECUTABLE_DIGEST_PREFIX}{hex}\0\0");
-            assert_eq!(fields,expected.as_bytes());
-        });
+        object_image::authorize(77, &request(digest), &attachment()).unwrap();
+        STATE.with_borrow(|s|{
+   assert_eq!(s.issued.len(),1);let(sender,key,fields)=&s.issued[0];assert_eq!((*sender,key.as_str()),(77,"opaque:retained"));
+   let hex=digest.iter().map(|b|format!("{b:02x}")).collect::<String>();use mnu_abi::exec::*;
+   let expected=format!("{EXEC_AUTHORIZATION_KIND_PREFIX}{EXEC_AUTHORIZATION_KIND_IMAGE_REPLACE_INHERIT}\0{EXEC_AUTHORIZATION_CLASS_PREFIX}unprivileged\0{EXECUTABLE_DIGEST_PREFIX}{hex}\0\0");
+   assert_eq!(fields,expected.as_bytes());
+  });
+    }
+    let source = include_str!("../../capability/src/object_image.rs");
+    for forbidden in ["handle::read", "read_file(", "open_at(", "find_by_name("] {
+        assert!(
+            !source.contains(forbidden),
+            "broker performs external I/O: {forbidden}"
+        );
     }
 }
-
 #[test]
-fn malformed_delivery_and_missing_authority_never_read_or_publish() {
+fn malformed_delivery_and_missing_authority_never_publish() {
     for case in 0..9 {
         reset();
-        let mut objects = attachment();
-        let mut request = request();
+        let mut a = attachment();
+        let mut b = request([1; 32]);
         match case {
-            0 => objects.count = 0,
-            1 => objects.count = 2,
-            2 => objects.delivery_flags = mnu_abi::IPC_DELIVERY_NATIVE_OBJECT,
-            3 => objects.handles[0].handle = 0,
-            4 => objects.handles[0].reserved = 1,
-            5 => objects.handles[0].rights = 0,
-            6 => objects.handles[0].rights |= mnu_abi::HANDLE_RIGHT_WRITE,
+            0 => a.count = 0,
+            1 => a.count = 2,
+            2 => a.delivery_flags = mnu_abi::IPC_DELIVERY_NATIVE_OBJECT,
+            3 => a.handles[0].handle = 0,
+            4 => a.handles[0].reserved = 1,
+            5 => a.handles[0].rights = 0,
+            6 => a.handles[0].rights |= mnu_abi::HANDLE_RIGHT_WRITE,
             7 => STATE.with_borrow_mut(|s| s.allowed = false),
-            _ => request[4] ^= 1,
+            _ => b[4] ^= 1,
         }
-        assert!(object_image::authorize(77, &request, &objects).is_err());
-        STATE.with_borrow(|s| {
-            assert_eq!(s.read_calls, 0);
-            assert!(s.issued.is_empty());
-        });
-    }
-}
-
-#[test]
-fn read_failures_excess_bytes_and_native_authorization_errors_are_preserved() {
-    for case in 0..4 {
-        reset();
-        STATE.with_borrow_mut(|s| match case {
-            0 => s.fail_read = true,
-            1 => s.oversize_read = true,
-            2 => {
-                s.generated_size = Some(64 * 1024 * 1024 + 1);
-                s.chunk = 4096;
-            }
-            _ => s.issue_error = Some(SysError(-321)),
-        });
-        let expected = match case {
-            0 => SysError(-123),
-            1 => SysError(EIO as i64),
-            2 => SysError(EFBIG as i64),
-            _ => SysError(-321),
-        };
-        assert_eq!(
-            object_image::authorize(77, &request(), &attachment()),
-            Err(expected)
-        );
+        assert!(object_image::authorize(77, &b, &a).is_err());
         STATE.with_borrow(|s| assert!(s.issued.is_empty()));
     }
+}
+#[test]
+fn native_errors_and_received_reference_cleanup_are_preserved() {
+    reset();
+    STATE.with_borrow_mut(|s| s.issue_error = Some(SysError(-321)));
+    assert_eq!(
+        object_image::authorize(77, &request([2; 32]), &attachment()),
+        Err(SysError(-321))
+    );
+    STATE.with_borrow(|s| assert!(s.issued.is_empty()));
     let server = include_str!("../../capability/src/server.rs");
-    let branch = server
+    let b = server
         .split("if opcode == platform::capability::AUTHORIZE_EXEC_OBJECT_OPCODE {")
         .nth(1)
         .unwrap()
@@ -196,11 +143,10 @@ fn read_failures_excess_bytes_and_native_authorization_errors_are_preserved() {
         .next()
         .unwrap();
     assert!(
-        branch.find("crate::object_image::authorize").unwrap()
-            < branch.find("close_received_handles(&attached)").unwrap()
+        b.find("crate::object_image::authorize").unwrap()
+            < b.find("close_received_handles(&attached)").unwrap()
     );
     assert!(
-        branch.find("close_received_handles(&attached)").unwrap()
-            < branch.find("capability_reply").unwrap()
+        b.find("close_received_handles(&attached)").unwrap() < b.find("capability_reply").unwrap()
     );
 }
