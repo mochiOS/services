@@ -72,9 +72,7 @@ pub(crate) fn run() -> ! {
     if let Err(errno) = stack.start(now) {
         platform::logln!("network.service: DHCP startup deferred errno={}", errno);
     }
-    if let Some(target) = ready {
-        let _ = platform::service_ready::notify(target, 0);
-    }
+    notify_ready(ready, 0, &authority);
     let mut tls = TlsManager::new();
     let mut http = HttpManager::new();
 
@@ -484,9 +482,7 @@ fn unavailable(
     mut authority: crate::datagram_authority::Server,
 ) -> ! {
     let status = crate::status::failure_status(errno);
-    if let Some(target) = ready {
-        let _ = platform::service_ready::notify(target, status);
-    }
+    notify_ready(ready, status, &authority);
     let mut backend = crate::datagram::Loopback::new();
     let mut request = [0u8; IPC_BUFFER_LEN];
     let mut response = [0u8; IPC_BUFFER_LEN];
@@ -531,5 +527,24 @@ fn unavailable(
 fn close_received(handles: &platform::ipc::IpcObjectHandles) {
     for item in handles.handles.iter().take(handles.count as usize) {
         let _ = platform::handle::close(item.handle);
+    }
+}
+
+// Endpoint availability is independent of interface readiness. In no-NIC mode
+// this same endpoint still serves explicitly authorized loopback resources.
+fn notify_ready(
+    target: Option<platform::service_ready::Target>,
+    status: i32,
+    authority: &crate::datagram_authority::Server,
+) {
+    if let Some(target) = target {
+        if let Some(endpoint) = authority.control_endpoint() {
+            let rights = mnu_abi::HANDLE_RIGHT_SEND
+                | mnu_abi::HANDLE_RIGHT_DUPLICATE
+                | mnu_abi::HANDLE_RIGHT_TRANSFER;
+            let _ = platform::service_ready::notify_handle(target, status, endpoint, rights);
+        } else {
+            let _ = platform::service_ready::notify(target, if status == 0 { -5 } else { status });
+        }
     }
 }

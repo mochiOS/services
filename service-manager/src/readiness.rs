@@ -74,6 +74,8 @@ pub(crate) struct ReadyHandshake {
     input_status: platform::service_ready::OneShotStatus,
     display_status: platform::service_ready::OneShotStatus,
     network_status: platform::service_ready::OneShotStatus,
+    network_endpoint: Option<platform::handle::Handle>,
+    network_endpoint_process: Option<u64>,
     user_status: platform::service_ready::OneShotStatus,
     keychain_status: platform::service_ready::OneShotStatus,
     secure_ui_status: platform::service_ready::OneShotStatus,
@@ -232,6 +234,8 @@ impl ReadyHandshake {
             input_status: platform::service_ready::OneShotStatus::new(),
             display_status: platform::service_ready::OneShotStatus::new(),
             network_status: platform::service_ready::OneShotStatus::new(),
+            network_endpoint: None,
+            network_endpoint_process: None,
             user_status: platform::service_ready::OneShotStatus::new(),
             keychain_status: platform::service_ready::OneShotStatus::new(),
             secure_ui_status: platform::service_ready::OneShotStatus::new(),
@@ -339,6 +343,7 @@ impl ReadyHandshake {
                         token,
                         status,
                         endpoint,
+                        source_process: _,
                     } => {
                         if token != self.token_for(service)
                             || status != 0
@@ -369,6 +374,28 @@ impl ReadyHandshake {
                 return Err(ReadyError::TimedOut);
             }
             platform::thread::yield_now();
+        }
+    }
+
+    /// Interface failure does not invalidate a live loopback/control endpoint.
+    pub(crate) fn take_network_endpoint(
+        &mut self,
+        target: impl Into<ProcessWatchTarget>,
+    ) -> Result<Option<platform::handle::Handle>, ReadyError> {
+        let Some(endpoint) = self.network_endpoint.take() else {
+            return Ok(None);
+        };
+        let owner = self.network_endpoint_process.take();
+        let expected = ProcessWatch::open(target).and_then(|process| process.process_id());
+        match expected {
+            Ok(expected) if owner == Some(expected) => Ok(Some(endpoint)),
+            result => {
+                let _ = platform::handle::close(endpoint);
+                Err(result
+                    .err()
+                    .map(ReadyError::ProcessStatus)
+                    .unwrap_or(ReadyError::InvalidMessage))
+            }
         }
     }
 
@@ -464,7 +491,21 @@ impl ReadyHandshake {
                         token,
                         status,
                         endpoint,
+                        source_process,
                     } => {
+                        if token == self.network_token {
+                            if self.network_endpoint.is_some()
+                                || self.network_status.get().is_some()
+                                || status > 0
+                            {
+                                let _ = platform::handle::close(endpoint);
+                                return Err(ReadyError::InvalidMessage);
+                            }
+                            self.network_endpoint = Some(endpoint);
+                            self.network_endpoint_process = Some(source_process);
+                            self.record(token, status)?;
+                            continue;
+                        }
                         if token != self.posix_token || status != 0 || self.posix_endpoint.is_some()
                         {
                             let _ = platform::handle::close(endpoint);
@@ -531,6 +572,7 @@ pub(crate) fn wait_for_published_endpoint(
                     token: received,
                     status,
                     endpoint,
+                    source_process: _,
                 } => {
                     if received == token && status == 0 {
                         return Ok(endpoint);
@@ -570,6 +612,7 @@ enum ReceivedNotification {
         token: u64,
         status: i32,
         endpoint: platform::handle::Handle,
+        source_process: u64,
     },
     Deferred(DeferredMessage),
 }
@@ -622,6 +665,8 @@ fn decode_received_notification(
             token,
             status,
             endpoint: attached.handle,
+            source_process: platform::ipc::endpoint_owner_process(sender)
+                .map_err(|error| ReadyError::Ipc(error.raw().unsigned_abs()))?,
         });
     }
     if handles.count != 0 {
@@ -698,6 +743,7 @@ mod tests {
                 token: 7,
                 status: 0,
                 endpoint: 41,
+                ..
             })
         ));
     }

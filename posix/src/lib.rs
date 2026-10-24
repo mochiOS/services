@@ -28,6 +28,7 @@ pub mod named_semaphore;
 pub mod shared_memory;
 pub mod shared_memory_file;
 pub mod socket;
+pub mod network_bootstrap;
 pub mod inet_datagram;
 #[cfg(target_os = "mochios")]
 pub mod inet_datagram_native;
@@ -851,6 +852,7 @@ pub struct PosixService<H: Copy = u32> {
     prepared_forks: Vec<(u64, fork_state::ForkState<H>)>,
     next_fork_token: u64,
     bootstrap_process_id: Option<u64>,
+    network_endpoint: Option<H>,
     sessions: BTreeMap<u64, Session>,
     directories: BTreeMap<u64, SessionDirectories<H>>,
     processes: BTreeMap<u64, H>,
@@ -898,6 +900,7 @@ impl PosixService<u32> {
             prepared_forks: Vec::new(),
             next_fork_token: 1,
             bootstrap_process_id: None,
+            network_endpoint: None,
             sessions: BTreeMap::new(),
             directories: BTreeMap::new(),
             processes: BTreeMap::new(),
@@ -3868,6 +3871,7 @@ impl<H: Copy> PosixService<H> {
             | protocol::OP_PROCESS_LAUNCH_ABORT
             | protocol::OP_PROCESS_TREE_TERMINATE
             | protocol::OP_PROCESS_TREE_RECLAIM
+            | protocol::OP_NETWORK_ENDPOINT_INSTALL
             | protocol::OP_PROCESS_INITIALIZE
             | protocol::OP_WAIT_CHILD
             | protocol::OP_PROCESS_STOPPED

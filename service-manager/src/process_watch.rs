@@ -66,6 +66,12 @@ impl ProcessWatch {
         Ok(Self { handle })
     }
 
+    pub(crate) fn process_id(&self) -> Result<u64, ProcessWatchError> {
+        platform::process::handle_status(self.handle)
+            .map(|status| status.process_id)
+            .map_err(|error| ProcessWatchError::ReadStatus(error.raw().unsigned_abs()))
+    }
+
     pub(crate) fn exit_status(&self) -> Result<Option<i32>, ProcessWatchError> {
         let status = platform::process::handle_status(self.handle)
             .map_err(|error| ProcessWatchError::ReadStatus(error.raw().unsigned_abs()))?;

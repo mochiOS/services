@@ -1259,6 +1259,21 @@ fn main() {
                 })
             }
             (Some(peer), Some((header, payload)), true)
+                if header.opcode == protocol::OP_NETWORK_ENDPOINT_INSTALL =>
+            {
+                let status = posix_service::network_bootstrap::install(
+                    &mut service, peer, header, payload, &attachments,
+                );
+                if status.is_ok() {
+                    retained_handle = Some(attachments[0].handle);
+                    platform::logln!("posix.service: network endpoint installed");
+                }
+                Some(posix_service::ObjectResponse {
+                    response: status_response(header.request_id, status.err().unwrap_or(0)),
+                    handles: Vec::new(),
+                })
+            }
+            (Some(peer), Some((header, payload)), true)
                 if header.opcode == protocol::OP_PROCESS_INITIALIZE
                     && header.flags == 0
                     && attachments.len() == 1 =>

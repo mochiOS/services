@@ -222,6 +222,45 @@ impl Runtime {
             None => Err(ReadyError::InvalidMessage),
         };
         if service == ReadyService::Network {
+            let endpoint = self.ready.as_mut().and_then(|handshake| {
+                match handshake.take_network_endpoint(process_target) {
+                    Ok(endpoint) => endpoint,
+                    Err(error) => {
+                        log_ready_error(ReadyService::Network, error);
+                        None
+                    }
+                }
+            });
+            if let Some(endpoint) = endpoint {
+                let installed = self.posix_endpoint.ok_or(-6).and_then(|posix| {
+                    let client = mochios_posix_client::Client::new(
+                        mochios_posix_client::SyscallEndpointTransport::new(posix),
+                    );
+                    client
+                        .install_network_endpoint(mochios_posix_client::ObjectHandleAttachment {
+                            handle: endpoint,
+                            rights: mochios_posix_protocol::network::endpoint_rights(),
+                        })
+                        .map_err(|error| match error {
+                            mochios_posix_client::ClientError::Remote(status) => status,
+                            mochios_posix_client::ClientError::Transport(error) => {
+                                mochios_posix_protocol::status::normalize_failure(error.raw())
+                            }
+                            _ => -5,
+                        })
+                });
+                let _ = platform::handle::close(endpoint);
+                match installed {
+                    Ok(()) => {
+                        eprintln!("service-manager.service: network endpoint handed to POSIX");
+                        platform::logln!("service-manager.service: network endpoint handed to POSIX");
+                    }
+                    Err(status) => platform::logln!(
+                        "service-manager.service: network endpoint handoff failed status={}",
+                        status
+                    ),
+                }
+            }
             if let Some(handshake) = self.ready.as_mut() {
                 self.deferred_requests.extend(handshake.take_deferred());
             }

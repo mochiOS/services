@@ -26,6 +26,9 @@ impl Server {
             packets: Vec::new(),
         }
     }
+    pub(crate) fn control_endpoint(&self) -> Option<u32> {
+        self.endpoint.as_ref().ok().copied()
+    }
     /// Returns true only for this protocol/Provider namespace. All attachments
     /// remain owned by the caller, including malformed/denied requests.
     pub(crate) fn dispatch(
