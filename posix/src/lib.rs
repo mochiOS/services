@@ -7,6 +7,7 @@ pub mod fifo;
 pub mod fifo_provider;
 pub mod fifo_inode;
 pub mod fifo_manager;
+pub mod fifo_wait;
 pub mod pty_factory;
 pub mod pty_observation;
 pub mod filesystem_reference;

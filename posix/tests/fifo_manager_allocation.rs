@@ -83,3 +83,48 @@ fn every_new_channel_allocation_failure_releases_metadata_before_native_creation
         assert_eq!(closed.load(Ordering::Relaxed), 2);
     }
 }
+
+#[test]
+fn wait_allocation_failure_closes_lease_before_native_creation_and_can_retry() {
+    use posix_service::{fifo::WaitCondition, fifo_wait::Waits};
+    struct Lease(Arc<AtomicUsize>);
+    impl Drop for Lease {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    let scope = FilesystemScope::new().unwrap();
+    let closed = Arc::new(AtomicUsize::new(0));
+    let leases = Arc::new(AtomicUsize::new(0));
+    let mut manager = Manager::default();
+    let reader = helpers::open(
+        &mut manager,
+        helpers::admit(scope, 99, Access::Read, &closed),
+    );
+    let mut waits = Waits::default();
+    let lease = Lease(leases.clone());
+    FAIL_AFTER.set(Some(0));
+    let result = waits.register(
+        &manager,
+        reader.object_id,
+        WaitCondition::Open,
+        lease,
+        |_| panic!("allocation must precede native publication"),
+    );
+    assert_eq!(FAIL_AFTER.replace(None), None);
+    assert_eq!(result.err(), Some(-12));
+    assert_eq!(leases.load(Ordering::Relaxed), 1);
+    let job = waits
+        .register(
+            &manager,
+            reader.object_id,
+            WaitCondition::Open,
+            Lease(leases.clone()),
+            |_| Ok(1),
+        )
+        .unwrap();
+    assert!(job.ready);
+    waits.release(job.object_id).unwrap();
+    assert_eq!(leases.load(Ordering::Relaxed), 2);
+    helpers::release(&mut manager, reader.object_id);
+}

@@ -16,6 +16,15 @@ pub enum Access {
     Write,
 }
 
+/// An operation to retry after a one-shot notification. This is POSIX policy;
+/// the kernel only sees the notification object's ordinary native signals.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WaitCondition {
+    Open,
+    Read,
+    Write(usize),
+}
+
 /// Owner-local description token; never an authentication token or an FD.
 /// Duplicated/transferred native references share it. Release it only when the
 /// native provider reports the last reference, not on each dup/fork FD close.
@@ -147,6 +156,37 @@ impl Channel {
                 && state.writers == 0,
             write_error: entry.ready && entry.access == Access::Write && state.readers == 0,
         })
+    }
+
+    /// Inspect without consuming data. A write waits for its complete atomic
+    /// prefix, not merely the generic WRITABLE signal's one-byte capacity.
+    /// EOF and no-readers errors wake the caller so its next operation can
+    /// finish; they are not successful data transfers in this method.
+    pub fn wait_ready(&self, id: DescriptionId, condition: WaitCondition) -> Result<bool, Error> {
+        let entry = self.description(id)?;
+        match condition {
+            WaitCondition::Open => Ok(entry.ready),
+            WaitCondition::Read => {
+                if entry.access != Access::Read {
+                    return Err(Error::WrongAccess);
+                }
+                let ready = self.readiness(id)?;
+                Ok(ready.readable || ready.end_of_stream)
+            }
+            WaitCondition::Write(length) => {
+                if entry.access != Access::Write {
+                    return Err(Error::WrongAccess);
+                }
+                let ready = self.readiness(id)?;
+                let required = if length <= mochios_posix_protocol::PIPE_BUF {
+                    length
+                } else {
+                    1
+                };
+                Ok(ready.open_ready
+                    && (ready.write_error || required <= BUFFER_CAPACITY - self.data.len()))
+            }
+        }
     }
 
     pub fn read(&mut self, id: DescriptionId, output: &mut [u8]) -> Result<usize, Error> {

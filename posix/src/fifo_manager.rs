@@ -1,7 +1,7 @@
 //! Inode-scoped FIFO ownership. Keys are derived only from a validated reply
 //! from the caller's held filesystem endpoint, never from a public request.
 use crate::{
-    fifo::{Access, Channel, DescriptionId, Error, Readiness},
+    fifo::{Access, Channel, DescriptionId, Error, Readiness, WaitCondition},
     fifo_inode,
     fifo_provider::{self, Binding},
     filesystem_reference::Reference,
@@ -12,6 +12,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 pub const MAX_CHANNELS: usize = 128;
 pub const MAX_DESCRIPTIONS: usize = 1024;
+// Notification objects use the upper half of the positive object ID space.
+// Neither these IDs nor their tags grant authority; native Handle delivery does.
+pub const MAX_DATA_OBJECT_ID: u64 = (1 << 62) - 1;
 static NEXT_SCOPE: AtomicU64 = AtomicU64::new(1);
 
 /// Local namespace for one held filesystem authority. Allocate a fresh scope
@@ -157,7 +160,7 @@ impl Manager {
         let id = self
             .last_id
             .checked_add(1)
-            .filter(|id| *id <= i64::MAX as u64)
+            .filter(|id| *id <= MAX_DATA_OBJECT_ID)
             .ok_or(-75)?;
         self.last_id = id; // Never reuse an ID, even after native creation fails.
         let rights = mnu_abi::HANDLE_RIGHT_CONTROL
@@ -224,6 +227,31 @@ impl Manager {
             .channel
             .readiness(opened.description)
             .map_err(|_| -9)
+    }
+
+    pub(crate) fn wait_target(
+        &self,
+        object_id: u64,
+        condition: WaitCondition,
+    ) -> Result<(ChannelKey, bool), i32> {
+        if matches!(condition, WaitCondition::Write(0)) {
+            return Err(-22);
+        }
+        let opened = self
+            .opens
+            .iter()
+            .find(|entry| entry.id == object_id)
+            .ok_or(-9)?;
+        let channel = self
+            .channels
+            .iter()
+            .find(|entry| entry.key == opened.key)
+            .ok_or(-5)?;
+        let ready = channel
+            .channel
+            .wait_ready(opened.description, condition)
+            .map_err(|_| -9)?;
+        Ok((opened.key, ready))
     }
 
     /// Update only the affected channel, including peers of a just-released
