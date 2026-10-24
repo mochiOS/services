@@ -8,52 +8,17 @@ use crate::{
 };
 use mnu_abi::{IpcObjectHandle, IpcObjectHandles};
 
-pub const MAGIC: &[u8; 4] = b"FIWT";
-pub const REQUEST_LEN: usize = 16;
+pub const MAGIC: &[u8; 4] = mochios_posix_protocol::fifo::WAIT_MAGIC;
+pub const REQUEST_LEN: usize = mochios_posix_protocol::fifo::WAIT_LEN;
 pub const JOB_RIGHTS: u64 = mochios_posix_protocol::fifo::NOTIFICATION_RIGHTS;
-const DIRECTIONS: u64 = mnu_abi::HANDLE_RIGHT_READ | mnu_abi::HANDLE_RIGHT_WRITE;
-
 pub fn encode(condition: WaitCondition) -> Result<[u8; REQUEST_LEN], i32> {
-    let (kind, length) = match condition {
-        WaitCondition::Open => (0u16, 0),
-        WaitCondition::Read => (1, 0),
-        WaitCondition::Write(0) => return Err(-22),
-        WaitCondition::Write(length) => (2, u64::try_from(length).map_err(|_| -22)?),
-    };
-    let mut request = [0; REQUEST_LEN];
-    request[..4].copy_from_slice(MAGIC);
-    request[4..6].copy_from_slice(&1u16.to_le_bytes());
-    request[6..8].copy_from_slice(&kind.to_le_bytes());
-    request[8..].copy_from_slice(&length.to_le_bytes());
-    Ok(request)
+    condition.encode().map_err(|_| -22)
 }
-
 fn decode(bytes: &[u8]) -> Result<WaitCondition, i32> {
-    if bytes.len() != REQUEST_LEN || &bytes[..4] != MAGIC || bytes[4..6] != 1u16.to_le_bytes() {
-        return Err(-22);
-    }
-    let kind = u16::from_le_bytes(bytes[6..8].try_into().map_err(|_| -22)?);
-    let length = u64::from_le_bytes(bytes[8..].try_into().map_err(|_| -22)?);
-    match (kind, length) {
-        (0, 0) => Ok(WaitCondition::Open),
-        (1, 0) => Ok(WaitCondition::Read),
-        (2, 1..) => Ok(WaitCondition::Write(
-            usize::try_from(length).map_err(|_| -22)?,
-        )),
-        _ => Err(-22),
-    }
+    WaitCondition::decode(bytes).map_err(|_| -22)
 }
-
 fn direction(condition: WaitCondition, rights: u64) -> Result<u64, i32> {
-    let direction = rights & DIRECTIONS;
-    let allowed = match condition {
-        WaitCondition::Open => {
-            direction == mnu_abi::HANDLE_RIGHT_READ || direction == mnu_abi::HANDLE_RIGHT_WRITE
-        }
-        WaitCondition::Read => direction == mnu_abi::HANDLE_RIGHT_READ,
-        WaitCondition::Write(_) => direction == mnu_abi::HANDLE_RIGHT_WRITE,
-    };
-    if allowed { Ok(direction) } else { Err(-13) }
+    condition.source_direction(rights).ok_or(-13)
 }
 
 /// Until adoption, references remain in objects for the caller's cleanup.

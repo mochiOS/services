@@ -25,6 +25,7 @@ use user_copy_native::syscall_errno;
 #[path="{root}/user/crates/newlib-runtime/src/io_resources.rs"]mod io_resources;
 #[path="{root}/user/crates/posix-client/src/upcall_guard.rs"]pub mod upcall_guard;
 #[path="{root}/user/crates/posix-client/src/multiplex.rs"]pub mod multiplex;
+pub mod fd{{pub fn access_allows_read(flags:u32)->bool{{flags&3!=1}}pub fn access_allows_write(flags:u32)->bool{{flags&3!=0}}}}
 const MAX_FDS:usize=64;
 const EFAULT:i32=14;const EINVAL:i32=22;const EIO:i32=5;const EAGAIN:i32=11;
 const EBADF:i32=9;const EOVERFLOW:i32=75;const EINTR:i32=4;
@@ -35,9 +36,9 @@ const POLLNVAL:i16=32;const POLLHUP:i16=16;const POLLERR:i16=8;
 #[repr(C)]struct FdSet{{bits:[u64;1]}}
 #[repr(C)]struct Timeval{{tv_sec:i64,tv_usec:i64}}
 #[repr(C)]struct NewlibTimespec{{tv_sec:i64,tv_nsec:i64}}
-#[derive(Clone,Copy,PartialEq,Debug)]enum FdKind{{Unused,ObjectStreamRead,ObjectStreamWrite,ObjectPty,ObjectTerminalFile,ObjectSocket,ObjectDatagram,ObjectFile}}
+#[derive(Clone,Copy,PartialEq,Debug)]enum FdKind{{Unused,ObjectStreamRead,ObjectStreamWrite,ObjectPty,ObjectTerminalFile,ObjectSocket,ObjectDatagram,ObjectFile,ObjectFifo}}
 impl FdKind{{fn is_socket(self)->bool{{matches!(self,Self::ObjectSocket|Self::ObjectDatagram)}}}}
-#[derive(Clone,Copy)]struct Object{{kind:FdKind,lower_handle:u64}}
+#[derive(Clone,Copy)]struct Object{{kind:FdKind,lower_handle:u64,open_flags:i32}}
 #[derive(Clone,Copy)]struct FdEntry{{handle:Object}}
 struct Lease(FdEntry);
 impl std::ops::Deref for Lease{{type Target=FdEntry;fn deref(&self)->&FdEntry{{&self.0}}}}
@@ -58,7 +59,7 @@ fn with_fd_entry(fd:i32)->Result<Lease,i32>{{
     assert!(CONTROL.callback_resources.capture_for_fork().is_none());
     let kind=match fd{{3=>FdKind::ObjectStreamRead,4=>FdKind::ObjectSocket,5=>FdKind::ObjectDatagram,
         6=>FdKind::ObjectPty,7=>FdKind::ObjectTerminalFile,8=>FdKind::ObjectStreamWrite,9=>FdKind::ObjectFile,_=>return Err(EBADF)}};
-    PINS.fetch_add(1,Ordering::AcqRel);Ok(Lease(FdEntry{{handle:Object{{kind,lower_handle:(100+fd) as u64}}}}))
+    PINS.fetch_add(1,Ordering::AcqRel);Ok(Lease(FdEntry{{handle:Object{{kind,lower_handle:(100+fd) as u64,open_flags:0}}}}))
 }}
 fn assert_wait_owner(){{
     assert_eq!(PINS.load(Ordering::Acquire),EXPECTED_PINS.load(Ordering::Acquire));

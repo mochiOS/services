@@ -18,12 +18,7 @@ pub enum Access {
 
 /// An operation to retry after a one-shot notification. This is POSIX policy;
 /// the kernel only sees the notification object's ordinary native signals.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum WaitCondition {
-    Open,
-    Read,
-    Write(usize),
-}
+pub use mochios_posix_protocol::fifo::WaitCondition;
 
 /// Owner-local description token; never an authentication token or an FD.
 /// Duplicated/transferred native references share it. Release it only when the
@@ -65,6 +60,7 @@ struct Description {
     access: Access,
     ready: bool,
     writer_seen: bool,
+    status_flags: u32,
 }
 
 #[derive(Default)]
@@ -89,6 +85,11 @@ impl Channel {
             access,
             ready: nonblocking || opposite_present,
             writer_seen: access == Access::Read && opposite_present,
+            status_flags: if nonblocking {
+                mochios_filesystem_protocol::OPEN_STATUS_NONBLOCK
+            } else {
+                0
+            },
         });
         self.last_id = next;
         for entry in &mut self.descriptions {
@@ -135,6 +136,24 @@ impl Channel {
             readers,
             writers: self.descriptions.len() - readers,
         })
+    }
+
+    pub(crate) fn status_flags(&self, id: DescriptionId) -> Result<u32, Error> {
+        Ok(self.description(id)?.status_flags)
+    }
+    pub(crate) fn update_status_flags(
+        &mut self,
+        id: DescriptionId,
+        mask: u32,
+        flags: u32,
+    ) -> Result<(), Error> {
+        let entry = self
+            .descriptions
+            .iter_mut()
+            .find(|entry| entry.id == id)
+            .ok_or(Error::BadDescription)?;
+        entry.status_flags = (entry.status_flags & !mask) | (flags & mask);
+        Ok(())
     }
 
     /// Report POSIX-facing readiness separately from native completion signals:

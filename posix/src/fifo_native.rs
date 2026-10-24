@@ -225,8 +225,28 @@ pub fn open(
     objects: IpcObjectHandles,
     access: Access,
     nonblocking: bool,
+    append: bool,
 ) -> Result<posix_service::OpenCompletion<u32>, i32> {
     let registered = Worker::register(endpoint, header, payload, objects, access, nonblocking)?;
+    if append {
+        let bytes =
+            fs::description_flags::encode_update(fs::OPEN_STATUS_APPEND, fs::OPEN_STATUS_APPEND)
+                .ok_or(-22)?;
+        let update = platform::syscall::call6(
+            mnu_abi::SyscallNumber::HandleControl,
+            u64::from(registered.object.handle),
+            fs::description_flags::UPDATE,
+            bytes.as_ptr() as u64,
+            bytes.len() as u64,
+            0,
+            0,
+        )
+        .map_err(status);
+        if update != Ok(0) {
+            let _ = platform::handle::close(registered.object.handle);
+            return Err(update.err().unwrap_or(-5));
+        }
+    }
     if registered.ready {
         return Ok(posix_service::OpenCompletion::Ready(registered.object));
     }

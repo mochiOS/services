@@ -659,6 +659,33 @@ fn main() {
         } else {
             None
         };
+        let fifo_notification = if let (Some(_), Some((header, payload)), true, Some(_)) =
+            (peer, decoded, attachments_valid, request_image)
+        {
+            if header.opcode == protocol::OP_FIFO_WAIT {
+                Some(posix_service::fifo_request::execute(
+                    header,
+                    payload,
+                    &attachments,
+                    |source, condition| {
+                        posix_service::fifo_wait_ipc::query(
+                            filesystem.fifo_endpoint.ok_or(-5)?,
+                            mnu_abi::IpcObjectHandle {
+                                handle: source.handle,
+                                reserved: 0,
+                                rights: source.rights,
+                            },
+                            condition,
+                        )
+                    },
+                    |handle| { let _ = platform::handle::close(handle); },
+                ))
+            } else {
+                None
+            }
+        } else {
+            None
+        };
         let opened_socket = if let (Some(peer), Some((header, payload)), true, Some(_)) =
             (peer, decoded, attachments_valid, request_image)
         {
@@ -1146,6 +1173,15 @@ fn main() {
                 if header.opcode == protocol::OP_PROCESS_CPU_CLOCK =>
             {
                 Some(service.handle_process_clock(peer, header, payload, &attachments, &mut processes))
+            }
+            (Some(peer), Some(_), true) if fifo_notification.is_some() => {
+                let validation = request_image.ok_or(protocol::STATUS_EPERM)
+                    .and_then(|image| validate_pending_request_image(
+                        sender, peer, image, &mut service, &mut processes,
+                    ));
+                Some(posix_service::open_request::finish(
+                    fifo_notification.unwrap(), validation, &mut filesystem,
+                ))
             }
             (Some(peer), Some(_), true) if granted_pty.is_some() =>
             {
@@ -3127,7 +3163,10 @@ impl RuntimeFilesystem {
                         close_runtime_handles(&metadata);
                         return Err(-5);
                     };
-                    fifo_native::open(endpoint, reply, payload, metadata, access, nonblocking)
+                    fifo_native::open(
+                        endpoint, reply, payload, metadata, access, nonblocking,
+                        prepared.options & mochios_posix_protocol::OPEN_APPEND != 0,
+                    )
                 },
             )
         })();

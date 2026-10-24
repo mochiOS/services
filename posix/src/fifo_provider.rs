@@ -80,6 +80,13 @@ pub fn handle_provider_request(
     let maximum_data = if authenticated
         && attachment_count == 0
         && header.object_id == binding.object_id
+        && matches!(header.opcode, provider::OP_QUERY | provider::OP_CONTROL)
+        && header.basis == mochios_filesystem_protocol::description_flags::GET
+    {
+        4
+    } else if authenticated
+        && attachment_count == 0
+        && header.object_id == binding.object_id
         && header.opcode == provider::OP_READ
     {
         header.length as usize
@@ -99,6 +106,34 @@ pub fn handle_provider_request(
             .observe(binding.description)
             .map_err(status)
             .and_then(|_| match header.opcode {
+                provider::OP_QUERY | provider::OP_CONTROL
+                    if header.basis == mochios_filesystem_protocol::description_flags::GET =>
+                {
+                    if header.argument != 0 || !payload.is_empty() || header.length != 4 {
+                        return Err(-22);
+                    }
+                    data[..4].copy_from_slice(
+                        &channel
+                            .status_flags(binding.description)
+                            .map_err(status)?
+                            .to_le_bytes(),
+                    );
+                    Ok((4, 4))
+                }
+                provider::OP_CONTROL
+                    if header.basis == mochios_filesystem_protocol::description_flags::UPDATE =>
+                {
+                    if header.argument != 0 || header.length != 0 {
+                        return Err(-22);
+                    }
+                    let (mask, flags) =
+                        mochios_filesystem_protocol::description_flags::decode_update(payload)
+                            .ok_or(-22)?;
+                    channel
+                        .update_status_flags(binding.description, mask, flags)
+                        .map_err(status)?;
+                    Ok((0, 0))
+                }
                 provider::OP_MEMORY_OBJECT => Ok((0, 0)),
                 provider::OP_READ => channel
                     .read(binding.description, &mut data[..header.length as usize])

@@ -18,6 +18,7 @@ enum FdKind {
     ObjectFile,
     ObjectDirectory,
     ObjectSpecial,
+    ObjectFifo,
     ObjectStreamRead,
     ObjectStreamWrite,
     ObjectPty,

@@ -1422,6 +1422,7 @@ dependencies = [
  "getrandom 0.2.17",
  "libc",
  "mochi-user-platform",
+ "mochios-appcore",
  "mochios-keychain-protocol",
  "mochios-posix-client",
  "sha2",
@@ -1636,6 +1637,19 @@ name = "mochi-user-syscall"
 version = "0.1.0"
 dependencies = [
  "mnu-abi",
+]
+
+[[package]]
+name = "mochios-appcore"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "mochi-user-platform",
+ "mochios-keychain-protocol",
+ "mochios-posix-client",
+ "mochios-posix-protocol",
+ "mochios-workspace-protocol",
+ "zeroize",
 ]
 
 [[package]]
@@ -3107,6 +3121,7 @@ dependencies = [
  "mochi-user-syscall",
  "mochios-driver-control-protocol",
  "mochios-filesystem-protocol",
+ "mochios-keychain-protocol",
  "mochios-linux-portal-protocol",
  "mochios-package-protocol",
  "mochios-permission-prompt-protocol",
@@ -4660,11 +4675,3 @@ checksum = "27bc9d5b815bc103f142aa054f561d9187d191692ec7c2d1e2b4737f8dbd7296"
 dependencies = [
  "zune-core",
 ]
-
-[[patch.unused]]
-name = "mnu"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "mochi-user-runtime"
-version = "0.1.0"

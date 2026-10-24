@@ -34,7 +34,7 @@ const ENAMETOOLONG:i32=91;
 const PAGE_SIZE:usize=4096;
 #[repr(C)] struct IoVec {{ iov_base: *const c_void, iov_len: usize }}
 #[repr(C)] struct IoVecMut {{ iov_base: *mut c_void, iov_len: usize }}
-#[derive(Clone, Copy, PartialEq)] enum FdKind {{ ObjectStreamRead, ObjectStreamWrite, ObjectSocket, File }}
+#[derive(Clone, Copy, PartialEq)] enum FdKind {{ ObjectStreamRead, ObjectStreamWrite, ObjectSocket, ObjectFifo, File }}
 #[derive(Clone, Copy)] struct FdObject {{ kind: FdKind }}
 #[derive(Clone, Copy)] struct FdEntry {{ handle: FdObject }}
 struct Lease(FdEntry);

@@ -35,6 +35,7 @@ enum FdKind {
     Stderr,
     ObjectFile,
     ObjectSpecial,
+    ObjectFifo,
     ObjectDirectory,
     ObjectSharedMemory,
     ObjectSocket,

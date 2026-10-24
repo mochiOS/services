@@ -24,7 +24,7 @@ const EIO:c_int=5; const EPIPE:c_int=32; const EINTR:c_int=4;
 pub mod newlib_errno{{pub const EOPNOTSUPP:i32=95;pub fn from_status(value:i64)->i32{{-value as i32}}}}
 mod posix_protocol{{pub const SIGNAL_PIPE:u32=13;}}
 mod wire{{pub const CONTROL_GET_RECEIVE_TIMEOUT:u64=1;pub const CONTROL_GET_SEND_TIMEOUT:u64=2;}}
-#[derive(Clone,Copy,PartialEq,Debug)] enum FdKind{{ObjectSocket,ObjectDatagram,ObjectStreamRead,ObjectStreamWrite}}
+#[derive(Clone,Copy,PartialEq,Debug)] enum FdKind{{ObjectSocket,ObjectDatagram,ObjectStreamRead,ObjectStreamWrite,ObjectFifo}}
 impl FdKind{{fn is_socket(self)->bool{{true}}}}
 #[derive(Clone,Copy)] struct Object{{kind:FdKind,lower_handle:u64}}
 #[derive(Clone,Copy)] struct FdEntry{{handle:Object}}

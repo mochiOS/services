@@ -250,3 +250,73 @@ fn pending_open_and_wrong_direction_cannot_consume_or_produce_bytes() {
         Err(posix_service::fifo::Error::WouldBlock)
     );
 }
+
+#[test]
+fn status_updates_are_shared_by_native_references_and_preserve_other_bits() {
+    use mochios_filesystem_protocol::{
+        OPEN_STATUS_APPEND as APPEND, OPEN_STATUS_NONBLOCK as NB, description_flags as flags,
+    };
+    let mut channel = Channel::default();
+    let reader = channel.open(Access::Read, true).unwrap();
+    let binding = Binding::new(901, reader).unwrap();
+    let duplicate = Binding::new(901, reader).unwrap();
+    let native = mnu_abi::IPC_DELIVERY_NATIVE_OBJECT;
+    let request = |opcode, basis, length, payload: &[u8]| {
+        let mut bytes = vec![0; provider::REQUEST_HEADER_LEN + payload.len()];
+        provider::RequestHeader {
+            opcode,
+            object_id: 901,
+            argument: 0,
+            basis,
+            length,
+            data_length: payload.len() as u32,
+        }
+        .encode(payload, &mut bytes)
+        .unwrap();
+        bytes
+    };
+    let get = request(provider::OP_QUERY, flags::GET, 4, &[]);
+    assert_eq!(
+        call(&mut channel, binding, &get, native, 0).1,
+        NB.to_le_bytes()
+    );
+    let set = request(
+        provider::OP_CONTROL,
+        flags::UPDATE,
+        0,
+        &flags::encode_update(APPEND, APPEND).unwrap(),
+    );
+    assert_eq!(call(&mut channel, binding, &set, native, 0).0.status, 0);
+    assert_eq!(
+        call(&mut channel, duplicate, &get, native, 0).1,
+        (NB | APPEND).to_le_bytes()
+    );
+    let clear = request(
+        provider::OP_CONTROL,
+        flags::UPDATE,
+        0,
+        &flags::encode_update(NB, 0).unwrap(),
+    );
+    assert_eq!(call(&mut channel, duplicate, &clear, native, 0).0.status, 0);
+    assert_eq!(
+        call(&mut channel, binding, &get, native, 0).1,
+        APPEND.to_le_bytes()
+    );
+    let bad = request(provider::OP_CONTROL, flags::UPDATE, 0, &[255; 8]);
+    assert_eq!(call(&mut channel, binding, &bad, native, 0).0.status, -22);
+    assert_eq!(
+        call(&mut channel, binding, &get, native, 0).1,
+        APPEND.to_le_bytes()
+    );
+    let bad = request(
+        provider::OP_QUERY,
+        flags::UPDATE,
+        0,
+        &flags::encode_update(APPEND, 0).unwrap(),
+    );
+    assert_eq!(call(&mut channel, binding, &bad, native, 0).0.status, -95);
+    assert_eq!(
+        call(&mut channel, binding, &get, native, 0).1,
+        APPEND.to_le_bytes()
+    );
+}

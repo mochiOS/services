@@ -15,7 +15,8 @@ fn opened_terminal_files_keep_distinct_data_and_metadata_classification_across_h
 extern crate self as mnu_abi;
 #[path={:?}]mod abi;pub use abi::*;pub use abi::status;
 #[path={:?}]mod posix_protocol;pub use posix_protocol::*;
-type c_int=i32;const ENOTTY:i32=25;
+type c_int=i32;const ENOTTY:i32=25;const EIO:i32=5;
+mod syscall{{pub use mnu_abi::{{HANDLE_RIGHT_READ,HANDLE_RIGHT_WRITE}};}}
 #[derive(Clone,Copy)]struct ObjectHandleAttachment<H>{{handle:H,rights:u64}}
 thread_local!{{
  static ERROR:std::cell::Cell<i32>=const{{std::cell::Cell::new(0)}};
@@ -49,9 +50,11 @@ fn terminal_attributes(entry:(u64,u64,FdKind,i32))->Result<(),i32>{
     program.push_str(r#"
 fn main(){
  let object=ObjectHandleAttachment{handle:41,rights:0x1234};
- for (mode,kind) in [(0o100600,FdKind::ObjectFile),(0o040700,FdKind::ObjectDirectory),(0o010600,FdKind::ObjectSpecial)]{
+ for (mode,kind) in [(0o100600,FdKind::ObjectFile),(0o040700,FdKind::ObjectDirectory)]{
   QUERIES.set(0);assert!(file_kind::opened(object,mode).unwrap()==kind);assert_eq!(QUERIES.get(),0);
  }
+ for rights in [HANDLE_RIGHT_READ,HANDLE_RIGHT_WRITE]{assert!(file_kind::opened(ObjectHandleAttachment{handle:41,rights},0o010600)==Ok(FdKind::ObjectFifo));}
+ for rights in [0,HANDLE_RIGHT_READ|HANDLE_RIGHT_WRITE]{assert!(file_kind::opened(ObjectHandleAttachment{handle:41,rights},0o010600)==Err(EIO));}
  for (error,kind) in [(0,FdKind::ObjectTerminalFile),(25,FdKind::ObjectSpecial)]{
   ERROR.set(error);QUERIES.set(0);let result=file_kind::opened(object,0o020600).unwrap();assert!(result==kind);assert_eq!(QUERIES.get(),1);
  }
@@ -63,7 +66,7 @@ fn main(){
   let encoded=encode_inherited_fd_metadata(metadata).unwrap();let decoded=decode_inherited_fd_metadata(encoded).unwrap();
   assert_eq!(metadata,decoded);assert!(fd_kind_from_inherited(decoded.kind)==Some(FdKind::ObjectTerminalFile));
  }}
- assert!(encode_inherited_fd_metadata(InheritedFdMetadata{kind:15,open_flags:0,descriptor_flags:0}).is_none());
+ assert!(encode_inherited_fd_metadata(InheritedFdMetadata{kind:16,open_flags:0,descriptor_flags:0}).is_none());
 }
 "#);
     probe::run(&program);
