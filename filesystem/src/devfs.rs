@@ -9,6 +9,9 @@ use crate::service::permission_allows;
 use ext4plus::inode::InodeTimestamp;
 use mochios_filesystem_protocol as protocol;
 
+/// Enforced byte bound for one device namespace component.
+pub const NAME_BYTES_MAX: usize = 255;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NodeKind {
     Directory,
@@ -171,6 +174,30 @@ impl DeviceFilesystem {
         self.root.clone()
     }
 
+    /// No device contents are allocated as filesystem data blocks. Inode
+    /// capacity is the actual nonzero u32 ID domain used by register_node.
+    /// Retired IDs are never reused, even after the last retained Node drops.
+    pub fn volume_status(
+        &self,
+        node: &Node,
+        volume: u64,
+    ) -> Result<protocol::volume_status::Status, i32> {
+        self.validate(node)?;
+        let inodes = u64::from(u32::MAX);
+        let allocated = self.next_id.checked_sub(1).ok_or(5)?;
+        let free_inodes = inodes.checked_sub(allocated).ok_or(5)?;
+        Ok(protocol::volume_status::Status {
+            block_bytes: 1,
+            flags: 0,
+            blocks: 0,
+            free_blocks: 0,
+            inodes,
+            free_inodes,
+            filesystem_id: volume,
+            name_bytes_max: NAME_BYTES_MAX as u32,
+        })
+    }
+
     fn validate(&self, node: &Node) -> Result<(), i32> {
         if Arc::ptr_eq(&self.owner, &node.owner) {
             Ok(())
@@ -187,7 +214,7 @@ impl DeviceFilesystem {
         }
     }
     fn name(name: &[u8]) -> Result<(), i32> {
-        if name.len() > 255 {
+        if name.len() > NAME_BYTES_MAX {
             return Err(36);
         }
         if name.is_empty()

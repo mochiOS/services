@@ -238,3 +238,64 @@ fn provider_reply_validates_shape_and_reports_read_only_backend() {
     );
     assert_eq!(service.provider_volume_status(u64::MAX), Err(9));
 }
+
+#[test]
+fn device_volume_paths_and_retained_descriptions_use_the_same_namespace_accounting() {
+    use filesystem_service::devfs::DeviceFilesystem;
+    let fixture = Fixture::new();
+    let mut service = FilesystemService::new(fixture.volume("device-volume-status"));
+    service
+        .mount_devices(b"/devices", DeviceFilesystem::default())
+        .unwrap();
+    service
+        .mount_devices(b"/other-devices", DeviceFilesystem::default())
+        .unwrap();
+    let disk = path_status(&service, b"/").unwrap();
+    let devices = path_status(&service, b"/devices").unwrap();
+    let other = path_status(&service, b"/other-devices/null").unwrap();
+    assert_ne!(devices.filesystem_id, disk.filesystem_id);
+    assert_ne!(devices.filesystem_id, other.filesystem_id);
+    assert_eq!(devices.blocks, 0);
+    assert_eq!(devices.free_inodes, u64::from(u32::MAX) - 2);
+    for flags in [protocol::OPEN_AT_READ, protocol::OPEN_AT_WRITE] {
+        let opened = open(
+            &mut service,
+            b"/devices/null",
+            flags,
+            PathAnchors::default(),
+        );
+        assert_eq!(
+            service.provider_volume_status(opened.open_id).unwrap(),
+            devices
+        );
+        service.provider_close(opened.open_id).unwrap();
+        assert_eq!(service.provider_volume_status(opened.open_id), Err(9));
+    }
+    let directory = open(
+        &mut service,
+        b"/devices",
+        protocol::OPEN_AT_READ | protocol::OPEN_AT_DIRECTORY,
+        PathAnchors::default(),
+    );
+    let response = service
+        .volume_status_at(
+            protocol::Header {
+                opcode: protocol::OP_VOLUME_STATUS_AT,
+                flags: protocol::STAT_AT_ROOT_ATTACHED | protocol::STAT_AT_BASE_ATTACHED,
+                ..Default::default()
+            },
+            b"/../null",
+            PathAnchors {
+                root_open_id: Some(directory.open_id),
+                base_open_id: Some(directory.open_id),
+            },
+            root_credentials(),
+        )
+        .unwrap();
+    assert_eq!(wire::Status::decode(&response.payload), Some(devices));
+    assert_eq!(
+        service.provider_volume_status(directory.open_id),
+        Ok(devices)
+    );
+    assert_eq!(service.provider_volume_status(u64::MAX), Err(9));
+}

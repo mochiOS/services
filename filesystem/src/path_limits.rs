@@ -107,17 +107,19 @@ impl FilesystemService {
         if path.is_empty() {
             return Err(ENOENT);
         }
-        let (_, filesystem, volume) = self.resolve_disk_operation_inode(
-            path,
-            anchors,
-            FollowSymlinks::All,
-            credentials,
-            |_| ENOTSUP,
-        )?;
+        let status =
+            match self.resolve_operation_target(path, anchors, FollowSymlinks::All, credentials)? {
+                OperationTarget::Disk(_, filesystem, volume) => {
+                    crate::volume_status::filesystem_status(&filesystem, volume)?
+                }
+                OperationTarget::Device(node) => self
+                    .namespace
+                    .as_ref()
+                    .ok_or(EIO)?
+                    .device_volume_status(&node)?,
+            };
         let mut response = self.success(request);
-        response.payload = crate::volume_status::filesystem_status(&filesystem, volume)?
-            .encode()
-            .to_vec();
+        response.payload = status.encode().to_vec();
         response.header.length = response.payload.len() as u32;
         Ok(response)
     }

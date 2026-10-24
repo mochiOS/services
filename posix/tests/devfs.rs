@@ -108,3 +108,44 @@ fn directory_metadata_and_device_metadata_are_independent_of_open_lifetime() {
     assert_eq!(fs.status(&node, 9).unwrap(), before);
     assert_eq!((before.size, before.blocks), (0, 0));
 }
+
+#[test]
+fn virtual_volume_reports_its_real_nonreusable_inode_budget_without_disk_blocks() {
+    use filesystem_service::devfs::{Attributes, NAME_BYTES_MAX};
+    let mut fs = DeviceFilesystem::default();
+    let root = fs.root();
+    let before = fs.volume_status(&root, 17).unwrap();
+    assert_eq!(before.block_bytes, 1);
+    assert_eq!((before.blocks, before.free_blocks), (0, 0));
+    assert_eq!(
+        (before.inodes, before.free_inodes),
+        (u64::from(u32::MAX), u64::from(u32::MAX) - 2)
+    );
+    assert_eq!(before.filesystem_id, 17);
+    assert_eq!(before.name_bytes_max, NAME_BYTES_MAX as u32);
+    assert_eq!(
+        protocol::volume_status::Status::decode(&before.encode()),
+        Some(before)
+    );
+    let attributes = Attributes {
+        mode: 0o600,
+        uid: 501,
+        gid: 20,
+    };
+    let node = fs
+        .register(&root, b"owned", NodeKind::Null, attributes)
+        .unwrap();
+    let after = fs.volume_status(&node, 17).unwrap();
+    assert_eq!(after.free_inodes + 1, before.free_inodes);
+    assert!(matches!(
+        fs.register(&root, b"owned", NodeKind::Null, attributes),
+        Err(17)
+    ));
+    assert_eq!(fs.volume_status(&root, 17).unwrap(), after);
+    fs.unregister(&root, b"owned").unwrap();
+    assert_eq!(fs.volume_status(&node, 17).unwrap(), after);
+    drop(node);
+    assert_eq!(fs.volume_status(&root, 17).unwrap(), after);
+    let other = DeviceFilesystem::default();
+    assert_eq!(fs.volume_status(&other.root(), 17), Err(13));
+}

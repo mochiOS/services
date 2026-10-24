@@ -24,6 +24,56 @@ static int same_volume(const struct statvfs *a, const struct statvfs *b) {
   return a->f_fsid == b->f_fsid && a->f_blocks == b->f_blocks &&
          a->f_frsize == b->f_frsize;
 }
+extern int posix_openpt(int);
+extern int grantpt(int);
+extern int unlockpt(int);
+extern int ptsname_r(int, char *, size_t);
+static int device_volume(void) {
+  struct statvfs device, observed;
+  CHECK(statvfs("/dev", &device) == 0);
+  CHECK(device.f_frsize == 1 && device.f_blocks == 0 && device.f_bfree == 0 &&
+        device.f_bavail == 0);
+  CHECK(device.f_files == UINT32_MAX && device.f_ffree < device.f_files &&
+        device.f_favail == device.f_ffree);
+  CHECK(statvfs("/dev/null", &observed) == 0 &&
+        same_volume(&device, &observed));
+  for (int writeonly = 0; writeonly != 2; writeonly++) {
+    int fd = open("/dev/null", writeonly ? O_WRONLY : O_RDONLY);
+    CHECK(fd >= 0);
+    CHECK(fstatvfs(fd, &observed) == 0 && same_volume(&device, &observed));
+    CHECK(close(fd) == 0);
+  }
+  int directory = open("/dev", O_RDONLY | O_DIRECTORY);
+  CHECK(directory >= 0);
+  CHECK(fstatvfs(directory, &observed) == 0 && same_volume(&device, &observed));
+  CHECK(close(directory) == 0);
+  int master = posix_openpt(O_RDWR | O_NOCTTY);
+  CHECK(master >= 0);
+  char name[128];
+  CHECK(grantpt(master) == 0 && unlockpt(master) == 0 &&
+        ptsname_r(master, name, sizeof(name)) == 0);
+  int slave = open(name, O_RDWR | O_NOCTTY);
+  CHECK(slave >= 0);
+  CHECK(statvfs(name, &observed) == 0 && same_volume(&device, &observed));
+  CHECK(observed.f_ffree < device.f_ffree);
+  CHECK(fstatvfs(slave, &observed) == 0 && same_volume(&device, &observed));
+  CHECK(close(master) == 0);
+  int removed = 0;
+  for (unsigned attempt = 0; attempt < 1000; attempt++) {
+    if (statvfs(name, &observed) == -1) {
+      CHECK(errno == ENOENT);
+      removed = 1;
+      break;
+    }
+    usleep(1000);
+  }
+  CHECK(removed && fstatvfs(slave, &observed) == 0 &&
+        same_volume(&device, &observed));
+  CHECK(observed.f_ffree < device.f_ffree && close(slave) == 0);
+  puts("statvfs: PASS devfs-null-directory-and-unpublished-terminal");
+  fflush(stdout);
+  return 0;
+}
 int main(void) {
   alarm(45);
   struct statvfs data, system, observed;
@@ -39,6 +89,7 @@ int main(void) {
   CHECK(systemfd >= 0 && fstatvfs(systemfd, &observed) == 0 &&
         same_volume(&system, &observed));
   CHECK(close(systemfd) == 0);
+  CHECK(device_volume() == 0);
   puts("statvfs: PASS live-data-system-readonly-volumes");
   fflush(stdout);
   char root[128], path[160], moved[160], fifo[160], blocked[160];

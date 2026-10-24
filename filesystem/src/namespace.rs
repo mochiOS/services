@@ -173,6 +173,21 @@ impl Namespace {
         Ok(root)
     }
 
+    /// Volume accounting for this sealed device Node, including an unlinked
+    /// node retained by an open description. Never resolves its former path.
+    pub fn device_volume_status(
+        &self,
+        node: &Node,
+    ) -> Result<protocol::volume_status::Status, i32> {
+        self.validate(node)?;
+        match (self.volumes.get(node.volume as usize), &node.backing) {
+            (Some(Volume::Device(filesystem)), NodeBacking::Device(device)) => {
+                filesystem.volume_status(device, node.volume)
+            }
+            _ => Err(95),
+        }
+    }
+
     pub fn device_status(&self, node: &Node) -> Result<protocol::NodeStatus, i32> {
         self.validate(node)?;
         match (self.volumes.get(node.volume as usize), &node.backing) {

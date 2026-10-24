@@ -1353,8 +1353,12 @@ impl FilesystemService {
         &self,
         open_id: u64,
     ) -> Result<protocol::volume_status::Status, i32> {
-        if self.opens.device(open_id).is_some() {
-            return Err(ENOTSUP);
+        if let Some(open) = self.opens.device(open_id) {
+            return self
+                .namespace
+                .as_ref()
+                .ok_or(EIO)?
+                .device_volume_status(&open.node);
         }
         let open = self.opens.get(&open_id).ok_or(EBADF)?;
         crate::volume_status::filesystem_status(&open.filesystem, open.volume)

@@ -1824,6 +1824,7 @@ fn device_mount_authority_does_not_accept_another_namespaces_nodes() {
             filesystem_service::devfs::DeviceFilesystem::default(),
         )
         .unwrap();
+    assert_eq!(namespace.device_volume_status(&foreign), Err(13));
     assert!(matches!(
         namespace.mount_named_devices(
             foreign.clone(),
