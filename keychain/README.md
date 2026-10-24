@@ -7,6 +7,9 @@ Keychain.app is the built-in management UI. Policy remains in userspace.
 
 ## Login and authority
 
+- Secure UI verifies the built-in user-service endpoint before submitting a
+  password. Login/setup temporary password strings and encoded credential
+  frames use explicit zeroization, including error paths.
 - Native `user.service` verifies the account password and then forwards the
   password, OS UID, current session epoch and account-credential generation tag
   over authenticated IPC. The tag is SHA-256 of the encoded account verifier;

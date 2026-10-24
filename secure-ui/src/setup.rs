@@ -1038,10 +1038,10 @@ fn mutate_sensitive(
     request_id: u64,
     encode: impl FnOnce(&mut [u8]) -> Result<usize, mochios_user_protocol::EncodeError>,
 ) -> Result<(), SetupError> {
-    let mut request = [0u8; MAX_MESSAGE_LEN];
-    let request_len = encode(&mut request).map_err(|_| SetupError::InvalidInput)?;
+    let mut request = zeroize::Zeroizing::new([0u8; MAX_MESSAGE_LEN]);
+    let request_len = encode(&mut request[..]).map_err(|_| SetupError::InvalidInput)?;
     let result = call_status(operation, service, request_id, &request[..request_len]);
-    request[..request_len].fill(0);
+    zeroize::Zeroize::zeroize(&mut request[..request_len]);
     result
 }
 
@@ -1133,11 +1133,7 @@ fn map_authentication_error(error: AuthenticationError) -> SetupError {
 }
 
 fn clear_string(value: &mut String) {
-    if value.is_empty() {
-        return;
-    }
-    value.replace_range(.., &"\0".repeat(value.len()));
-    value.clear();
+    zeroize::Zeroize::zeroize(value);
 }
 
 #[cfg(test)]

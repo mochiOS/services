@@ -3055,6 +3055,7 @@ dependencies = [
  "mochios-user-database",
  "mochios-user-protocol",
  "viewkit",
+ "zeroize",
 ]
 
 [[package]]

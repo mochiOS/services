@@ -3,6 +3,7 @@ use std::fs;
 use std::rc::Rc;
 
 use viewkit::prelude::*;
+use zeroize::Zeroize;
 
 use crate::authentication::{self, AuthenticationError};
 use crate::clock::LoginClock;
@@ -304,7 +305,7 @@ fn submit_callback(
 ) -> impl FnMut() {
     move || {
         let name = selected_username.get();
-        let mut secret = password.value();
+        let mut secret = password.take_value();
         if name.is_empty() {
             status.set("Select a user.".to_owned());
             clear_string(&mut secret);
@@ -366,9 +367,5 @@ fn user_button_style(selected: bool) -> ButtonStyle {
 }
 
 fn clear_string(value: &mut String) {
-    if value.is_empty() {
-        return;
-    }
-    value.replace_range(.., &"\0".repeat(value.len()));
-    value.clear();
+    value.zeroize();
 }

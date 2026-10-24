@@ -4,6 +4,7 @@ use mochios_user_protocol::{
     Authenticate, AuthenticationResult, MAX_CHUNK_LEN, MAX_MESSAGE_LEN, SnapshotChunk,
     SnapshotChunkRequest, SnapshotInfo, SnapshotRequest, Status, decode_opcode,
 };
+use zeroize::{Zeroize, Zeroizing};
 
 const USER_SERVICE_NAME: &str = "user.service";
 const SERVICE_LOOKUP_ATTEMPTS: usize = 64;
@@ -80,9 +81,9 @@ fn login_users(database: &UserDatabase) -> LoginUsers {
 pub(crate) fn load_database(request_id: u64) -> Result<UserDatabase, AuthenticationError> {
     let service = find_user_service().ok_or(AuthenticationError::ServiceUnavailable)?;
     let request = SnapshotRequest { request_id };
-    let mut request_bytes = [0u8; MAX_MESSAGE_LEN];
+    let mut request_bytes = Zeroizing::new([0u8; MAX_MESSAGE_LEN]);
     let request_len = request
-        .encode(&mut request_bytes)
+        .encode(&mut request_bytes[..])
         .map_err(|_| AuthenticationError::Protocol)?;
     let mut reply = [0u8; MAX_MESSAGE_LEN];
     let reply_len = call(service, &request_bytes[..request_len], &mut reply)?;
@@ -105,7 +106,7 @@ pub(crate) fn load_database(request_id: u64) -> Result<UserDatabase, Authenticat
             length: length as u32,
         };
         let request_len = request
-            .encode(&mut request_bytes)
+            .encode(&mut request_bytes[..])
             .map_err(|_| AuthenticationError::Protocol)?;
         let reply_len = call(service, &request_bytes[..request_len], &mut reply)?;
         let chunk = SnapshotChunk::decode(&reply[..reply_len])
@@ -134,13 +135,13 @@ pub(crate) fn authenticate(
         name,
         password,
     };
-    let mut request_bytes = [0u8; MAX_MESSAGE_LEN];
+    let mut request_bytes = Zeroizing::new([0u8; MAX_MESSAGE_LEN]);
     let request_len = request
-        .encode(&mut request_bytes)
+        .encode(&mut request_bytes[..])
         .map_err(|_| AuthenticationError::Protocol)?;
     let mut reply = [0u8; MAX_MESSAGE_LEN];
     let call_result = platform::ipc::call(service, &request_bytes[..request_len], &mut reply);
-    request_bytes[..request_len].fill(0);
+    request_bytes[..request_len].zeroize();
     let result = call_result.map_err(|_| AuthenticationError::ServiceUnavailable)?;
     let reply_len = (result & 0xffff_ffff) as usize;
     if reply_len > reply.len() {
@@ -214,6 +215,7 @@ pub(crate) fn call(
     request: &[u8],
     reply: &mut [u8],
 ) -> Result<usize, AuthenticationError> {
+    verify_user_service(service)?;
     let result = platform::ipc::call(service, request, reply)
         .map_err(|_| AuthenticationError::ServiceUnavailable)?;
     let reply_len = (result & 0xffff_ffff) as usize;
@@ -227,6 +229,7 @@ pub(crate) fn find_user_service() -> Option<u64> {
     for _ in 0..SERVICE_LOOKUP_ATTEMPTS {
         if let Ok(endpoint) = platform::process::find_by_name(USER_SERVICE_NAME)
             && endpoint != 0
+            && verify_user_service(endpoint).is_ok()
         {
             return Some(endpoint);
         }
@@ -234,11 +237,46 @@ pub(crate) fn find_user_service() -> Option<u64> {
     }
     None
 }
+fn trusted_user_service(context: &platform::syscall::ThreadSecurityContext) -> bool {
+    context.process_id != 0
+        && context.thread_id != 0
+        && context.provenance == 1
+        && context.package_id.get(..context.package_id_len as usize) == Some(b"org.mochios.user")
+}
+fn verify_user_service(endpoint: u64) -> Result<(), AuthenticationError> {
+    let context = platform::process::thread_security_context(endpoint)
+        .map_err(|_| AuthenticationError::ServiceUnavailable)?;
+    if !trusted_user_service(&context) {
+        return Err(AuthenticationError::ServiceUnavailable);
+    }
+    Ok(())
+}
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use mochios_user_database::UserRecord;
+    #[test]
+    fn credentials_are_not_sent_to_an_untrusted_or_malformed_user_service_identity() {
+        let mut c = platform::syscall::ThreadSecurityContext::default();
+        c.process_id = 7;
+        c.thread_id = 9;
+        c.provenance = 1;
+        c.package_id_len = 16;
+        c.package_id[..16].copy_from_slice(b"org.mochios.user");
+        assert!(trusted_user_service(&c));
+        c.provenance = 2;
+        assert!(!trusted_user_service(&c));
+        c.provenance = 1;
+        c.package_id[0] = b'x';
+        assert!(!trusted_user_service(&c));
+        c.package_id[0] = b'o';
+        c.package_id_len = u16::MAX;
+        assert!(!trusted_user_service(&c));
+        c.package_id_len = 16;
+        c.process_id = 0;
+        assert!(!trusted_user_service(&c));
+    }
 
     #[test]
     fn root_only_database_requires_initial_setup() {

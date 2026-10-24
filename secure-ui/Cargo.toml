@@ -13,6 +13,7 @@ mochios-user-protocol = { git = "https://github.com/mochiOS/syscalls", package =
 mochios-linux-portal-protocol = { git = "https://github.com/mochiOS/syscalls", package = "mochios-linux-portal-protocol" }
 viewkit = { git = "https://github.com/mochiOS/viewkit", package = "viewkit" }
 mochios-permission-prompt-protocol = { path = "../permission-prompt-protocol" }
+zeroize = { version = "1.8", features = ["alloc"] }
 
 [[bin]]
 name = "secure-ui"
