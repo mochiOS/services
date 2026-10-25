@@ -13,6 +13,10 @@
 #include <sys/auxv.h>
 #include <unistd.h>
 
+#ifdef MOCHIOS_STATIC_TLS_PROBE_229
+extern "C" int mochi_static_tls_probe();
+#endif
+
 #ifdef MOCHIOS_MEMORY_ADVICE_PROBE_218
 extern "C" int mochi_memory_advice_probe(void);
 #endif
@@ -33,6 +37,9 @@ extern "C" int mochi_elf_metadata_probe();
 #endif
 
 extern "C" int mochi_llvm_runtime_probe() {
+#ifdef MOCHIOS_STATIC_TLS_PROBE_229
+  if (mochi_static_tls_probe()) return 29;
+#endif
 #ifdef MOCHIOS_ELF_METADATA_PROBE_228
   if (mochi_elf_metadata_probe()) return 28;
 #endif
