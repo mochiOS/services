@@ -2,6 +2,9 @@
 mod libc_udp {
     include!("support/native_libc_udp.inc");
 }
+#[cfg(all(target_os = "mochios", mochios_llvm_runtime_probe_215))]
+#[path = "native_llvm_runtime.rs"]
+mod llvm_runtime;
 // Executed only by a diagnostic manager after authenticated endpoint handoff.
 // The diagnostic manifest alone adds net.connect; normal manager gets none.
 #[cfg(target_os = "mochios")]
@@ -21,6 +24,11 @@ pub fn run(posix: u32, network: u32) {
         alarm(90);
     }
     p::io::stdout(b"inet-socket: starting native factory/Provider checks\n").unwrap();
+    #[cfg(mochios_llvm_runtime_probe_215)]
+    {
+        llvm_runtime::run();
+        return;
+    }
     let client = Client::new(SyscallEndpointTransport::new(posix));
     let inherited = Client::from_syscall_launch_context().expect("libc POSIX launch endpoint");
     inherited
