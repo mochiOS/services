@@ -1,6 +1,32 @@
 //! Run the C++ target executable only after normal userspace bootstrap.
 #[cfg(target_os = "mochios")]
 pub fn run() {
+    #[cfg(mochios_memory_advice_probe_218)]
+    {
+        use mochi_user_syscall::{SyscallNumber, call2};
+        let local = 0u8;
+        assert_eq!(
+            call2(
+                SyscallNumber::MemoryRangeCheck,
+                (&local as *const u8) as u64,
+                1
+            )
+            .unwrap(),
+            0
+        );
+        assert_eq!(
+            call2(SyscallNumber::MemoryRangeCheck, u64::MAX, 0).unwrap(),
+            0
+        );
+        for (address, length) in [(0, 1), (u64::MAX, 1), (0xffff800000000000, 4096)] {
+            assert_eq!(
+                call2(SyscallNumber::MemoryRangeCheck, address, length)
+                    .unwrap_err()
+                    .native_error(),
+                Some(mnu_abi::status::Error::InvalidAddress)
+            );
+        }
+    }
     unsafe extern "C" {
         fn fork() -> i32;
         fn execve(path: *const u8, argv: *const *const u8, env: *const *const u8) -> i32;

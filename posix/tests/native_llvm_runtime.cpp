@@ -13,7 +13,14 @@
 #include <sys/auxv.h>
 #include <unistd.h>
 
+#ifdef MOCHIOS_MEMORY_ADVICE_PROBE_218
+extern "C" int mochi_memory_advice_probe(void);
+#endif
+
 extern "C" int mochi_llvm_runtime_probe() {
+#ifdef MOCHIOS_MEMORY_ADVICE_PROBE_218
+  if (mochi_memory_advice_probe()) return 18;
+#endif
   const auto executable = reinterpret_cast<const char *>(getauxval(AT_EXECFN));
   if (!executable || std::strcmp(executable, "/system/bin/llvm-runtime-probe")) return 9;
   if (getauxval(AT_PAGESZ) != static_cast<unsigned long>(sysconf(_SC_PAGESIZE)) ||
