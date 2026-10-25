@@ -2108,6 +2108,66 @@ impl<H: Copy> PosixService<H> {
         P: ProcessBackend<H>,
         R: FnOnce(protocol::WaitInfo) -> bool,
     {
+        self.wait_child_observation_with_reply(
+            peer, request, filesystem, processes, false, |info, _| reply(info),
+        )
+    }
+
+    /// Return the selected child's own and waited-descendant CPU time in the
+    /// same transaction as its event. Failed observation or publication leaves
+    /// the event available; this never subtracts process-wide aggregate reads.
+    pub fn wait_child_usage_with_reply<F, P, R>(
+        &mut self,
+        peer: PeerIdentity,
+        request: protocol::WaitRequest,
+        filesystem: &mut F,
+        processes: &mut P,
+        reply: R,
+    ) -> Result<Option<protocol::WaitInfo>, i32>
+    where
+        F: FilesystemBackend<H>,
+        P: ProcessBackend<H>,
+        R: FnOnce(protocol::WaitInfo, WaitedChildCpuUsage) -> bool,
+    {
+        self.wait_child_observation_with_reply(
+            peer, request, filesystem, processes, true, reply,
+        )
+    }
+
+    fn child_wait_cpu_usage<P: ProcessBackend<H>>(
+        &self,
+        child: u64,
+        handle: H,
+        processes: &mut P,
+    ) -> Result<WaitedChildCpuUsage, i32> {
+        let usage = processes.execution_usage(handle)?;
+        if usage.ticks_per_second == 0 || usage.reserved != 0 {
+            return Err(protocol::STATUS_EIO);
+        }
+        let own = WaitedChildCpuUsage {
+            user_ticks: u128::from(usage.user_ticks),
+            kernel_ticks: u128::from(usage.kernel_ticks),
+            ticks_per_second: usage.ticks_per_second,
+        };
+        let descendant = self.process_wait_states.get(&child)
+            .ok_or(protocol::STATUS_ESRCH)?.waited_cpu;
+        own.checked_add(descendant)
+    }
+
+    fn wait_child_observation_with_reply<F, P, R>(
+        &mut self,
+        peer: PeerIdentity,
+        request: protocol::WaitRequest,
+        filesystem: &mut F,
+        processes: &mut P,
+        include_usage: bool,
+        reply: R,
+    ) -> Result<Option<protocol::WaitInfo>, i32>
+    where
+        F: FilesystemBackend<H>,
+        P: ProcessBackend<H>,
+        R: FnOnce(protocol::WaitInfo, WaitedChildCpuUsage) -> bool,
+    {
         self.matching_child_ids(peer, request)?;
         self.reap_discarded_children_for(Some(peer.process_id), filesystem, processes)?;
         let candidates = self.matching_child_ids(peer, request)?;
@@ -2135,6 +2195,11 @@ impl<H: Copy> PosixService<H> {
                     .and_then(|state| state.termination_signal)
                     .map(|signal| signal & 0x7f)
                     .unwrap_or_else(|| ((exit_code & 0xff) as u32) << 8);
+                let usage = if include_usage || request.options & protocol::WAIT_NOWAIT == 0 {
+                    self.child_wait_cpu_usage(child, handle, processes)?
+                } else {
+                    WaitedChildCpuUsage::default()
+                };
                 if request.options & protocol::WAIT_NOWAIT != 0 {
                     let info = protocol::WaitInfo {
                         result: protocol::WaitResult {
@@ -2143,27 +2208,13 @@ impl<H: Copy> PosixService<H> {
                         },
                         real_uid,
                     };
-                    return Ok(reply(info).then_some(info));
+                    return Ok(reply(info, usage).then_some(info));
                 }
-                let usage = processes.execution_usage(handle)?;
-                if usage.ticks_per_second == 0 || usage.reserved != 0 {
-                    return Err(protocol::STATUS_EIO);
-                }
-                let own = WaitedChildCpuUsage {
-                    user_ticks: u128::from(usage.user_ticks),
-                    kernel_ticks: u128::from(usage.kernel_ticks),
-                    ticks_per_second: usage.ticks_per_second,
-                };
-                let descendant = self.process_wait_states
-                    .get(&child)
-                    .ok_or(protocol::STATUS_ESRCH)?
-                    .waited_cpu;
                 let total = self.process_wait_states
                     .get(&peer.process_id)
                     .ok_or(protocol::STATUS_ESRCH)?
                     .waited_cpu
-                    .checked_add(own)?
-                    .checked_add(descendant)?;
+                    .checked_add(usage)?;
                 // Compute and validate first. Backend failures and overflow
                 // leave the child waitable and do not partially add its time.
                 self.observe_process_exit(child, processes)?;
@@ -2174,7 +2225,7 @@ impl<H: Copy> PosixService<H> {
                     },
                     real_uid,
                 };
-                if !reply(info) {
+                if !reply(info, usage) {
                     return Ok(None);
                 }
                 // No fallible observation or accounting follows publication.
@@ -2189,6 +2240,11 @@ impl<H: Copy> PosixService<H> {
                 .get_mut(&child)
                 .and_then(|state| state.take_status(request.options | protocol::WAIT_NOWAIT))
             {
+                let usage = if include_usage {
+                    self.child_wait_cpu_usage(child, handle, processes)?
+                } else {
+                    WaitedChildCpuUsage::default()
+                };
                 let info = protocol::WaitInfo {
                     result: protocol::WaitResult {
                         process_id: child,
@@ -2196,7 +2252,7 @@ impl<H: Copy> PosixService<H> {
                     },
                     real_uid,
                 };
-                if !reply(info) {
+                if !reply(info, usage) {
                     return Ok(None);
                 }
                 self.process_wait_states.get_mut(&child).unwrap().take_status(request.options);
@@ -2211,7 +2267,7 @@ impl<H: Copy> PosixService<H> {
         }
         if request.options & protocol::WAIT_NOHANG != 0 {
             let info = protocol::WaitInfo::default();
-            Ok(reply(info).then_some(info))
+            Ok(reply(info, WaitedChildCpuUsage::default()).then_some(info))
         } else {
             Err(protocol::STATUS_EAGAIN)
         }
