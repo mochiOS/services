@@ -20,7 +20,21 @@ extern "C" int mochi_memory_advice_probe(void);
 extern "C" int mochi_wait_usage_probe(void);
 #endif
 
+#ifdef MOCHIOS_PUBLIC_ACCOUNT_PROBE_226
+extern "C" int mochi_passwd_probe();
+#endif
+
+#ifdef MOCHIOS_LLVM_SUPPORT_PROBE_226
+extern "C" int mochi_llvm_support_probe();
+#endif
+
 extern "C" int mochi_llvm_runtime_probe() {
+#ifdef MOCHIOS_PUBLIC_ACCOUNT_PROBE_226
+  if (mochi_passwd_probe()) return 26;
+#endif
+#ifdef MOCHIOS_LLVM_SUPPORT_PROBE_226
+  if (mochi_llvm_support_probe()) return 26;
+#endif
 #ifdef MOCHIOS_WAIT_USAGE_PROBE_222
   if (mochi_wait_usage_probe()) return 22;
 #endif
@@ -70,5 +84,13 @@ extern "C" int mochi_llvm_runtime_probe() {
 }
 
 #ifdef MOCHIOS_LLVM_RUNTIME_STANDALONE
-int main() { return mochi_llvm_runtime_probe(); }
+int main(int argc, char **argv) {
+#ifdef MOCHIOS_LLVM_SUPPORT_PROBE_226
+  if (argc == 2 && !std::strcmp(argv[1], "--llvm-support-child")) {
+    std::puts("llvm-support-child");
+    return 37;
+  }
+#endif
+  return mochi_llvm_runtime_probe();
+}
 #endif
