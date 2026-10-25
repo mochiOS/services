@@ -28,7 +28,14 @@ extern "C" int mochi_passwd_probe();
 extern "C" int mochi_llvm_support_probe();
 #endif
 
+#ifdef MOCHIOS_ELF_METADATA_PROBE_228
+extern "C" int mochi_elf_metadata_probe();
+#endif
+
 extern "C" int mochi_llvm_runtime_probe() {
+#ifdef MOCHIOS_ELF_METADATA_PROBE_228
+  if (mochi_elf_metadata_probe()) return 28;
+#endif
 #ifdef MOCHIOS_PUBLIC_ACCOUNT_PROBE_226
   if (mochi_passwd_probe()) return 26;
 #endif

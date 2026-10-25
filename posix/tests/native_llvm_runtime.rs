@@ -48,28 +48,35 @@ pub fn run() {
         fn seteuid(uid: u32) -> i32;
     }
     unsafe {
-        for reduced_identity in [false, true] {
-            let child = fork();
-            assert!(child >= 0, "C++ probe fork errno={}", *__errno());
-            if child == 0 {
-                if reduced_identity && seteuid(501) != 0 {
-                    _exit(125);
+        let paths = &[
+            c"/system/bin/llvm-runtime-probe",
+            #[cfg(mochios_elf_metadata_probe_228)]
+            c"/system/bin/elf-metadata-inline-probe",
+        ];
+        for path in paths {
+            for reduced_identity in [false, true] {
+                let child = fork();
+                assert!(child >= 0, "C++ probe fork errno={}", *__errno());
+                if child == 0 {
+                    if reduced_identity && seteuid(501) != 0 {
+                        _exit(125);
+                    }
+                    let arguments = [
+                        c"deliberately-unrelated-argv0".as_ptr().cast(),
+                        core::ptr::null(),
+                    ];
+                    let environment = [core::ptr::null()];
+                    execve(
+                        path.as_ptr().cast(),
+                        arguments.as_ptr(),
+                        environment.as_ptr(),
+                    );
+                    _exit(126);
                 }
-                let arguments = [
-                    c"deliberately-unrelated-argv0".as_ptr().cast(),
-                    core::ptr::null(),
-                ];
-                let environment = [core::ptr::null()];
-                execve(
-                    c"/system/bin/llvm-runtime-probe".as_ptr().cast(),
-                    arguments.as_ptr(),
-                    environment.as_ptr(),
-                );
-                _exit(126);
+                let mut status = 0;
+                assert_eq!(waitpid(child, &mut status, 0), child);
+                assert_eq!(status, 0, "C++ probe child wait status={status}");
             }
-            let mut status = 0;
-            assert_eq!(waitpid(child, &mut status, 0), child);
-            assert_eq!(status, 0, "C++ probe child wait status={status}");
         }
         mochi_user_platform::io::stdout(b"llvm-runtime: PASS child exec and wait\n").unwrap();
     }

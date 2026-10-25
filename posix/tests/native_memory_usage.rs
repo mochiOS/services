@@ -22,6 +22,7 @@ pub fn run() {
         fn mprotect(address: *mut c_void, length: usize, protection: i32) -> i32;
         fn munmap(address: *mut c_void, length: usize) -> i32;
         fn fork() -> i32;
+        fn __errno() -> *mut i32;
         fn pipe(output: *mut i32) -> i32;
         fn read(fd: i32, output: *mut u8, length: usize) -> isize;
         fn write(fd: i32, input: *const u8, length: usize) -> isize;
@@ -108,7 +109,7 @@ pub fn run() {
         assert_eq!(pipe(identities.as_mut_ptr()), 0);
         assert_eq!(pipe(gate.as_mut_ptr()), 0);
         let child = fork();
-        assert!(child >= 0);
+        assert!(child >= 0, "memory-read fork errno={}", *__errno());
         if child == 0 {
             close(identities[0]);
             close(gate[1]);
