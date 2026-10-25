@@ -13,6 +13,10 @@
 #include <sys/auxv.h>
 #include <unistd.h>
 
+#ifdef MOCHIOS_WALL_CLOCK_PROBE_231
+extern "C" int mochi_wall_clock_probe();
+#endif
+
 #ifdef MOCHIOS_SYSTEM_IDENTITY_PROBE_230
 extern "C" int mochi_system_identity_probe();
 #endif
@@ -41,6 +45,9 @@ extern "C" int mochi_elf_metadata_probe();
 #endif
 
 extern "C" int mochi_llvm_runtime_probe() {
+#ifdef MOCHIOS_WALL_CLOCK_PROBE_231
+  if (mochi_wall_clock_probe()) return 31;
+#endif
 #ifdef MOCHIOS_SYSTEM_IDENTITY_PROBE_230
   if (mochi_system_identity_probe()) return 30;
 #endif
