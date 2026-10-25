@@ -29,6 +29,8 @@ pub mod shared_memory;
 pub mod shared_memory_file;
 pub mod socket;
 pub mod network_bootstrap;
+pub mod account_bootstrap;
+pub mod account_lookup;
 pub mod inet_datagram;
 pub mod inet_socket;
 #[cfg(target_os = "mochios")]
@@ -883,6 +885,7 @@ pub struct PosixService<H: Copy = u32> {
     next_fork_token: u64,
     bootstrap_process_id: Option<u64>,
     network_endpoint: Option<H>,
+    account_endpoint: Option<H>,
     sessions: BTreeMap<u64, Session>,
     directories: BTreeMap<u64, SessionDirectories<H>>,
     processes: BTreeMap<u64, H>,
@@ -931,6 +934,7 @@ impl PosixService<u32> {
             next_fork_token: 1,
             bootstrap_process_id: None,
             network_endpoint: None,
+            account_endpoint: None,
             sessions: BTreeMap::new(),
             directories: BTreeMap::new(),
             processes: BTreeMap::new(),
@@ -3978,6 +3982,8 @@ impl<H: Copy> PosixService<H> {
             | protocol::OP_PROCESS_TREE_TERMINATE
             | protocol::OP_PROCESS_TREE_RECLAIM
             | protocol::OP_NETWORK_ENDPOINT_GET
+            | protocol::OP_ACCOUNT_ENDPOINT_INSTALL
+            | protocol::OP_ACCOUNT_LOOKUP
             | protocol::OP_NETWORK_ENDPOINT_INSTALL
             | protocol::OP_PROCESS_INITIALIZE
             | protocol::OP_WAIT_CHILD

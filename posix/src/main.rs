@@ -1290,6 +1290,56 @@ fn main() {
                 })
             }
             (Some(peer), Some((header, payload)), true)
+                if header.opcode == protocol::OP_ACCOUNT_ENDPOINT_INSTALL =>
+            {
+                let status = posix_service::account_bootstrap::install(
+                    &mut service,
+                    peer,
+                    header,
+                    payload,
+                    &attachments,
+                );
+                if status.is_ok() {
+                    retained_handle = Some(attachments[0].handle);
+                    platform::logln!("posix.service: account endpoint installed");
+                }
+                Some(posix_service::ObjectResponse {
+                    response: status_response(header.request_id, status.err().unwrap_or(0)),
+                    handles: Vec::new(),
+                })
+            }
+            (Some(_peer), Some((header, payload)), true)
+                if header.opcode == protocol::OP_ACCOUNT_LOOKUP =>
+            {
+                let result = (|| {
+                    if header.flags != 0 || header.status != 0 || !attachments.is_empty() {
+                        return Err(-22);
+                    }
+                    let transport = mochios_posix_client::SyscallEndpointTransport::new(
+                        service.account_endpoint().ok_or(-6)?,
+                    );
+                    posix_service::account_lookup::lookup(
+                        &transport,
+                        header.request_id,
+                        payload,
+                        |error| protocol::status::normalize_failure(error.raw()),
+                    )
+                })();
+                Some(posix_service::ObjectResponse {
+                    response: match result {
+                        Ok(payload) => posix_service::Response {
+                            header: protocol::Header {
+                                payload_len: payload.len() as u32,
+                                ..success_response(header.request_id).header
+                            },
+                            payload,
+                        },
+                        Err(status) => status_response(header.request_id, status),
+                    },
+                    handles: Vec::new(),
+                })
+            }
+            (Some(peer), Some((header, payload)), true)
                 if header.opcode == protocol::OP_NETWORK_ENDPOINT_INSTALL =>
             {
                 let status = posix_service::network_bootstrap::install(

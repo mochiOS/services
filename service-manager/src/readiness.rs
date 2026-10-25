@@ -77,6 +77,8 @@ pub(crate) struct ReadyHandshake {
     network_endpoint: Option<platform::handle::Handle>,
     network_endpoint_process: Option<u64>,
     user_status: platform::service_ready::OneShotStatus,
+    user_endpoint: Option<platform::handle::Handle>,
+    user_endpoint_process: Option<u64>,
     keychain_status: platform::service_ready::OneShotStatus,
     secure_ui_status: platform::service_ready::OneShotStatus,
     workspace_status: platform::service_ready::OneShotStatus,
@@ -237,6 +239,8 @@ impl ReadyHandshake {
             network_endpoint: None,
             network_endpoint_process: None,
             user_status: platform::service_ready::OneShotStatus::new(),
+            user_endpoint: None,
+            user_endpoint_process: None,
             keychain_status: platform::service_ready::OneShotStatus::new(),
             secure_ui_status: platform::service_ready::OneShotStatus::new(),
             workspace_status: platform::service_ready::OneShotStatus::new(),
@@ -399,6 +403,28 @@ impl ReadyHandshake {
         }
     }
 
+    /// Match the transferred public account endpoint to the retained process.
+    pub(crate) fn take_user_endpoint(
+        &mut self,
+        target: impl Into<ProcessWatchTarget>,
+    ) -> Result<Option<platform::handle::Handle>, ReadyError> {
+        let Some(endpoint) = self.user_endpoint.take() else {
+            return Ok(None);
+        };
+        let owner = self.user_endpoint_process.take();
+        let expected = ProcessWatch::open(target).and_then(|process| process.process_id());
+        match expected {
+            Ok(expected) if owner == Some(expected) => Ok(Some(endpoint)),
+            result => {
+                let _ = platform::handle::close(endpoint);
+                Err(result
+                    .err()
+                    .map(ReadyError::ProcessStatus)
+                    .unwrap_or(ReadyError::InvalidMessage))
+            }
+        }
+    }
+
     fn token_for(&self, service: ReadyService) -> u64 {
         match service {
             ReadyService::Filesystem => self.filesystem_token,
@@ -493,6 +519,19 @@ impl ReadyHandshake {
                         endpoint,
                         source_process,
                     } => {
+                        if token == self.user_token {
+                            if self.user_endpoint.is_some()
+                                || self.user_status.get().is_some()
+                                || status != 0
+                            {
+                                let _ = platform::handle::close(endpoint);
+                                return Err(ReadyError::InvalidMessage);
+                            }
+                            self.user_endpoint = Some(endpoint);
+                            self.user_endpoint_process = Some(source_process);
+                            self.record(token, status)?;
+                            continue;
+                        }
                         if token == self.network_token {
                             if self.network_endpoint.is_some()
                                 || self.network_status.get().is_some()

@@ -886,11 +886,52 @@ impl BootstrapOperations for Runtime {
     }
 
     fn wait_user_ready(&mut self, process: &Self::UserProcess) -> bool {
-        let ready = self.wait_ready(ReadyService::User, process.watch_target());
-        if ready {
-            eprintln!("service-manager.service: user.service native READY received");
+        if !self.wait_ready(ReadyService::User, process.watch_target()) {
+            return false;
         }
-        ready
+        let endpoint = match self
+            .ready
+            .as_mut()
+            .map(|ready| ready.take_user_endpoint(process.watch_target()))
+        {
+            Some(Ok(Some(endpoint))) => endpoint,
+            Some(Err(error)) => {
+                log_ready_error(ReadyService::User, error);
+                return false;
+            }
+            _ => {
+                eprintln!("service-manager.service: user endpoint missing");
+                return false;
+            }
+        };
+        let result = self.posix_endpoint.ok_or(-6).and_then(|posix| {
+            let client = mochios_posix_client::Client::new(
+                mochios_posix_client::SyscallEndpointTransport::new(posix),
+            );
+            client
+                .install_account_endpoint(mochios_posix_client::ObjectHandleAttachment {
+                    handle: endpoint,
+                    rights: mochios_posix_protocol::ACCOUNT_ENDPOINT_RIGHTS,
+                })
+                .map_err(|error| match error {
+                    mochios_posix_client::ClientError::Remote(status) => status,
+                    mochios_posix_client::ClientError::Transport(error) => {
+                        mochios_posix_protocol::status::normalize_failure(error.raw())
+                    }
+                    _ => -5,
+                })
+        });
+        let _ = platform::handle::close(endpoint);
+        match result {
+            Ok(()) => {
+                eprintln!("service-manager.service: user endpoint handed to POSIX");
+                true
+            }
+            Err(status) => {
+                eprintln!("service-manager.service: user endpoint handoff failed status={status}");
+                false
+            }
+        }
     }
 
     fn wait_secure_ui_login(

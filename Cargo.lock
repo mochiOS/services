@@ -1761,6 +1761,7 @@ name = "mochios-posix-protocol"
 version = "0.1.0"
 dependencies = [
  "mnu-abi",
+ "mochios-user-protocol",
 ]
 
 [[package]]
@@ -2568,6 +2569,7 @@ dependencies = [
  "mochios-posix-client",
  "mochios-posix-protocol",
  "mochios-signature-protocol",
+ "mochios-user-database",
  "mochios-user-protocol",
  "mochios-viewkit-gpu-protocol",
  "mochios-workspace-protocol",

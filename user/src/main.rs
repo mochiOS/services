@@ -316,7 +316,7 @@ fn main() {
             platform::process::exit(1);
         }
     };
-    let endpoint = match platform::ipc::create() {
+    let endpoint = match platform::ipc::create_handle() {
         Ok(endpoint) => endpoint,
         Err(error) => {
             diagnostic(&format!(
@@ -327,7 +327,8 @@ fn main() {
             platform::process::exit(1);
         }
     };
-    if platform::service_ready::notify(ready_target, 0).is_err() {
+    let rights = mochios_posix_protocol::ACCOUNT_ENDPOINT_RIGHTS;
+    if platform::service_ready::notify_handle(ready_target, 0, endpoint, rights).is_err() {
         diagnostic("user.service: ready notification failed");
         platform::process::exit(1);
     }
@@ -338,7 +339,7 @@ fn main() {
     let mut buffer = [0u8; MAX_MESSAGE_LEN];
     loop {
         buffer.zeroize();
-        let message = match platform::ipc::wait(endpoint, &mut buffer) {
+        let message = match platform::ipc::wait(u64::from(endpoint), &mut buffer) {
             Ok(message) => message,
             Err(_) => {
                 platform::thread::yield_now();
@@ -349,6 +350,27 @@ fn main() {
         let length = (message & 0xffff_ffff) as usize;
         let request = &buffer[..length.min(buffer.len())];
         let opcode = decode_opcode(request);
+        if opcode == Ok(Opcode::PublicLookup) {
+            let mut response = [0; MAX_MESSAGE_LEN];
+            match user_service::public_accounts::reply(
+                &service.database,
+                service.healthy,
+                request,
+                &mut response,
+            ) {
+                Ok(length) => {
+                    let _ = platform::ipc::reply(sender, &response[..length]);
+                }
+                Err(status) => {
+                    let id = mochios_user_protocol::public_account::decode_request(request)
+                        .map(|(id, _)| id)
+                        .unwrap_or(0);
+                    service.reply_status(sender, id, i64::from(status) as u64);
+                }
+            }
+            buffer.zeroize();
+            continue;
+        }
         let required_capability = match opcode {
             Ok(Opcode::SnapshotBegin | Opcode::SnapshotChunk) => READ_CAPABILITY,
             Ok(Opcode::AddUser | Opcode::RemoveUser | Opcode::SetPassword) => MODIFY_CAPABILITY,
