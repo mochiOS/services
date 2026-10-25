@@ -13,6 +13,10 @@
 #include <sys/auxv.h>
 #include <unistd.h>
 
+#ifdef MOCHIOS_LLVM_OUTPUT_PROBE_232
+extern "C" int mochi_llvm_output_probe();
+#endif
+
 #ifdef MOCHIOS_NATIVE_CLANG_PIPELINE_PROBE_231
 extern "C" int mochi_native_clang_pipeline_probe();
 #endif
@@ -66,6 +70,9 @@ extern "C" int mochi_llvm_runtime_probe() {
 #endif
 #ifdef MOCHIOS_LLVM_SUPPORT_PROBE_226
   if (mochi_llvm_support_probe()) return 26;
+#endif
+#ifdef MOCHIOS_LLVM_OUTPUT_PROBE_232
+  if (mochi_llvm_output_probe()) return 32;
 #endif
 #ifdef MOCHIOS_WAIT_USAGE_PROBE_222
   if (mochi_wait_usage_probe()) return 22;
