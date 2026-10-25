@@ -18,6 +18,7 @@ type Result<T> = std::result::Result<T, Kernel>;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct PageTableFlags(u64);
 impl PageTableFlags {
+    fn empty() -> Self { Self(0) }
     const PRESENT: Self = Self(1);
     const USER_ACCESSIBLE: Self = Self(4);
     const ACCESSED: Self = Self(32);
@@ -177,6 +178,15 @@ fn with_user_leaf_entry_mut<T>(
         .get_mut(&(table, address))
         .map(|entry| f(entry))
 }
+#[path = "../../../core/src/mem/residency.rs"]
+mod residency;
+thread_local! {
+    static RESIDENCY: std::cell::RefCell<residency::Counter> = const { std::cell::RefCell::new(residency::Counter::new()) };
+}
+fn record_user_leaf_change(table: u64, before: PageTableFlags, after: PageTableFlags) {
+    assert_eq!(table, LOCATION.0);
+    RESIDENCY.with_borrow_mut(|counter| counter.transition(before.bits(), after.bits()));
+}
 fn release_user_frame(frame: u64) {
     assert!(VM_HELD.with(Cell::get));
     assert_eq!(frame, FRAME);
@@ -192,6 +202,10 @@ mod suspension;
 use suspension::{RecordedUserPage, suspend_user_page};
 
 fn reset(flags: u64) {
+    RESIDENCY.with_borrow_mut(|counter| {
+        *counter = residency::Counter::new();
+        counter.transition(0, flags);
+    });
     *state().lock().unwrap() = State {
         entries: BTreeMap::from([(
             LOCATION,
@@ -425,5 +439,35 @@ fn immediate_tokens_keep_original_locked_restore_release_and_mmio_detach_behavio
             assert_eq!(state.entries[&LOCATION].flags.0, 0x805);
         }
         assert_eq!(state.releases, usize::from(mode == 1));
+    }
+}
+
+#[test]
+fn retained_ram_counts_survive_suspension_and_only_detach_reduces_residency() {
+    let _test = TEST_LOCK.lock().unwrap();
+    for recorded in [false, true] {
+        for restore in [false, true] {
+            reset(residency::RAM_LEAF | 4 | 1);
+            let current = || RESIDENCY.with_borrow(|counter| counter.snapshot().unwrap());
+            assert_eq!(current().current_bytes, 4096);
+            with_vm(|| unsafe {
+                let page = suspend_user_page(LOCATION.0, LOCATION.1).unwrap().unwrap();
+                assert_eq!(current().current_bytes, 4096);
+                if recorded {
+                    let record = page.into_record();
+                    if restore {
+                        assert!(record.try_restore().is_ok());
+                    } else {
+                        assert!(record.try_release().is_ok());
+                    }
+                } else if restore {
+                    page.restore();
+                } else {
+                    page.release();
+                }
+            });
+            assert_eq!(current().current_bytes, if restore { 4096 } else { 0 });
+            assert_eq!(current().peak_bytes, 4096);
+        }
     }
 }

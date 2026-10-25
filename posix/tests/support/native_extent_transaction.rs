@@ -105,6 +105,7 @@ pub(crate) mod paging {
     #[derive(Clone, Copy)]
     struct PageTableFlags(u64);
     impl PageTableFlags {
+        fn empty() -> Self { Self(0) }
         const PRESENT: Self = Self(1);
         const USER_ACCESSIBLE: Self = Self(4);
         const ACCESSED: Self = Self(32);
@@ -185,6 +186,7 @@ pub(crate) mod paging {
             .get_mut(&(root, address))
             .map(|entry| f(entry))
     }
+    fn record_user_leaf_change(_: u64, _: PageTableFlags, _: PageTableFlags) {}
     fn release_user_frame(frame: u64) {
         assert!(VM_HELD.with(Cell::get));
         frames::release_user_frame(frame);
