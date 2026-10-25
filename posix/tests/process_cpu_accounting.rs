@@ -63,6 +63,7 @@ fn main() { native::exercise(); }
     ));
     std::fs::create_dir(&directory).unwrap();
     let executable = directory.join("probe");
+    program.insert_str(0, include_str!("support/unmeasured_memory.inc"));
     let mut compiler = Command::new("rustc")
         .args(["--edition=2021", "-Awarnings", "-"])
         .arg("-o")

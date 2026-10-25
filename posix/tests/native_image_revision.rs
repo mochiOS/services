@@ -137,6 +137,7 @@ fn main(){
 }
 "#,
     );
+    program.insert_str(0, include_str!("support/unmeasured_memory.inc"));
     probe::run(&program);
 }
 

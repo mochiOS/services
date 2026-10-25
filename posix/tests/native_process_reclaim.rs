@@ -88,6 +88,7 @@ pub fn run() {
     )));
     fs::create_dir(&temporary.0).unwrap();
     let binary = temporary.0.join("probe");
+    probe.insert_str(0, include_str!("support/unmeasured_memory.inc"));
     let mut compiler = Command::new("rustc")
         .args(["--edition=2021", "-Awarnings", "-"])
         .arg("-o")

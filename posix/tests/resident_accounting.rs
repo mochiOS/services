@@ -25,6 +25,121 @@ mod interrupt {
 const RAM: u64 = residency::RAM_LEAF | 4;
 
 #[test]
+fn process_observers_have_independent_peaks_and_follow_only_their_current_root() {
+    let first = 0x300000;
+    let second = 0x400000;
+    native::register(first).unwrap();
+    native::register(second).unwrap();
+    for _ in 0..3 {
+        native::transition(first, 0, RAM);
+    }
+    for _ in 0..2 {
+        native::transition(first, RAM, 0);
+    }
+    let owner = native::ProcessStats::new();
+    assert_eq!(owner.snapshot(), None);
+    owner.bind_root(first);
+    // A process joining a shared root starts with its current footprint, not
+    // a peak produced before that process was associated with the root.
+    assert_eq!(
+        owner.snapshot().unwrap(),
+        residency::Snapshot {
+            current_bytes: 4096,
+            peak_bytes: 4096
+        }
+    );
+    native::transition(first, 0, RAM);
+    let sharing = native::ProcessStats::new();
+    sharing.bind_root(first);
+    owner.bind_root(second);
+    native::transition(first, 0, RAM);
+    assert_eq!(
+        owner.snapshot().unwrap(),
+        residency::Snapshot {
+            current_bytes: 0,
+            peak_bytes: 8192
+        }
+    );
+    assert_eq!(sharing.snapshot().unwrap().peak_bytes, 12288);
+    native::transition(second, 0, RAM);
+    assert_eq!(
+        owner.snapshot().unwrap(),
+        residency::Snapshot {
+            current_bytes: 4096,
+            peak_bytes: 8192
+        }
+    );
+    native::retire(first);
+    native::retire(second);
+    assert_eq!(
+        owner.snapshot().unwrap(),
+        residency::Snapshot {
+            current_bytes: 0,
+            peak_bytes: 8192
+        }
+    );
+    assert_eq!(
+        sharing.snapshot().unwrap(),
+        residency::Snapshot {
+            current_bytes: 0,
+            peak_bytes: 12288
+        }
+    );
+    native::register(first).unwrap();
+    native::transition(first, 0, RAM);
+    assert_eq!(sharing.snapshot().unwrap().current_bytes, 0);
+    native::retire(first);
+}
+
+#[test]
+fn process_observation_remains_unavailable_after_missing_roots_or_invalid_counts() {
+    let missing = native::ProcessStats::new();
+    missing.bind_root(0);
+    assert_eq!(missing.snapshot(), None);
+    let root = 0x500000;
+    native::register(root).unwrap();
+    let owner = native::ProcessStats::new();
+    owner.bind_root(root);
+    native::transition(root, RAM, 0);
+    assert_eq!(owner.snapshot(), None);
+    native::retire(root);
+    assert_eq!(owner.snapshot(), None);
+}
+
+#[test]
+fn ended_process_detaches_from_a_root_retained_by_independent_owners() {
+    let root = 0x600000;
+    native::register(root).unwrap();
+    let ended = native::ProcessStats::new();
+    let live = native::ProcessStats::new();
+    ended.bind_root(root);
+    live.bind_root(root);
+    native::transition(root, 0, RAM);
+    ended.detach();
+    assert_eq!(
+        ended.snapshot().unwrap(),
+        residency::Snapshot {
+            current_bytes: 0,
+            peak_bytes: 4096
+        }
+    );
+    native::transition(root, 0, RAM);
+    assert_eq!(ended.snapshot().unwrap().peak_bytes, 4096);
+    assert_eq!(
+        live.snapshot().unwrap(),
+        residency::Snapshot {
+            current_bytes: 8192,
+            peak_bytes: 8192
+        }
+    );
+    native::retire(root);
+    assert_eq!(ended.snapshot().unwrap().peak_bytes, 4096);
+    let unbound = native::ProcessStats::new();
+    unbound.detach();
+    assert_eq!(unbound.snapshot(), None);
+}
+
+#[test]
 fn counters_match_independent_leaf_membership_across_access_changes_replacement_and_unmap() {
     assert_eq!(
         residency::RAM_LEAF & (cow_access::COPY_ON_WRITE | cow_access::WRITE_DISABLED),

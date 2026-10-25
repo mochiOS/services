@@ -1,6 +1,12 @@
 //! Run the C++ target executable only after normal userspace bootstrap.
+#[cfg(all(target_os = "mochios", mochios_residency_probe_224))]
+#[path = "native_memory_usage.rs"]
+mod memory_usage;
+
 #[cfg(target_os = "mochios")]
 pub fn run() {
+    #[cfg(mochios_residency_probe_224)]
+    memory_usage::run();
     #[cfg(mochios_memory_advice_probe_218)]
     {
         use mochi_user_syscall::{SyscallNumber, call2};

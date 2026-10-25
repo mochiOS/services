@@ -403,6 +403,7 @@ fn terminal(object: &ProcessObject, code: u64) {
     std::fs::create_dir(&directory).unwrap();
     let _cleanup = TemporaryDirectory(directory.clone());
     let executable = directory.join("probe");
+    program.insert_str(0, include_str!("support/unmeasured_memory.inc"));
     let mut compiler = Command::new("rustc")
         .args([
             "--edition=2024",
