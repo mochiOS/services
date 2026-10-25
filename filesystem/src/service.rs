@@ -37,6 +37,9 @@ mod creation_policy;
 #[path = "fifo_namespace.rs"]
 mod fifo_namespace;
 
+#[path = "storage_inventory.rs"]
+pub mod storage_inventory;
+
 const EIO: i32 = 5;
 const EXDEV: i32 = 18;
 const EPERM: i32 = 1;
@@ -79,6 +82,7 @@ pub struct RenameAnchors {
 
 pub struct FilesystemService {
     fs: Ext4,
+    storage_inventory: storage_inventory::State,
     clock: crate::clock::Clock,
     namespace: Option<Namespace>,
     nodes: HashMap<u64, String>,
@@ -130,6 +134,7 @@ impl FilesystemService {
         node_ids.insert("/".to_owned(), 2);
         Self {
             fs,
+            storage_inventory: storage_inventory::State::default(),
             clock,
             namespace: None,
             nodes,

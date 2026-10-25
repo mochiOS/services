@@ -37,7 +37,11 @@ fn main() {
             platform::process::exit(1);
         }
     };
-    let mut service = FilesystemService::new(fs);
+    let mut service = FilesystemService::new(fs.clone());
+    if service.record_storage_mount("/", fs, 0, first_lba, sector_count).is_err() {
+        let _ = platform::service_ready::notify(ready_target, -1);
+        platform::process::exit(1);
+    }
     let system = find_system_partition(0)
         .map_err(|error| error.to_string())
         .and_then(|(first_lba, sector_count)| {
@@ -45,12 +49,14 @@ fn main() {
             // The selected, verified System image is immutable. Do not give
             // its backend a writer, even for a POSIX uid-zero caller.
             Ext4::load(Box::new(ImmutableExt4Storage::new(partition)))
-                .map(|system| (system, first_lba))
+                .map(|system| (system, first_lba, sector_count))
                 .map_err(|error| error.to_string())
         })
-        .and_then(|(system, first_lba)| {
+        .and_then(|(system, first_lba, sector_count)| {
+            let mounted = system.clone();
             service
                 .mount_named_volume(b"/", b"system", system, b"/system")
+                .and_then(|_| service.record_storage_mount("/system", mounted, 0, first_lba, sector_count))
                 .map(|_| first_lba)
                 .map_err(|error| format!("namespace mount error {error}"))
         });
@@ -1141,6 +1147,9 @@ fn handle_provider_request(
         return None;
     }
     let result = match header.opcode {
+        provider::OP_QUERY if header.basis == mochios_filesystem_protocol::storage_inventory::GET => {
+            service.storage_inventory_request(header, payload, attached.count)
+        }
         provider::OP_QUERY | provider::OP_CONTROL if header.basis == volume_status::GET => {
             filesystem_service::volume_status::handle(service, header, payload, attached.count)
         }

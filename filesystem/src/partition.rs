@@ -142,3 +142,118 @@ fn crc32(bytes: &[u8]) -> u32 {
     }
     !crc
 }
+
+/// Observed GPT contents. Capacity is the table's declared size, not hardware
+/// capacity; consumers must preserve that distinction when inquiry is unavailable.
+pub struct Table {
+    pub guid: [u8; 16],
+    pub sectors: u64,
+    pub partitions: Vec<PartitionInfo>,
+}
+pub struct PartitionInfo {
+    pub guid: [u8; 16],
+    pub range: PartitionRange,
+    pub name: String,
+}
+/// Reads only bounded GPT metadata. Validates CRCs, all extents and unique IDs.
+/// Does not repair a damaged table or open an unmounted filesystem.
+pub fn inspect<D: SectorDevice>(disk: &mut D) -> Result<Table, DiscoveryError<D::Error>> {
+    let invalid = || DiscoveryError::InvalidTable;
+    let mut header = [0; SECTOR_BYTES];
+    disk.read_sectors(1, &mut header)
+        .map_err(DiscoveryError::Device)?;
+    let size = u32_at(&header, 12) as usize;
+    if &header[..8] != b"EFI PART"
+        || u32_at(&header, 8) != 0x10000
+        || !(92..=SECTOR_BYTES).contains(&size)
+        || u32_at(&header, 20) != 0
+        || u64_at(&header, 24) != 1
+    {
+        return Err(invalid());
+    }
+    let checksum = u32_at(&header, 16);
+    header[16..20].fill(0);
+    if crc32(&header[..size]) != checksum {
+        return Err(invalid());
+    }
+    let sectors = u64_at(&header, 32).checked_add(1).ok_or_else(invalid)?;
+    if sectors.checked_mul(SECTOR_BYTES as u64).is_none() {
+        return Err(invalid());
+    }
+    let first = u64_at(&header, 40);
+    let last = u64_at(&header, 48);
+    let start = u64_at(&header, 72);
+    let count = u32_at(&header, 80) as usize;
+    let entry_size = u32_at(&header, 84) as usize;
+    if count == 0
+        || count > 128
+        || !matches!(entry_size, 128 | 256 | 512)
+        || first > last
+        || last >= sectors - 1
+        || start < 2
+    {
+        return Err(invalid());
+    }
+    let length = count * entry_size;
+    let rounded = length.div_ceil(SECTOR_BYTES) * SECTOR_BYTES;
+    if start
+        .checked_add((rounded / SECTOR_BYTES) as u64)
+        .is_none_or(|end| end > first)
+    {
+        return Err(invalid());
+    }
+    let guid: [u8; 16] = header[56..72].try_into().unwrap();
+    if guid == [0; 16] {
+        return Err(invalid());
+    }
+    let mut bytes = vec![0; rounded];
+    disk.read_sectors(start, &mut bytes)
+        .map_err(DiscoveryError::Device)?;
+    if crc32(&bytes[..length]) != u32_at(&header, 88) {
+        return Err(invalid());
+    }
+    let mut partitions = Vec::new();
+    let mut identities = std::collections::BTreeSet::new();
+    for entry in bytes[..length].chunks_exact(entry_size) {
+        if entry[..16] == [0; 16] {
+            continue;
+        }
+        let start = u64_at(entry, 32);
+        let end = u64_at(entry, 40);
+        let part_guid: [u8; 16] = entry[16..32].try_into().unwrap();
+        if start < first
+            || end > last
+            || start > end
+            || part_guid == [0; 16]
+            || !identities.insert(part_guid)
+        {
+            return Err(invalid());
+        }
+        let units = entry[56..128]
+            .chunks_exact(2)
+            .map(|v| u16::from_le_bytes([v[0], v[1]]))
+            .take_while(|v| *v != 0)
+            .collect::<Vec<_>>();
+        let name = String::from_utf16_lossy(&units);
+        partitions.push(PartitionInfo {
+            guid: part_guid,
+            range: PartitionRange {
+                first_lba: start,
+                sector_count: end - start + 1,
+            },
+            name,
+        });
+    }
+    partitions.sort_by_key(|part| part.range.first_lba);
+    if partitions
+        .windows(2)
+        .any(|pair| pair[0].range.first_lba + pair[0].range.sector_count > pair[1].range.first_lba)
+    {
+        return Err(invalid());
+    }
+    Ok(Table {
+        guid,
+        sectors,
+        partitions,
+    })
+}

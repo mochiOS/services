@@ -446,3 +446,21 @@ fn immutable_system_dictionary_reads_do_not_reread_indirect_blocks_for_every_chu
         "indirect block reads were not amortized"
     );
 }
+
+#[test]
+fn inventory_table_validates_all_extents_and_preserves_guid_and_label() {
+    use filesystem_service::partition::inspect;
+    let mut disk = fixture();
+    disk.0[568..584].fill(5);
+    disk.0[1024 + 2 * 128 + 16..1024 + 2 * 128 + 32].fill(6);
+    disk.0[1024 + 2 * 128 + 56..1024 + 2 * 128 + 58].copy_from_slice(&(b'D' as u16).to_le_bytes());
+    seal(&mut disk);
+    let table = inspect(&mut disk).unwrap();
+    assert_eq!(table.sectors, 1000); assert_eq!(table.guid, [5;16]);
+    assert_eq!(table.partitions[0].name, "D"); assert_eq!(table.partitions[0].guid, [6;16]);
+    entry(&mut disk, 0, [9;16], 150, 250);
+    disk.0[1040..1056].fill(10); seal(&mut disk);
+    assert!(matches!(inspect(&mut disk), Err(DiscoveryError::InvalidTable)));
+    disk.0[1024] ^= 1;
+    assert!(matches!(inspect(&mut disk), Err(DiscoveryError::InvalidTable)));
+}
