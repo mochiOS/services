@@ -13,6 +13,10 @@
 #include <sys/auxv.h>
 #include <unistd.h>
 
+#ifdef MOCHIOS_NATIVE_CLANG_PIPELINE_PROBE_231
+extern "C" int mochi_native_clang_pipeline_probe();
+#endif
+
 #ifdef MOCHIOS_WALL_CLOCK_PROBE_231
 extern "C" int mochi_wall_clock_probe();
 #endif
@@ -108,6 +112,9 @@ extern "C" int mochi_llvm_runtime_probe() {
   if (error || space.capacity < space.available) return 8;
   std::puts("llvm-runtime: PASS vector string regex pthread exception filesystem");
   std::puts("auxiliary: PASS executable metadata identity secure clock and errno");
+#ifdef MOCHIOS_NATIVE_CLANG_PIPELINE_PROBE_231
+  if (mochi_native_clang_pipeline_probe()) return 31;
+#endif
   return 0;
 }
 
