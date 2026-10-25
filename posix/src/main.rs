@@ -1613,11 +1613,13 @@ fn main() {
                     protocol::OP_WAIT_CHILD
                         | protocol::OP_WAIT_CHILD_GUARDED
                         | protocol::OP_WAIT_CHILD_INFO
+                        | protocol::OP_WAIT_CHILD_USAGE
                 )
                     && header.flags == 0
                     && attachments.is_empty() =>
             {
                 let detailed = header.opcode == protocol::OP_WAIT_CHILD_INFO;
+                let with_usage = header.opcode == protocol::OP_WAIT_CHILD_USAGE;
                 let parsed = if header.opcode != protocol::OP_WAIT_CHILD {
                     protocol::decode_guarded_wait_request(payload)
                         .map_err(|_| posix_service::STATUS_EINVAL)
@@ -1648,10 +1650,17 @@ fn main() {
                             None => Ok(()),
                         });
                         match validated.and_then(|()| {
-                            service.wait_child_info_with_reply(
-                                peer, request, &mut filesystem, &mut processes,
-                                |info| reply_wait_info(sender, header.request_id, Ok(info), detailed),
-                            )
+                            if with_usage {
+                                service.wait_child_usage_with_reply(
+                                    peer, request, &mut filesystem, &mut processes,
+                                    |info, usage| reply_wait_usage(sender, header.request_id, info, usage),
+                                )
+                            } else {
+                                service.wait_child_info_with_reply(
+                                    peer, request, &mut filesystem, &mut processes,
+                                    |info| reply_wait_info(sender, header.request_id, Ok(info), detailed),
+                                )
+                            }
                         }) {
                             Err(protocol::STATUS_EAGAIN) => {
                                 pending_waits.push(PendingWait {
@@ -1661,6 +1670,7 @@ fn main() {
                                     request,
                                     guard,
                                     detailed,
+                                    with_usage,
                                     image,
                                 });
                                 None
@@ -2531,6 +2541,7 @@ struct PendingWait {
     request: mochios_posix_protocol::WaitRequest,
     guard: Option<(mnu_abi::ExecutionIdentity, u64)>,
     detailed: bool,
+    with_usage: bool,
     image: posix_service::RequestImage,
 }
 
@@ -2660,10 +2671,17 @@ fn complete_pending_waits(
             None => Ok(()),
         });
         let result = validated.and_then(|()| {
-            service.wait_child_info_with_reply(
-                wait.peer, wait.request, filesystem, processes,
-                |info| reply_wait_info(wait.sender, wait.request_id, Ok(info), wait.detailed),
-            )
+            if wait.with_usage {
+                service.wait_child_usage_with_reply(
+                    wait.peer, wait.request, filesystem, processes,
+                    |info, usage| reply_wait_usage(wait.sender, wait.request_id, info, usage),
+                )
+            } else {
+                service.wait_child_info_with_reply(
+                    wait.peer, wait.request, filesystem, processes,
+                    |info| reply_wait_info(wait.sender, wait.request_id, Ok(info), wait.detailed),
+                )
+            }
         });
         if result == Err(protocol::STATUS_EAGAIN) {
             index += 1;
@@ -2907,6 +2925,40 @@ fn wait_info_response(
             }
         }
         Err(status) => status_response(request_id, status),
+    }
+}
+
+#[cfg(target_os = "mochios")]
+fn reply_wait_usage(
+    sender: u64,
+    request_id: u64,
+    info: mochios_posix_protocol::WaitInfo,
+    usage: posix_service::WaitedChildCpuUsage,
+) -> bool {
+    use mochios_posix_protocol as protocol;
+    let observation = protocol::wait_usage::Observation {
+        info,
+        usage: protocol::WaitedChildCpuUsage {
+            user_ticks: usage.user_ticks,
+            kernel_ticks: usage.kernel_ticks,
+            ticks_per_second: usage.ticks_per_second,
+        },
+    };
+    let mut payload = [0; protocol::wait_usage::LEN];
+    if protocol::wait_usage::encode(observation, &mut payload).is_err() {
+        reply_wait_info(sender, request_id, Err(protocol::STATUS_EIO), false);
+        return false;
+    }
+    let header = protocol::Header {
+        opcode: protocol::OP_STATUS,
+        request_id,
+        payload_len: payload.len() as u32,
+        ..Default::default()
+    };
+    let mut bytes = [0; protocol::HEADER_LEN + protocol::wait_usage::LEN];
+    match protocol::encode(header, &payload, &mut bytes) {
+        Ok(length) => mochi_user_platform::ipc::reply(sender, &bytes[..length]).is_ok(),
+        Err(_) => false,
     }
 }
 

@@ -16,8 +16,14 @@
 #ifdef MOCHIOS_MEMORY_ADVICE_PROBE_218
 extern "C" int mochi_memory_advice_probe(void);
 #endif
+#ifdef MOCHIOS_WAIT_USAGE_PROBE_222
+extern "C" int mochi_wait_usage_probe(void);
+#endif
 
 extern "C" int mochi_llvm_runtime_probe() {
+#ifdef MOCHIOS_WAIT_USAGE_PROBE_222
+  if (mochi_wait_usage_probe()) return 22;
+#endif
 #ifdef MOCHIOS_MEMORY_ADVICE_PROBE_218
   if (mochi_memory_advice_probe()) return 18;
 #endif

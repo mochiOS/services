@@ -36,7 +36,7 @@ pub mod mnu_abi {
 #[derive(Clone,Copy)]pub struct PeerIdentity{pub process_id:u64}
 #[derive(Clone,Copy)]pub struct RequestImage(u64);
 #[derive(Clone,Copy)]pub struct WaitRequest;
-pub type WaitInfo=i32;
+pub type WaitInfo=i32;pub type WaitedChildCpuUsage=i32;
 pub struct PosixService<T=u32>(std::marker::PhantomData<T>);
 impl PosixService<u32> {
 fn validate_request_image(&mut self,_:PeerIdentity,image:RequestImage,_:&mut RuntimeProcesses)->Result<(),i32>{
@@ -47,6 +47,9 @@ fn validate_request_image(&mut self,_:PeerIdentity,image:RequestImage,_:&mut Run
 fn validate_wait_delivery_epoch(&self,_:PeerIdentity,_:mnu_abi::ExecutionIdentity,_:u64)->Result<(),i32>{Ok(())}
 fn wait_child_info_with_reply<R:FnOnce(i32)->bool>(&mut self,_:PeerIdentity,_:WaitRequest,_:&mut RuntimeFilesystem,_:&mut RuntimeProcesses,reply:R)->Result<Option<i32>,i32>{
  if reply(37){CONSUMED.set(CONSUMED.get()+1);Ok(Some(37))}else{Ok(None)}
+}
+fn wait_child_usage_with_reply<R:FnOnce(i32,i32)->bool>(&mut self,peer:PeerIdentity,request:WaitRequest,fs:&mut RuntimeFilesystem,processes:&mut RuntimeProcesses,reply:R)->Result<Option<i32>,i32>{
+ self.wait_child_info_with_reply(peer,request,fs,processes,|info|reply(info,0))
 }
 fn poll_wait_signal_info_with_timers<R:FnOnce(u32)->bool>(&mut self,_:PeerIdentity,_:RequestImage,_:mnu_abi::ExecutionIdentity,_:u64,_:u64,_:Option<u64>,_:u64,_:&mut RuntimeProcesses,reply:R)->Result<SignalWaitCompletion,i32>{
  if reply(10){CONSUMED.set(CONSUMED.get()+1);Ok(SignalWaitCompletion::Replied)}else{Ok(SignalWaitCompletion::Undelivered)}
@@ -71,7 +74,7 @@ fn signal_wait_response(_:u64,result:Result<u32,i32>)->Response{if PAYLOAD_FAILU
 fn response(result:Result<(),i32>)->Response{Response{header:Header{status:result.err().unwrap_or(0)},payload:vec![]}}
 #[derive(Clone,Copy)]struct PendingWait {
 sender:u64,peer:PeerIdentity,request_id:u64,request:WaitRequest,
-guard:Option<(mnu_abi::ExecutionIdentity,u64)>,detailed:bool,image:RequestImage,
+guard:Option<(mnu_abi::ExecutionIdentity,u64)>,detailed:bool,with_usage:bool,image:RequestImage,
 }
 #[derive(Clone,Copy)]struct PendingSignalWait {
 sender:u64,peer:PeerIdentity,identity:mnu_abi::ExecutionIdentity,request_id:u64,
@@ -104,10 +107,11 @@ mask:u64,epoch:u64,deadline:Option<u64>,image:RequestImage,
         "fn complete_pending_waits(",
         "#[cfg(target_os = \"mochios\")]\nfn wait_for_request_or_child(",
     ));
+    program.push_str("fn reply_wait_usage(sender:u64,id:u64,info:i32,_:i32)->bool{reply_wait_info(sender,id,Ok(info),true)}\n");
     program.push_str(
         r#"
 fn main(){
-for signal in [false,true] {for guarded in [false,true] {for mode in 0..9 {
+for with_usage in [false,true] {for signal in [false,true] {for guarded in [false,true] {for mode in 0..9 {
  IMAGE.set(if mode==1{1}else{0});FAILURE.set(match mode{2=>-5,5=>-3,_=>0});
  ENDPOINT_OWNER.set(if mode==4{2}else{1});IMAGE_READS.set(0);
  REPLY_FAILURE.set(mode==6);
@@ -127,7 +131,7 @@ for signal in [false,true] {for guarded in [false,true] {for mode in 0..9 {
  } else {
  let mut pending=vec![PendingWait{sender:5,peer:PeerIdentity{process_id:1},request_id:7,
  request:WaitRequest,guard:if guarded{Some((mnu_abi::ExecutionIdentity{process_id:1,thread_id:11},0))}else{None},
- detailed:guarded,image:RequestImage(0)}];
+ detailed:guarded,with_usage,image:RequestImage(0)}];
  complete_pending_waits(&mut pending,&mut service,&mut RuntimeFilesystem,&mut processes);
  assert!(pending.is_empty());
  }
@@ -135,7 +139,7 @@ for signal in [false,true] {for guarded in [false,true] {for mode in 0..9 {
  assert_eq!(REPLIES.get(),u32::from(mode!=7));
  assert_eq!(STATUS.get(),match mode{0|6=>0,2=>-5,4=>-1,7=>99,8=>-22,_=>-3});
  assert_eq!(IMAGE_READS.get(),u32::from(![3,4].contains(&mode)));
-}}}
+}}}}
 }
 "#,
     );
