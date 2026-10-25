@@ -1752,6 +1752,7 @@ dependencies = [
  "mochi-user-platform",
  "mochi-user-syscall",
  "mochios-filesystem-protocol",
+ "mochios-net-device-protocol",
  "mochios-posix-protocol",
 ]
 

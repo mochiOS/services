@@ -691,3 +691,136 @@ fn factory_validation_is_a_control_plane_request_without_creating_a_binding() {
     STATE.with_borrow_mut(|s| s.open_mode = 1);
     assert_eq!(backend.validate(), Err(-13));
 }
+
+#[test]
+fn shared_ram_records_preserve_empty_datagrams_sources_and_failed_output_copies() {
+    use mochios_posix_protocol::socket_record::{self as wire, Operation, Reply, Request};
+    use posix_service::socket_record_io::RecordBuffer;
+    struct Ram {
+        bytes: Vec<u8>,
+        failed: bool,
+    }
+    impl RecordBuffer for Ram {
+        fn extent(&self) -> Result<u64, i32> {
+            Ok(self.bytes.len() as u64)
+        }
+        fn read(&mut self, offset: u64, out: &mut [u8]) -> Result<(), i32> {
+            out.copy_from_slice(&self.bytes[offset as usize..offset as usize + out.len()]);
+            Ok(())
+        }
+        fn write(&mut self, offset: u64, input: &[u8]) -> Result<(), i32> {
+            if self.failed {
+                return Err(-14);
+            }
+            self.bytes[offset as usize..offset as usize + input.len()].copy_from_slice(input);
+            Ok(())
+        }
+    }
+    reset();
+    let mut registry = posix_service::inet_socket::Registry::new();
+    let receiver = registry.insert(socket()).unwrap();
+    let sender = registry.insert(socket()).unwrap();
+    let mut address = [0; mochios_posix_protocol::socket::MAX_ADDRESS_LEN];
+    let n = ip(8000).encode(&mut address).unwrap();
+    assert_eq!(
+        provider_request(
+            &mut registry,
+            receiver,
+            mnu_abi::provider::OP_CONTROL,
+            mochios_posix_protocol::socket::CONTROL_BIND,
+            &address[..n],
+            0,
+            true
+        )
+        .0,
+        0
+    );
+    let mut ram = Ram {
+        bytes: vec![0; 128],
+        failed: false,
+    };
+    let mut response = [0; wire::MAX_REPLY_LEN];
+    let send = Request {
+        operation: Operation::SendTo,
+        offset: 17,
+        length: 0,
+        peek: false,
+    };
+    registry
+        .transfer_record(sender, send, Some(ip(8000)), &mut ram, &mut response)
+        .unwrap();
+    let receive = Request {
+        operation: Operation::Receive,
+        ..send
+    };
+    let n = registry
+        .transfer_record(receiver, receive, None, &mut ram, &mut response)
+        .unwrap();
+    let r = Reply::decode(receive, &response[..n]).unwrap();
+    assert_eq!((r.copied, r.length), (0, 0));
+    assert!(matches!(r.source,Some(Address::Ipv4{address:[127,0,0,1],port}) if port!=0));
+    ram.bytes[17..22].copy_from_slice(b"hello");
+    let send = Request { length: 5, ..send };
+    registry
+        .transfer_record(sender, send, Some(ip(8000)), &mut ram, &mut response)
+        .unwrap();
+    let receive = Request {
+        length: 2,
+        ..receive
+    };
+    ram.failed = true;
+    assert_eq!(
+        registry.transfer_record(receiver, receive, None, &mut ram, &mut response),
+        Err(-14)
+    );
+    ram.failed = false;
+    let peek = Request {
+        peek: true,
+        ..receive
+    };
+    for _ in 0..2 {
+        let n = registry
+            .transfer_record(receiver, peek, None, &mut ram, &mut response)
+            .unwrap();
+        let r = Reply::decode(peek, &response[..n]).unwrap();
+        assert_eq!((r.copied, r.length), (2, 5));
+        assert_eq!(&ram.bytes[17..19], b"he");
+    }
+    let bad = Request {
+        offset: 128,
+        length: 1,
+        ..receive
+    };
+    assert_eq!(
+        registry.transfer_record(receiver, bad, None, &mut ram, &mut response),
+        Err(-22)
+    );
+    assert_eq!(
+        registry.transfer_record(receiver, receive, None, &mut ram, &mut response[..1]),
+        Err(-22)
+    );
+    let n = registry
+        .transfer_record(receiver, receive, None, &mut ram, &mut response)
+        .unwrap();
+    assert_eq!(Reply::decode(receive, &response[..n]).unwrap().length, 5);
+    assert_eq!(
+        registry.transfer_record(receiver, receive, None, &mut ram, &mut response),
+        Err(-11)
+    );
+    registry
+        .transfer_record(sender, send, Some(ip(8000)), &mut ram, &mut response)
+        .unwrap();
+    let receive = Request {
+        length: 0,
+        ..receive
+    };
+    let n = registry
+        .transfer_record(receiver, receive, None, &mut ram, &mut response)
+        .unwrap();
+    let r = Reply::decode(receive, &response[..n]).unwrap();
+    assert_eq!((r.copied, r.length), (0, 5));
+    assert_eq!(
+        registry.transfer_record(receiver, receive, None, &mut ram, &mut response),
+        Err(-11)
+    );
+}

@@ -1,5 +1,9 @@
-//! Executed only by a diagnostic manager after authenticated endpoint handoff.
-//! The diagnostic manifest alone adds net.connect; normal manager gets none.
+#[cfg(target_os = "mochios")]
+mod libc_udp {
+    include!("support/native_libc_udp.inc");
+}
+// Executed only by a diagnostic manager after authenticated endpoint handoff.
+// The diagnostic manifest alone adds net.connect; normal manager gets none.
 #[cfg(target_os = "mochios")]
 #[path = "../../../user/crates/net-device-protocol/src/datagram_authority.rs"]
 mod authority;
@@ -18,6 +22,26 @@ pub fn run(posix: u32, network: u32) {
     }
     p::io::stdout(b"inet-socket: starting native factory/Provider checks\n").unwrap();
     let client = Client::new(SyscallEndpointTransport::new(posix));
+    let inherited = Client::from_syscall_launch_context().expect("libc POSIX launch endpoint");
+    inherited
+        .resource_limit(0, mochios_posix_protocol::RLIMIT_NOFILE, None)
+        .expect("libc FD policy");
+    let discovered = inherited
+        .network_endpoint(|h| {
+            p::handle::close(h).unwrap();
+        })
+        .expect("network endpoint getter");
+    let checked = mochios_posix_client::network::acquire_factory(
+        &SyscallEndpointTransport::new(discovered.handle),
+        |h| {
+            p::handle::close(h).unwrap();
+        },
+    )
+    .expect("network factory acquisition");
+    p::handle::close(checked.handle).unwrap();
+    p::handle::close(discovered.handle).unwrap();
+    p::io::stdout(b"libc-udp: endpoint discovery and caller authority PASS\n").unwrap();
+    libc_udp::run();
     fn acquire(network: u32) -> Result<Object<u32>, i32> {
         let mut bytes = [0; authority::REPLY_LEN];
         let mut objects = p::ipc::IpcObjectHandles::default();
@@ -78,6 +102,7 @@ pub fn run(posix: u32, network: u32) {
     )
     .unwrap();
     assert_eq!(acquire(network), Err(-13));
+    libc_udp::denied_after_capability_drop();
     for _ in 0..64 {
         let socket = client.open_inet_datagram(create(), factory, close).unwrap();
         bind(socket.handle, 60000);

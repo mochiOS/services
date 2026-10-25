@@ -307,6 +307,7 @@ fn run(endpoint: u32, service_process: u64, service: Arc<Mutex<PosixService<u32>
             let (affected, retained) = super::socket_record_native::dispatch(
                 endpoint,
                 &mut streams,
+                &mut inet,
                 &mut receive_waits,
                 &mut routes,
                 sender,

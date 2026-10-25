@@ -1,11 +1,11 @@
 use mochios_posix_protocol::{
     socket::Address,
-    socket_record::{Operation, Reply, Request, MAX_RECORD_SIZE, MAX_REPLY_LEN},
+    socket_record::{MAX_RECORD_SIZE, MAX_REPLY_LEN, Operation, Reply, Request},
 };
 use posix_service::{
-    socket_record::{RecordQueue, SourceAddress},
-    socket_record_io::{authorize, transfer, RecordBuffer},
     AttachedObject,
+    socket_record::{RecordQueue, SourceAddress},
+    socket_record_io::{RecordBuffer, authorize, transfer},
 };
 
 fn request(operation: Operation, length: usize) -> Request {
@@ -128,9 +128,11 @@ fn reply_codec_binds_counts_source_and_operation_to_the_request() {
             ..reply
         },
         Reply {
-            source: Some(Address::Ipv4 {
-                address: [0; 4],
+            source: Some(Address::Ipv6 {
+                address: [0; 16],
                 port: 0,
+                flow_info: 0,
+                scope_id: 0,
             }),
             ..reply
         },
@@ -238,9 +240,11 @@ fn full_sized_record_uses_shared_buffer_and_one_queue_commit() {
         &original[17..17 + MAX_RECORD_SIZE]
     );
     assert_eq!(&buffer.bytes[..17], &[0; 17]);
-    assert!(buffer.bytes[17 + MAX_RECORD_SIZE..]
-        .iter()
-        .all(|byte| *byte == 0));
+    assert!(
+        buffer.bytes[17 + MAX_RECORD_SIZE..]
+            .iter()
+            .all(|byte| *byte == 0)
+    );
     assert_eq!((queue.len(), buffer.writes), (0, 1));
 }
 
@@ -401,4 +405,55 @@ fn peek_truncation_empty_records_and_queue_pressure_are_not_stream_operations() 
     );
     assert_eq!(buffer.reads, reads);
     assert_eq!(queue.charged(), MAX_RECORD_SIZE);
+}
+
+#[test]
+fn numeric_sendto_frames_bind_the_destination_and_allow_ipv4_receive_sources() {
+    use mochios_posix_protocol::socket_record as wire;
+    let request = Request {
+        operation: Operation::SendTo,
+        offset: 17,
+        length: 0,
+        peek: false,
+    };
+    let address = Address::Ipv4 {
+        address: [127, 0, 0, 1],
+        port: 8000,
+    };
+    let mut bytes = [0; wire::REQUEST_LEN + mochios_posix_protocol::socket::MAX_ADDRESS_LEN];
+    let n = wire::encode_send_to(request, address, &mut bytes).unwrap();
+    assert_eq!(
+        wire::decode_frame(&bytes[..n]),
+        Ok((request, Some(address)))
+    );
+    assert!(wire::decode_frame(&bytes[..wire::REQUEST_LEN]).is_err());
+    assert!(wire::decode_frame(&bytes[..n - 1]).is_err());
+    assert!(wire::decode_frame(&bytes[..n + 1]).is_err());
+    let mut reserved = bytes;
+    reserved[24] = 1;
+    assert!(wire::decode_frame(&reserved[..n]).is_err());
+    assert!(wire::encode_send_to(request, Address::UnixUnnamed, &mut bytes).is_err());
+    let receive = Request {
+        operation: Operation::Receive,
+        length: 2,
+        ..request
+    };
+    let mut reply = [0; MAX_REPLY_LEN];
+    let n = Reply {
+        copied: 2,
+        length: 5,
+        source: Some(address),
+    }
+    .encode(receive, &mut reply)
+    .unwrap();
+    assert_eq!(
+        Reply::decode(receive, &reply[..n]).unwrap().source,
+        Some(address)
+    );
+    let ordinary = Request {
+        operation: Operation::Send,
+        ..request
+    };
+    let base = ordinary.encode().unwrap();
+    assert_eq!(wire::decode_frame(&base), Ok((ordinary, None)));
 }

@@ -3,7 +3,7 @@
 
 use mochi_user_platform as platform;
 use mochios_posix_protocol::socket_record as wire;
-use posix_service::{socket::Streams, socket_record_io, AttachedObject, OpenedObject};
+use posix_service::{AttachedObject, OpenedObject, socket::Streams, socket_record_io};
 
 pub fn endpoint_reference(endpoint: u32) -> Result<Vec<OpenedObject<u32>>, i32> {
     let mut result = Vec::new();
@@ -20,6 +20,9 @@ pub fn endpoint_reference(endpoint: u32) -> Result<Vec<OpenedObject<u32>>, i32> 
 pub fn dispatch(
     endpoint: u32,
     streams: &mut Streams,
+    inet: &mut posix_service::inet_socket::Registry<
+        posix_service::inet_datagram_native::NetworkBackend,
+    >,
     waits: &mut posix_service::socket_receive_wait::ReceiveWaits<u32>,
     routes: &mut posix_service::socket_route::Routes<u32>,
     sender: u64,
@@ -36,7 +39,7 @@ pub fn dispatch(
     }
     let mut response = [0; wire::MAX_REPLY_LEN];
     let result = (|| {
-        let request = wire::Request::decode(bytes).map_err(|_| -22)?;
+        let (request, destination) = wire::decode_frame(bytes).map_err(|_| -22)?;
         if attachments.count != 2 {
             return Err(-22);
         }
@@ -59,6 +62,19 @@ pub fn dispatch(
         // endpoint thread. A foreign Provider or numeric object ID is useless.
         let id = platform::handle::identify_provider_object(socket.handle)
             .map_err(|error| error.raw() as i32)?;
+        if posix_service::inet_socket::is_inet(id) {
+            let n = inet.transfer_record(
+                id,
+                request,
+                destination,
+                &mut socket_record_io::NativeBuffer::borrowed(buffer.handle),
+                &mut response,
+            )?;
+            return Ok((n, [0, 0]));
+        }
+        if request.operation == wire::Operation::SendTo {
+            return Err(-97);
+        }
         if request.operation == wire::Operation::SendRoute {
             return routes.transfer(
                 streams,

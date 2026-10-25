@@ -1262,6 +1262,33 @@ fn main() {
                     handles: Vec::new(),
                 })
             }
+            (Some(_peer), Some((header, payload)), true)
+                if header.opcode == protocol::OP_NETWORK_ENDPOINT_GET =>
+            {
+                let result = (|| {
+                    if header.flags != 0 || header.status != 0
+                        || !payload.is_empty() || !attachments.is_empty()
+                    {
+                        return Err(-22);
+                    }
+                    let mut handles = Vec::new();
+                    handles.try_reserve(1).map_err(|_| -12)?;
+                    let rights = protocol::network::client_endpoint_rights();
+                    let handle = platform::handle::duplicate(
+                        service.network_endpoint().ok_or(-6)?, rights,
+                    ).map_err(|error| protocol::status::normalize_failure(error.raw()))?;
+                    handles.push(posix_service::OpenedObject { handle, rights });
+                    Ok(handles)
+                })();
+                Some(match result {
+                    Ok(handles) => posix_service::ObjectResponse {
+                        response: success_response(header.request_id), handles,
+                    },
+                    Err(status) => posix_service::ObjectResponse {
+                        response: status_response(header.request_id, status), handles: Vec::new(),
+                    },
+                })
+            }
             (Some(peer), Some((header, payload)), true)
                 if header.opcode == protocol::OP_NETWORK_ENDPOINT_INSTALL =>
             {

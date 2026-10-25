@@ -80,6 +80,83 @@ impl<B: Backend> Registry<B> {
             }
         }
     }
+    pub fn transfer_record(
+        &mut self,
+        id: u64,
+        request: mochios_posix_protocol::socket_record::Request,
+        destination: Option<wire::Address<'_>>,
+        buffer: &mut impl crate::socket_record_io::RecordBuffer,
+        response: &mut [u8],
+    ) -> Result<usize, i32> {
+        use mochios_posix_protocol::socket_record::{self as record, Operation};
+        request.validate().map_err(|_| -22)?;
+        if response.len() < record::MAX_REPLY_LEN {
+            return Err(-22);
+        }
+        if request
+            .offset
+            .checked_add(u64::from(request.length))
+            .ok_or(-22)?
+            > buffer.extent()?
+        {
+            return Err(-22);
+        }
+        let socket = &mut self.row(id)?.socket;
+        match request.operation {
+            Operation::Send | Operation::SendTo => {
+                if (request.operation == Operation::SendTo) != destination.is_some() {
+                    return Err(-22);
+                }
+                if request.length as usize > socket.maximum_payload() {
+                    return Err(-90);
+                }
+                let mut payload = Vec::new();
+                payload
+                    .try_reserve_exact(request.length as usize)
+                    .map_err(|_| -12)?;
+                payload.resize(request.length as usize, 0);
+                buffer.read(request.offset, &mut payload)?;
+                let n = record::Reply {
+                    copied: request.length,
+                    length: request.length,
+                    source: None,
+                }
+                .encode(request, response)
+                .map_err(|_| -5)?;
+                socket.send_to(destination, &payload)?;
+                Ok(n)
+            }
+            Operation::Receive => {
+                if destination.is_some() {
+                    return Err(-22);
+                }
+                let length = (request.length as usize).min(socket.maximum_payload());
+                let mut payload = Vec::new();
+                payload.try_reserve_exact(length).map_err(|_| -12)?;
+                payload.resize(length, 0);
+                // Only this worker owns the lower packet reference. Ingress
+                // may append but cannot replace this head between peek/copy/pop.
+                let received = socket.receive_from(true, &mut payload)?;
+                let n = record::Reply {
+                    copied: received.copied as u32,
+                    length: received.original as u32,
+                    source: Some(received.source.as_address()),
+                }
+                .encode(request, response)
+                .map_err(|_| -5)?;
+                buffer.write(request.offset, &payload[..received.copied])?;
+                if !request.peek {
+                    let removed = socket.receive_from(false, &mut [])?;
+                    if removed.source != received.source || removed.original != received.original {
+                        return Err(-5);
+                    }
+                }
+                Ok(n)
+            }
+            _ => Err(-95),
+        }
+    }
+
     pub fn dispatch(
         &mut self,
         bytes: &[u8],

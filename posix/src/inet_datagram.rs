@@ -92,6 +92,9 @@ impl<B: Backend> Datagram<B> {
             send_timeout: 0,
         })
     }
+    pub fn maximum_payload(&self) -> usize {
+        self.backend.maximum_payload()
+    }
     pub fn binding_handle(&self) -> Option<B::Handle> {
         self.binding
     }

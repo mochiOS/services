@@ -107,6 +107,7 @@ pub fn transfer_from(
     data.resize(length, 0);
     match request.operation {
         Operation::WaitSend => Err(-22),
+        Operation::SendTo => Err(-97),
         Operation::Send | Operation::SendRoute => {
             buffer.read(request.offset, &mut data)?;
             let reply = wire::Reply {

@@ -3872,6 +3872,7 @@ impl<H: Copy> PosixService<H> {
             | protocol::OP_PROCESS_LAUNCH_ABORT
             | protocol::OP_PROCESS_TREE_TERMINATE
             | protocol::OP_PROCESS_TREE_RECLAIM
+            | protocol::OP_NETWORK_ENDPOINT_GET
             | protocol::OP_NETWORK_ENDPOINT_INSTALL
             | protocol::OP_PROCESS_INITIALIZE
             | protocol::OP_WAIT_CHILD

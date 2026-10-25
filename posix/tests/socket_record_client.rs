@@ -1,6 +1,6 @@
 use mochios_posix_client::{
-    socket_record, Client, ClientError, ObjectHandleAttachment as Handle, ObjectHandles,
-    ObjectTransport, Transport,
+    Client, ClientError, ObjectHandleAttachment as Handle, ObjectHandles, ObjectTransport,
+    Transport, socket_record,
 };
 use mochios_posix_protocol::{
     self as protocol,
@@ -92,7 +92,18 @@ impl ObjectTransport for Mock {
             )
             .unwrap());
         }
-        let request = Request::decode(bytes).unwrap();
+        let (request, destination) = wire::decode_frame(bytes).unwrap();
+        if request.operation == Operation::SendTo {
+            assert_eq!(
+                destination,
+                Some(protocol::socket::Address::Ipv4 {
+                    address: [127, 0, 0, 1],
+                    port: 1234
+                })
+            );
+        } else {
+            assert_eq!(destination, None);
+        }
         assert_eq!(
             handles.get(0),
             Some(Handle {
@@ -346,4 +357,41 @@ fn prepare_route_returns_only_scoped_write_wait_authority_and_cleans_bad_replies
         ));
     }
     assert_eq!(mock.calls.get(), 0);
+}
+
+#[test]
+fn numeric_send_to_binds_destination_attenuates_resources_and_cleans_replies() {
+    let request = Request {
+        operation: Operation::SendTo,
+        offset: 17,
+        length: 3,
+        peek: false,
+    };
+    for case in 0..6 {
+        let mock = Mock {
+            case,
+            calls: Cell::new(0),
+        };
+        let mut closed = vec![];
+        let mut response = [0; wire::MAX_REPLY_LEN];
+        let result = socket_record::send_to(
+            &mock,
+            request,
+            protocol::socket::Address::Ipv4 {
+                address: [127, 0, 0, 1],
+                port: 1234,
+            },
+            source(10),
+            source(20),
+            &mut response,
+            |handle| closed.push(handle),
+        );
+        if case == 0 {
+            assert_eq!(result.unwrap().copied, 3);
+        } else {
+            assert!(result.is_err());
+        }
+        assert_eq!(mock.calls.get(), 1);
+        assert_eq!(closed, if case >= 2 { vec![42] } else { vec![] });
+    }
 }
