@@ -565,7 +565,7 @@ pub enum ProcessLifecycle {
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct ProcessWaitState {
-    waited_cpu: WaitedChildCpuUsage,
+    waited_usage: WaitedChildUsage,
     // A launcher registered a fresh executable, not a pre-exec fork image.
     // Native image revisions count replacements only; initial loaded images
     // already cross the POSIX spawn/exec boundary without a replacement.
@@ -783,6 +783,9 @@ pub trait ProcessBackend<H: Copy> {
     }
     /// Reads the retained native process object, not client-supplied metrics.
     fn execution_usage(&mut self, process: H) -> Result<mnu_abi::ProcessExecutionUsage, i32>;
+    fn memory_usage(&mut self, _process: H) -> Result<mnu_abi::ProcessMemoryUsage, i32> {
+        Err(protocol::STATUS_ENOSYS)
+    }
     fn suspend(&mut self, process: H) -> Result<(), i32>;
     /// Resume a retained native object; success confirms completion, not queuing.
     fn resume(&mut self, _process: H) -> Result<(), i32> {
@@ -824,6 +827,32 @@ impl WaitedChildCpuUsage {
                 .ok_or(STATUS_EOVERFLOW)?,
             ticks_per_second: rate,
         })
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct WaitedChildUsage {
+    pub cpu: WaitedChildCpuUsage,
+    pub peak_resident_bytes: u64,
+}
+
+impl WaitedChildUsage {
+    pub fn checked_add(self, other: Self) -> Result<Self, i32> {
+        Ok(Self {
+            cpu: self.cpu.checked_add(other.cpu)?,
+            peak_resident_bytes: self.peak_resident_bytes.max(other.peak_resident_bytes),
+        })
+    }
+
+    fn wire(self) -> protocol::wait_usage::Usage {
+        protocol::wait_usage::Usage {
+            cpu: protocol::WaitedChildCpuUsage {
+                user_ticks: self.cpu.user_ticks,
+                kernel_ticks: self.cpu.kernel_ticks,
+                ticks_per_second: self.cpu.ticks_per_second,
+            },
+            peak_resident_bytes: self.peak_resident_bytes,
+        }
     }
 }
 
@@ -2127,30 +2156,37 @@ impl<H: Copy> PosixService<H> {
     where
         F: FilesystemBackend<H>,
         P: ProcessBackend<H>,
-        R: FnOnce(protocol::WaitInfo, WaitedChildCpuUsage) -> bool,
+        R: FnOnce(protocol::WaitInfo, WaitedChildUsage) -> bool,
     {
         self.wait_child_observation_with_reply(
             peer, request, filesystem, processes, true, reply,
         )
     }
 
-    fn child_wait_cpu_usage<P: ProcessBackend<H>>(
+    fn child_wait_usage<P: ProcessBackend<H>>(
         &self,
         child: u64,
         handle: H,
         processes: &mut P,
-    ) -> Result<WaitedChildCpuUsage, i32> {
+    ) -> Result<WaitedChildUsage, i32> {
         let usage = processes.execution_usage(handle)?;
         if usage.ticks_per_second == 0 || usage.reserved != 0 {
             return Err(protocol::STATUS_EIO);
         }
-        let own = WaitedChildCpuUsage {
-            user_ticks: u128::from(usage.user_ticks),
-            kernel_ticks: u128::from(usage.kernel_ticks),
-            ticks_per_second: usage.ticks_per_second,
+        let memory = processes.memory_usage(handle)?;
+        if memory.current_bytes > memory.peak_bytes {
+            return Err(protocol::STATUS_EIO);
+        }
+        let own = WaitedChildUsage {
+            cpu: WaitedChildCpuUsage {
+                user_ticks: u128::from(usage.user_ticks),
+                kernel_ticks: u128::from(usage.kernel_ticks),
+                ticks_per_second: usage.ticks_per_second,
+            },
+            peak_resident_bytes: memory.peak_bytes,
         };
         let descendant = self.process_wait_states.get(&child)
-            .ok_or(protocol::STATUS_ESRCH)?.waited_cpu;
+            .ok_or(protocol::STATUS_ESRCH)?.waited_usage;
         own.checked_add(descendant)
     }
 
@@ -2166,7 +2202,7 @@ impl<H: Copy> PosixService<H> {
     where
         F: FilesystemBackend<H>,
         P: ProcessBackend<H>,
-        R: FnOnce(protocol::WaitInfo, WaitedChildCpuUsage) -> bool,
+        R: FnOnce(protocol::WaitInfo, WaitedChildUsage) -> bool,
     {
         self.matching_child_ids(peer, request)?;
         self.reap_discarded_children_for(Some(peer.process_id), filesystem, processes)?;
@@ -2196,9 +2232,9 @@ impl<H: Copy> PosixService<H> {
                     .map(|signal| signal & 0x7f)
                     .unwrap_or_else(|| ((exit_code & 0xff) as u32) << 8);
                 let usage = if include_usage || request.options & protocol::WAIT_NOWAIT == 0 {
-                    self.child_wait_cpu_usage(child, handle, processes)?
+                    self.child_wait_usage(child, handle, processes)?
                 } else {
-                    WaitedChildCpuUsage::default()
+                    WaitedChildUsage::default()
                 };
                 if request.options & protocol::WAIT_NOWAIT != 0 {
                     let info = protocol::WaitInfo {
@@ -2213,7 +2249,7 @@ impl<H: Copy> PosixService<H> {
                 let total = self.process_wait_states
                     .get(&peer.process_id)
                     .ok_or(protocol::STATUS_ESRCH)?
-                    .waited_cpu
+                    .waited_usage
                     .checked_add(usage)?;
                 // Compute and validate first. Backend failures and overflow
                 // leave the child waitable and do not partially add its time.
@@ -2231,7 +2267,7 @@ impl<H: Copy> PosixService<H> {
                 // No fallible observation or accounting follows publication.
                 self.reap_observed_child(peer.process_id, child, filesystem, processes);
                 self.process_wait_states.get_mut(&peer.process_id)
-                    .unwrap().waited_cpu = total;
+                    .unwrap().waited_usage = total;
                 return Ok(Some(info));
             }
             can_change = true;
@@ -2241,9 +2277,9 @@ impl<H: Copy> PosixService<H> {
                 .and_then(|state| state.take_status(request.options | protocol::WAIT_NOWAIT))
             {
                 let usage = if include_usage {
-                    self.child_wait_cpu_usage(child, handle, processes)?
+                    self.child_wait_usage(child, handle, processes)?
                 } else {
-                    WaitedChildCpuUsage::default()
+                    WaitedChildUsage::default()
                 };
                 let info = protocol::WaitInfo {
                     result: protocol::WaitResult {
@@ -2267,7 +2303,7 @@ impl<H: Copy> PosixService<H> {
         }
         if request.options & protocol::WAIT_NOHANG != 0 {
             let info = protocol::WaitInfo::default();
-            Ok(reply(info, WaitedChildCpuUsage::default()).then_some(info))
+            Ok(reply(info, WaitedChildUsage::default()).then_some(info))
         } else {
             Err(protocol::STATUS_EAGAIN)
         }
@@ -2275,9 +2311,13 @@ impl<H: Copy> PosixService<H> {
 
     /// Only the authenticated caller's already-waited child time is exposed.
     pub fn waited_child_cpu_usage(&self, peer: PeerIdentity) -> Result<WaitedChildCpuUsage, i32> {
+        self.waited_child_usage(peer).map(|usage| usage.cpu)
+    }
+
+    pub fn waited_child_usage(&self, peer: PeerIdentity) -> Result<WaitedChildUsage, i32> {
         self.process_wait_states
             .get(&peer.process_id)
-            .map(|state| state.waited_cpu)
+            .map(|state| state.waited_usage)
             .ok_or(protocol::STATUS_ESRCH)
     }
 
@@ -3811,6 +3851,14 @@ impl<H: Copy> PosixService<H> {
                     Ok(output)
                 })
             }
+            protocol::OP_WAITED_CHILD_USAGE if header.flags == 0 && payload.is_empty() => {
+                self.waited_child_usage(peer).and_then(|usage| {
+                    let mut output = vec![0; protocol::wait_usage::USAGE_LEN];
+                    protocol::wait_usage::encode_usage(usage.wire(), &mut output)
+                        .map_err(|_| protocol::STATUS_EIO)?;
+                    Ok(output)
+                })
+            }
             protocol::OP_UMASK_SET if header.flags == 0 => self.set_umask(peer.process_id, payload),
             protocol::OP_ALARM if header.flags == 0 => self.alarm_payload(peer.process_id, payload),
             protocol::OP_REAL_TIMER_GET if header.flags == 0 && payload.is_empty() => {
@@ -3886,6 +3934,7 @@ impl<H: Copy> PosixService<H> {
             | protocol::OP_TERMINAL_SET_FOREGROUND
             | protocol::OP_SESSION_INFO
             | protocol::OP_WAITED_CHILD_CPU_USAGE
+            | protocol::OP_WAITED_CHILD_USAGE
             | protocol::OP_UMASK_SET
             | protocol::OP_GROUPS_GET
             | protocol::OP_OPEN_AT

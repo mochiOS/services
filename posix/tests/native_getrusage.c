@@ -12,7 +12,7 @@
 #include <stdatomic.h>
 
 #define CHECK(test) do { if (!(test)) { fprintf(stderr, "getrusage: FAIL line=%d errno=%d\n", __LINE__, errno); return 1; } } while (0)
-_Static_assert(sizeof(struct rusage) == 32, "newlib rusage ABI");
+_Static_assert(sizeof(struct rusage) == 40, "newlib rusage ABI");
 _Static_assert(_Alignof(struct rusage) == 8 && offsetof(struct rusage, ru_stime) == 16, "CPU duration layout");
 static volatile uint64_t work;
 static int duration(const struct rusage *usage, uint64_t *microseconds) {

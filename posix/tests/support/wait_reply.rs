@@ -15,6 +15,13 @@ fn selected_child_usage_is_published_atomically_and_not_charged_on_reply_failure
             reserved: 0,
         }),
     );
+    processes.memory_usage.insert(
+        142,
+        Ok(mnu_abi::ProcessMemoryUsage {
+            current_bytes: 0,
+            peak_bytes: 32768,
+        }),
+    );
     let request = protocol::WaitRequest {
         selector: child.process_id as i64,
         options: 0,
@@ -27,9 +34,14 @@ fn selected_child_usage_is_published_atomically_and_not_charged_on_reply_failure
                     (child.process_id, 37 << 8, 505)
                 );
                 assert_eq!(
-                    (usage.user_ticks, usage.kernel_ticks, usage.ticks_per_second),
+                    (
+                        usage.cpu.user_ticks,
+                        usage.cpu.kernel_ticks,
+                        usage.cpu.ticks_per_second
+                    ),
                     (9, 4, 500)
                 );
+                assert_eq!(usage.peak_resident_bytes, 32768);
                 accepted
             })
             .unwrap();
@@ -37,6 +49,13 @@ fn selected_child_usage_is_published_atomically_and_not_charged_on_reply_failure
         assert_eq!(
             service.waited_child_cpu_usage(parent).unwrap().user_ticks,
             if accepted { 9 } else { 0 }
+        );
+        assert_eq!(
+            service
+                .waited_child_usage(parent)
+                .unwrap()
+                .peak_resident_bytes,
+            if accepted { 32768 } else { 0 }
         );
         assert_eq!(processes.released.len(), usize::from(accepted));
     }
@@ -101,7 +120,7 @@ fn usage_observation_failure_and_nowait_preserve_the_child_for_another_waiter() 
         service
             .wait_child_usage_with_reply(parent, request, &mut fs, &mut processes, |info, usage| {
                 assert_eq!(info.result.status, 17 << 8);
-                assert_eq!((usage.user_ticks, usage.kernel_ticks), (11, 6));
+                assert_eq!((usage.cpu.user_ticks, usage.cpu.kernel_ticks), (11, 6));
                 true
             })
             .unwrap()
@@ -207,7 +226,11 @@ fn selected_child_cpu_includes_only_descendants_it_actually_waited_for() {
             &mut processes,
             |_, usage| {
                 assert_eq!(
-                    (usage.user_ticks, usage.kernel_ticks, usage.ticks_per_second),
+                    (
+                        usage.cpu.user_ticks,
+                        usage.cpu.kernel_ticks,
+                        usage.cpu.ticks_per_second
+                    ),
                     (18, 10, 500)
                 );
                 true
@@ -251,7 +274,7 @@ fn stopped_child_usage_failure_does_not_consume_the_event_and_nohang_needs_no_sa
     service
         .wait_child_usage_with_reply(parent, request, &mut fs, &mut processes, |info, usage| {
             assert_eq!(info.result.status, (protocol::SIGNAL_STOP << 8) | 0x7f);
-            assert_eq!(usage.user_ticks, 8);
+            assert_eq!(usage.cpu.user_ticks, 8);
             true
         })
         .unwrap()
@@ -402,4 +425,207 @@ fn failed_exit_preparation_never_publishes_or_consumes_the_status() {
         37 << 8
     );
     assert!(processes.released.is_empty());
+}
+
+#[test]
+fn child_memory_failure_preserves_event_and_history_until_a_valid_sample() {
+    let (mut service, _, parent, child, mut fs, mut processes) = orphan_family();
+    processes
+        .states
+        .insert(142, ProcessLifecycle::Exited { exit_code: 3 });
+    let request = protocol::WaitRequest {
+        selector: child.process_id as i64,
+        options: 0,
+    };
+    for (sample, error) in [
+        (Err(protocol::STATUS_EAGAIN), protocol::STATUS_EAGAIN),
+        (
+            Ok(mnu_abi::ProcessMemoryUsage {
+                current_bytes: 8192,
+                peak_bytes: 4096,
+            }),
+            protocol::STATUS_EIO,
+        ),
+    ] {
+        processes.memory_usage.insert(142, sample);
+        assert_eq!(
+            service.wait_child_usage_with_reply(
+                parent,
+                request,
+                &mut fs,
+                &mut processes,
+                |_, _| panic!("invalid sample published")
+            ),
+            Err(error)
+        );
+        assert!(service.is_child(parent.process_id, child.process_id));
+        assert!(processes.released.is_empty());
+        assert_eq!(
+            service.waited_child_usage(parent).unwrap(),
+            Default::default()
+        );
+    }
+    processes.memory_usage.insert(
+        142,
+        Ok(mnu_abi::ProcessMemoryUsage {
+            current_bytes: 0,
+            peak_bytes: 65536,
+        }),
+    );
+    for options in [protocol::WAIT_NOWAIT, protocol::WAIT_NOWAIT, 0] {
+        service
+            .wait_child_usage_with_reply(
+                parent,
+                protocol::WaitRequest { options, ..request },
+                &mut fs,
+                &mut processes,
+                |_, usage| {
+                    assert_eq!(usage.peak_resident_bytes, 65536);
+                    true
+                },
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            service
+                .waited_child_usage(parent)
+                .unwrap()
+                .peak_resident_bytes,
+            if options == 0 { 65536 } else { 0 }
+        );
+    }
+}
+
+#[test]
+fn waited_memory_is_the_largest_child_or_waited_descendant_not_a_sum() {
+    let (mut service, init, parent, child, mut fs, mut processes) = orphan_family();
+    for (owner, id, handle, peak) in [(child, 1403, 143, 65536), (parent, 1404, 144, 32768)] {
+        service
+            .adopt_child(
+                owner,
+                AuthenticatedProcess {
+                    process_id: id,
+                    handle,
+                },
+                &mut fs,
+            )
+            .unwrap();
+        processes
+            .states
+            .insert(handle, ProcessLifecycle::Exited { exit_code: 0 });
+        processes.memory_usage.insert(
+            handle,
+            Ok(mnu_abi::ProcessMemoryUsage {
+                current_bytes: 0,
+                peak_bytes: peak,
+            }),
+        );
+        service
+            .wait_child(
+                owner,
+                protocol::WaitRequest {
+                    selector: id as i64,
+                    options: 0,
+                },
+                &mut fs,
+                &mut processes,
+            )
+            .unwrap();
+    }
+    assert_eq!(
+        service
+            .waited_child_usage(parent)
+            .unwrap()
+            .peak_resident_bytes,
+        32768
+    );
+    processes
+        .states
+        .insert(142, ProcessLifecycle::Exited { exit_code: 0 });
+    processes.memory_usage.insert(
+        142,
+        Ok(mnu_abi::ProcessMemoryUsage {
+            current_bytes: 0,
+            peak_bytes: 4096,
+        }),
+    );
+    service
+        .wait_child(
+            parent,
+            protocol::WaitRequest {
+                selector: child.process_id as i64,
+                options: 0,
+            },
+            &mut fs,
+            &mut processes,
+        )
+        .unwrap();
+    assert_eq!(
+        service
+            .waited_child_usage(parent)
+            .unwrap()
+            .peak_resident_bytes,
+        65536
+    );
+    let header = protocol::Header {
+        opcode: protocol::OP_WAITED_CHILD_USAGE,
+        ..Default::default()
+    };
+    let response = service.handle(parent, header, &[]);
+    assert_eq!(response.header.status, 0);
+    assert_eq!(
+        protocol::wait_usage::decode_usage(&response.payload)
+            .unwrap()
+            .peak_resident_bytes,
+        65536
+    );
+    assert_eq!(
+        protocol::wait_usage::decode_usage(&service.handle(init, header, &[]).payload).unwrap(),
+        Default::default()
+    );
+    assert_eq!(
+        service
+            .handle(parent, header, &parent.process_id.to_le_bytes())
+            .header
+            .status,
+        STATUS_EINVAL
+    );
+    assert_eq!(
+        service
+            .handle(parent, protocol::Header { flags: 1, ..header }, &[])
+            .header
+            .status,
+        STATUS_EINVAL
+    );
+    assert_eq!(
+        service
+            .handle(
+                PeerIdentity {
+                    process_id: 9999,
+                    ..parent
+                },
+                header,
+                &[]
+            )
+            .header
+            .status,
+        protocol::STATUS_ESRCH
+    );
+    assert_eq!(
+        service
+            .handle_objects(
+                parent,
+                header,
+                &[],
+                &[AttachedObject {
+                    handle: 42,
+                    rights: 16
+                }],
+                &mut fs
+            )
+            .response
+            .header
+            .status,
+        STATUS_EINVAL
+    );
 }

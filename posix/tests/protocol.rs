@@ -1556,6 +1556,7 @@ struct RecordingProcesses {
     identities: BTreeMap<u32, u64>,
     image_reads: Vec<u32>,
     usage: BTreeMap<u32, Result<mnu_abi::ProcessExecutionUsage, i32>>,
+    memory_usage: BTreeMap<u32, Result<mnu_abi::ProcessMemoryUsage, i32>>,
     suspend_error: Option<i32>,
     resume_error: Option<i32>,
     resume_failure: Option<(u32, i32)>,
@@ -1598,6 +1599,13 @@ impl ProcessBackend<u32> for RecordingProcesses {
             })
         })
     }
+    fn memory_usage(&mut self, process: u32) -> Result<mnu_abi::ProcessMemoryUsage, i32> {
+        if !self.states.contains_key(&process) { return Err(protocol::STATUS_ESRCH); }
+        // These policy actors have no VM mappings unless a sample is supplied.
+        // The production backend always reads the retained native Handle.
+        self.memory_usage.get(&process).copied().unwrap_or(Ok(Default::default()))
+    }
+
     fn execution_usage(&mut self, process: u32) -> Result<mnu_abi::ProcessExecutionUsage, i32> {
         if !self.states.contains_key(&process) {
             return Err(protocol::STATUS_ESRCH);

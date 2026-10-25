@@ -53,7 +53,11 @@ pub mod handle {{
  pub use crate::{{HANDLE_RIGHT_WAIT,HANDLE_RIGHT_SIGNAL}};
  pub fn close(handle:u32)->Result<(),crate::NativeError>{{crate::operation("close",handle)}}
 }}
-pub mod syscall{{pub use crate::{{PROCESS_STATE_RUNNING,PROCESS_STATE_EXITED}};}}
+pub mod syscall{{pub use crate::{{PROCESS_STATE_RUNNING,PROCESS_STATE_EXITED}};
+ pub mod execution{{pub fn memory_usage(handle:Option<u32>)->Result<crate::ProcessMemoryUsage,crate::NativeError>{{
+ assert_eq!(handle,Some(42));crate::operation("memory",42)?;Ok(crate::ProcessMemoryUsage{{current_bytes:4096,peak_bytes:8192}})
+ }}}}
+}}
 #[derive(Debug,PartialEq)]pub enum ProcessLifecycle{{Running,Exited{{exit_code:u64}}}}
 #[derive(Debug)]pub struct AttachedObject<H>{{pub handle:H,pub rights:u64}}
 #[derive(Debug,PartialEq)]pub struct AuthenticatedProcess<H>{{pub handle:H,pub process_id:u64}}
@@ -61,6 +65,7 @@ pub trait ProcessBackend<H:Copy>{{
  fn image_status(&mut self,handle:H)->Result<ProcessStatus,i32>;
  fn status(&mut self,handle:H)->Result<ProcessLifecycle,i32>;
  fn execution_usage(&mut self,handle:H)->Result<ProcessExecutionUsage,i32>;
+ fn memory_usage(&mut self,handle:H)->Result<ProcessMemoryUsage,i32>;
  fn suspend(&mut self,handle:H)->Result<(),i32>;
  fn resume(&mut self,handle:H)->Result<(),i32>;
  fn terminate(&mut self,handle:H,value:u64)->Result<(),i32>;
@@ -92,6 +97,7 @@ fn main(){
   assert_eq!(backend.status(42),Err(expected));
   assert_eq!(backend.image_status(42).unwrap_err(),expected);
   assert_eq!(backend.execution_usage(42).unwrap_err(),expected);
+  assert_eq!(backend.memory_usage(42).unwrap_err(),expected);
   assert_eq!(backend.suspend(42),Err(expected));
   assert_eq!(backend.resume(42),Err(expected));
   assert_eq!(backend.terminate(42,u64::MAX),Err(expected));

@@ -9,7 +9,7 @@ fn wait_headers_work_installed_and_with_a_source_overlay_in_c_and_cpp() {
     let installed =
         std::env::temp_dir().join(format!("mochios-wait-headers-{}", std::process::id()));
     std::fs::create_dir_all(installed.join("sys")).unwrap();
-    for name in ["wait.h", "syslimits.h"] {
+    for name in ["wait.h", "syslimits.h", "resource.h"] {
         std::fs::copy(
             root.join("user/libc-port/include/sys").join(name),
             installed.join("sys").join(name),
@@ -53,6 +53,12 @@ fn wait_headers_work_installed_and_with_a_source_overlay_in_c_and_cpp() {
 #include <sys/wait.h>
 #include <sys/wait.h>
 #include <limits.h>
+#include <sys/resource.h>
+#include <sys/resource.h>
+#include <stddef.h>
+typedef char usage_size[sizeof(struct rusage) == 40 ? 1 : -1];
+typedef char usage_peak_offset[offsetof(struct rusage, ru_maxrss) == 32 ? 1 : -1];
+pid_t (*wait4_fn)(pid_t, int *, int, struct rusage *) = wait4;
 #if _POSIX_ARG_MAX != 4096
 #error missing POSIX argument minimum
 #endif

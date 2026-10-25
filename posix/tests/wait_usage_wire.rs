@@ -13,10 +13,13 @@ fn sample() -> Observation {
             },
             real_uid: 505,
         },
-        usage: protocol::WaitedChildCpuUsage {
-            user_ticks: u128::from(u64::MAX) + 7,
-            kernel_ticks: 23,
-            ticks_per_second: 500,
+        usage: protocol::wait_usage::Usage {
+            cpu: protocol::WaitedChildCpuUsage {
+                user_ticks: u128::from(u64::MAX) + 7,
+                kernel_ticks: 23,
+                ticks_per_second: 500,
+            },
+            peak_resident_bytes: 12 * 1024 + 1,
         },
     }
 }
@@ -36,7 +39,7 @@ fn observation_preserves_wide_cpu_counts_and_rejects_missing_units_or_malformed_
         assert!(wire::decode(&corrupted[..wire::LEN]).is_err());
     }
     let mut invalid = sample();
-    invalid.usage.ticks_per_second = 0;
+    invalid.usage.cpu.ticks_per_second = 0;
     assert!(wire::encode(invalid, &mut bytes).is_err());
     invalid = sample();
     invalid.info.result.process_id = 0;
@@ -79,4 +82,51 @@ fn client_gets_one_guarded_event_and_usage_without_sending_identity_or_pointer()
         Client::new(UsageTransport).wait_child_usage_since(-1, 1, 23),
         Ok(sample())
     );
+}
+
+struct AggregateTransport;
+impl Transport for AggregateTransport {
+    type Error = ();
+    fn call(&self, request: &[u8], response: &mut [u8]) -> Result<usize, ()> {
+        let (header, payload) = protocol::decode(request).unwrap();
+        assert_eq!(header.opcode, protocol::OP_WAITED_CHILD_USAGE);
+        assert_eq!(header.flags, 0);
+        assert!(payload.is_empty());
+        let mut bytes = [0; wire::USAGE_LEN];
+        wire::encode_usage(sample().usage, &mut bytes).unwrap();
+        protocol::encode(
+            protocol::Header {
+                opcode: protocol::OP_STATUS,
+                request_id: header.request_id,
+                payload_len: bytes.len() as u32,
+                ..Default::default()
+            },
+            &bytes,
+            response,
+        )
+        .map_err(|_| ())
+    }
+}
+
+#[test]
+fn client_fetches_cpu_and_peak_in_one_authenticated_snapshot() {
+    assert_eq!(
+        Client::new(AggregateTransport).waited_child_usage(),
+        Ok(sample().usage)
+    );
+    let mut bytes = [0xa5; wire::USAGE_LEN + 1];
+    wire::encode_usage(sample().usage, &mut bytes).unwrap();
+    assert_eq!(bytes[wire::USAGE_LEN], 0xa5);
+    assert_eq!(
+        wire::decode_usage(&bytes[..wire::USAGE_LEN]),
+        Ok(sample().usage)
+    );
+    for size in [0, wire::USAGE_LEN - 1, wire::USAGE_LEN + 1] {
+        assert!(wire::decode_usage(&bytes[..size]).is_err());
+    }
+    let mut invalid = sample().usage;
+    invalid.cpu = Default::default();
+    assert!(wire::encode_usage(invalid, &mut bytes).is_err());
+    bytes[..protocol::WAITED_CHILD_CPU_USAGE_LEN].fill(0);
+    assert!(wire::decode_usage(&bytes[..wire::USAGE_LEN]).is_err());
 }

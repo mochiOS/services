@@ -2933,15 +2933,18 @@ fn reply_wait_usage(
     sender: u64,
     request_id: u64,
     info: mochios_posix_protocol::WaitInfo,
-    usage: posix_service::WaitedChildCpuUsage,
+    usage: posix_service::WaitedChildUsage,
 ) -> bool {
     use mochios_posix_protocol as protocol;
     let observation = protocol::wait_usage::Observation {
         info,
-        usage: protocol::WaitedChildCpuUsage {
-            user_ticks: usage.user_ticks,
-            kernel_ticks: usage.kernel_ticks,
-            ticks_per_second: usage.ticks_per_second,
+        usage: protocol::wait_usage::Usage {
+            cpu: protocol::WaitedChildCpuUsage {
+                user_ticks: usage.cpu.user_ticks,
+                kernel_ticks: usage.cpu.kernel_ticks,
+                ticks_per_second: usage.cpu.ticks_per_second,
+            },
+            peak_resident_bytes: usage.peak_resident_bytes,
         },
     };
     let mut payload = [0; protocol::wait_usage::LEN];
@@ -3063,6 +3066,11 @@ impl posix_service::process_timer_request::ClockBackend<u32> for RuntimeProcesse
 impl posix_service::ProcessBackend<u32> for RuntimeProcesses {
     fn image_status(&mut self, process: u32) -> Result<mnu_abi::ProcessStatus, i32> {
         mochi_user_platform::process::handle_status(process)
+            .map_err(|error| process_control::lifecycle_failure(error.raw()))
+    }
+
+    fn memory_usage(&mut self, process: u32) -> Result<mnu_abi::ProcessMemoryUsage, i32> {
+        mochi_user_platform::syscall::execution::memory_usage(Some(process))
             .map_err(|error| process_control::lifecycle_failure(error.raw()))
     }
 

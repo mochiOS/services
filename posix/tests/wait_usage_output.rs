@@ -4,6 +4,8 @@ use mochios_posix_protocol as posix_protocol;
 use std::ffi::{c_char, c_int, c_void};
 #[path = "../../../user/crates/newlib-runtime/src/wait_usage_output.rs"]
 mod implementation;
+#[path = "../../../user/crates/newlib-runtime/src/resource_usage_output.rs"]
+mod resource_usage_output;
 #[path = "../../../user/crates/newlib-runtime/src/user_copy.rs"]
 mod user_copy;
 #[path = "support/user_copy_native.rs"]
@@ -22,17 +24,20 @@ fn sample() -> posix_protocol::wait_usage::Observation {
             },
             real_uid: 505,
         },
-        usage: posix_protocol::WaitedChildCpuUsage {
-            user_ticks: 717,
-            kernel_ticks: 23,
-            ticks_per_second: 500,
+        usage: posix_protocol::wait_usage::Usage {
+            cpu: posix_protocol::WaitedChildCpuUsage {
+                user_ticks: 717,
+                kernel_ticks: 23,
+                ticks_per_second: 500,
+            },
+            peak_resident_bytes: 12 * 1024 + 1,
         },
     }
 }
 
 #[test]
 fn cpu_time_and_status_use_faultable_unaligned_c_storage_without_overwriting_neighbors() {
-    let mut usage = [0xa5; 34];
+    let mut usage = [0xa5; 42];
     let mut status = [0x5a; 6];
     assert_eq!(
         implementation::publish(
@@ -43,11 +48,14 @@ fn cpu_time_and_status_use_faultable_unaligned_c_storage_without_overwriting_nei
         Ok(42)
     );
     assert_eq!(&status[1..5], &(37u32 << 8).to_ne_bytes());
-    for (bytes, expected) in usage[1..33].chunks_exact(8).zip([1i64, 434000, 0, 46000]) {
+    for (bytes, expected) in usage[1..41]
+        .chunks_exact(8)
+        .zip([1i64, 434000, 0, 46000, 13])
+    {
         assert_eq!(bytes, expected.to_ne_bytes());
     }
     assert_eq!(
-        (usage[0], usage[33], status[0], status[5]),
+        (usage[0], usage[41], status[0], status[5]),
         (0xa5, 0xa5, 0x5a, 0x5a)
     );
 }
@@ -66,13 +74,13 @@ fn nohang_and_unrepresentable_outputs_do_not_touch_any_c_storage() {
         Err(EOVERFLOW)
     );
     value = sample();
-    value.usage.user_ticks = u128::MAX;
+    value.usage.cpu.user_ticks = u128::MAX;
     assert_eq!(
         implementation::publish(value, 1usize as *mut _, 1usize as *mut _),
         Err(EOVERFLOW)
     );
     value = sample();
-    value.usage.ticks_per_second = 0;
+    value.usage.cpu.ticks_per_second = 0;
     assert_eq!(
         implementation::publish(value, 1usize as *mut _, 1usize as *mut _),
         Err(EIO)
@@ -82,12 +90,12 @@ fn nohang_and_unrepresentable_outputs_do_not_touch_any_c_storage() {
 
 #[test]
 fn invalid_usage_or_status_is_efault_and_status_is_optional() {
-    let mut usage = [0xa5; 32];
+    let mut usage = [0xa5; 40];
     assert_eq!(
         implementation::publish(sample(), 1usize as *mut _, usage.as_mut_ptr().cast()),
         Err(EFAULT)
     );
-    assert_eq!(usage, [0xa5; 32]);
+    assert_eq!(usage, [0xa5; 40]);
     assert_eq!(
         implementation::publish(sample(), std::ptr::null_mut(), 1usize as *mut _),
         Err(EFAULT)
