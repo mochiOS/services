@@ -13,6 +13,10 @@
 #include <sys/auxv.h>
 #include <unistd.h>
 
+#ifdef MOCHIOS_SYSTEM_IDENTITY_PROBE_230
+extern "C" int mochi_system_identity_probe();
+#endif
+
 #ifdef MOCHIOS_STATIC_TLS_PROBE_229
 extern "C" int mochi_static_tls_probe();
 #endif
@@ -37,6 +41,9 @@ extern "C" int mochi_elf_metadata_probe();
 #endif
 
 extern "C" int mochi_llvm_runtime_probe() {
+#ifdef MOCHIOS_SYSTEM_IDENTITY_PROBE_230
+  if (mochi_system_identity_probe()) return 30;
+#endif
 #ifdef MOCHIOS_STATIC_TLS_PROBE_229
   if (mochi_static_tls_probe()) return 29;
 #endif

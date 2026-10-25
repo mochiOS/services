@@ -31,6 +31,7 @@ pub mod socket;
 pub mod network_bootstrap;
 pub mod account_bootstrap;
 pub mod account_lookup;
+mod system_identity;
 pub mod inet_datagram;
 pub mod inet_socket;
 #[cfg(target_os = "mochios")]
@@ -872,6 +873,7 @@ pub struct ControllingTerminal {
 
 #[derive(Debug)]
 pub struct PosixService<H: Copy = u32> {
+    system_identity: system_identity::Identity,
     monotonic_clock: Option<fn() -> Result<u64, i32>>,
     real_timers: BTreeMap<u64, alarm::RealTimer>,
     cpu_timers: BTreeMap<(u64, u32), cpu_timer::CpuTimer>,
@@ -921,6 +923,7 @@ pub struct PosixService<H: Copy = u32> {
 impl PosixService<u32> {
     pub const fn new() -> Self {
         Self {
+            system_identity: system_identity::Identity::new(),
             monotonic_clock: None,
             real_timers: BTreeMap::new(),
             cpu_timers: BTreeMap::new(),
@@ -3832,6 +3835,14 @@ impl<H: Copy> PosixService<H> {
         payload: &[u8],
     ) -> Response {
         let result = match header.opcode {
+            protocol::OP_SYSTEM_IDENTITY
+                if header.flags == 0 && header.status == 0 && payload.is_empty() =>
+            {
+                self.system_identity_payload(peer.process_id)
+            }
+            protocol::OP_HOSTNAME_SET if header.flags == 0 && header.status == 0 => {
+                self.set_hostname_payload(peer.process_id, payload)
+            }
             protocol::OP_PING if header.flags == 0 && payload.is_empty() => Ok(Vec::new()),
             protocol::OP_SESSION_REGISTER if header.flags == 0 && payload.is_empty() => {
                 // Registration acknowledges an environment initialized before
@@ -3928,6 +3939,8 @@ impl<H: Copy> PosixService<H> {
                 self.signal_disposition_payload(peer.process_id, header.flags, payload)
             }
             protocol::OP_PING
+            | protocol::OP_SYSTEM_IDENTITY
+            | protocol::OP_HOSTNAME_SET
             | protocol::OP_SESSION_REGISTER
             | protocol::OP_SIGNAL_THREAD_REGISTER
             | protocol::OP_PTY_OPEN
