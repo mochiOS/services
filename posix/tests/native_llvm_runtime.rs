@@ -7,23 +7,32 @@ pub fn run() {
         fn waitpid(pid: i32, status: *mut i32, options: i32) -> i32;
         fn _exit(status: i32) -> !;
         fn __errno() -> *mut i32;
+        fn seteuid(uid: u32) -> i32;
     }
     unsafe {
-        let child = fork();
-        assert!(child >= 0, "C++ probe fork errno={}", *__errno());
-        if child == 0 {
-            let arguments = [c"llvm-runtime-probe".as_ptr().cast(), core::ptr::null()];
-            let environment = [core::ptr::null()];
-            execve(
-                c"/system/bin/llvm-runtime-probe".as_ptr().cast(),
-                arguments.as_ptr(),
-                environment.as_ptr(),
-            );
-            _exit(126);
+        for reduced_identity in [false, true] {
+            let child = fork();
+            assert!(child >= 0, "C++ probe fork errno={}", *__errno());
+            if child == 0 {
+                if reduced_identity && seteuid(501) != 0 {
+                    _exit(125);
+                }
+                let arguments = [
+                    c"deliberately-unrelated-argv0".as_ptr().cast(),
+                    core::ptr::null(),
+                ];
+                let environment = [core::ptr::null()];
+                execve(
+                    c"/system/bin/llvm-runtime-probe".as_ptr().cast(),
+                    arguments.as_ptr(),
+                    environment.as_ptr(),
+                );
+                _exit(126);
+            }
+            let mut status = 0;
+            assert_eq!(waitpid(child, &mut status, 0), child);
+            assert_eq!(status, 0, "C++ probe child wait status={status}");
         }
-        let mut status = 0;
-        assert_eq!(waitpid(child, &mut status, 0), child);
-        assert_eq!(status, 0, "C++ probe child wait status={status}");
         mochi_user_platform::io::stdout(b"llvm-runtime: PASS child exec and wait\n").unwrap();
     }
 }

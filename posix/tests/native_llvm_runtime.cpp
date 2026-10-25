@@ -1,15 +1,34 @@
 // Link against target libc++, libc++abi and libunwind, never host libraries.
 #include <algorithm>
 #include <atomic>
+#include <cerrno>
 #include <cstdio>
+#include <cstring>
 #include <filesystem>
 #include <regex>
 #include <stdexcept>
 #include <string>
 #include <thread>
 #include <vector>
+#include <sys/auxv.h>
+#include <unistd.h>
 
 extern "C" int mochi_llvm_runtime_probe() {
+  const auto executable = reinterpret_cast<const char *>(getauxval(AT_EXECFN));
+  if (!executable || std::strcmp(executable, "/system/bin/llvm-runtime-probe")) return 9;
+  if (getauxval(AT_PAGESZ) != static_cast<unsigned long>(sysconf(_SC_PAGESIZE)) ||
+      getauxval(AT_CLKTCK) != static_cast<unsigned long>(sysconf(_SC_CLK_TCK))) return 10;
+  if (getauxval(AT_UID) != getuid() || getauxval(AT_EUID) != geteuid() ||
+      getauxval(AT_GID) != getgid() || getauxval(AT_EGID) != getegid()) return 11;
+  if (getauxval(AT_SECURE) != static_cast<unsigned long>(getuid() != geteuid() || getgid() != getegid())) return 12;
+  errno = 123;
+  if (getauxval(AT_BASE) != 0 || errno != 123) return 13;
+  if (getauxval(~0UL) != 0 || errno != ENOENT) return 14;
+  if (geteuid() == 0) {
+    if (seteuid(501)) return 15;
+    const bool retained = getauxval(AT_EUID) == 0 && geteuid() == 501;
+    if (seteuid(0) || !retained) return 16;
+  }
   std::vector<std::string> words{"clang", "LLVM", "lld"};
   std::sort(words.begin(), words.end());
   if (words.front() != "LLVM") return 1;
@@ -33,6 +52,7 @@ extern "C" int mochi_llvm_runtime_probe() {
   auto space = std::filesystem::space(cwd, error);
   if (error || space.capacity < space.available) return 8;
   std::puts("llvm-runtime: PASS vector string regex pthread exception filesystem");
+  std::puts("auxiliary: PASS executable metadata identity secure clock and errno");
   return 0;
 }
 
