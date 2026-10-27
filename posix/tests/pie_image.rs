@@ -599,3 +599,240 @@ fn eager_plt_validates_its_metadata_and_overlaps_with_other_relocations() {
     w64(&mut bytes, 0x1508, 8);
     assert_eq!(relocated_symbol(&bytes), Err(Error::Invalid));
 }
+
+fn with_needed(mut bytes: Vec<u8>, names: &[&[u8]]) -> Vec<u8> {
+    bytes.resize(0x1800, 0);
+    segment(&mut bytes, 1, 1, 6, 0x1000, 0x1000, 0x800, 0x3000);
+    let dynamic = bytes[0x1000..0x1080].to_vec();
+    bytes[0x1400..0x1480].copy_from_slice(&dynamic);
+    // Relocate the string table so extra dependency names cannot alias hash data.
+    bytes[0x1200..0x1208].copy_from_slice(b"\0symbol\0");
+    w64(&mut bytes, 0x1418, 0x1200);
+    let mut length = 8;
+    for (index, name) in names.iter().enumerate() {
+        w64(&mut bytes, 0x1480 + index * 16, 1);
+        w64(&mut bytes, 0x1488 + index * 16, length as u64);
+        bytes[0x1200 + length..0x1200 + length + name.len()].copy_from_slice(name);
+        length += name.len() + 1;
+    }
+    w64(&mut bytes, 0x1438, length as u64);
+    w64(&mut bytes, 0x1480 + names.len() * 16, 0);
+    segment(
+        &mut bytes,
+        2,
+        2,
+        6,
+        0x1400,
+        0x1400,
+        144 + names.len() as u64 * 16,
+        144 + names.len() as u64 * 16,
+    );
+    bytes
+}
+
+#[test]
+fn link_scope_derives_breadth_first_order_and_deduplicates_shared_cycles() {
+    use mochios_posix_client::pie::link_scope::{Object, Scope};
+    let mut root = with_needed(symbol_image(1, false, false), &[b"first", b"second"]);
+    w16(&mut root, 0x111e, 0); // Strong reference supplied by another object.
+    let mut first = with_needed(symbol_image(1, false, false), &[b"leaf"]);
+    first[0x111c] = 0x21; // First definition wins even when weak at runtime.
+    let second = with_needed(symbol_image(1, false, false), &[b"leaf"]);
+    let leaf = with_needed(symbol_image(1, false, false), &[b"first"]);
+    assert!(matches!(Pie::parse(&root), Err(Error::Unsupported)));
+    let images: Vec<_> = [&root, &second, &leaf, &first]
+        .into_iter()
+        .map(|bytes| Pie::parse_object(bytes).unwrap())
+        .collect();
+    let objects: Vec<_> = [b"root".as_slice(), b"second", b"leaf", b"first"]
+        .into_iter()
+        .zip(&images)
+        .enumerate()
+        .map(|(index, (name, image))| Object {
+            name,
+            image,
+            bias: 0x20000000 + index as u64 * 0x1000000,
+        })
+        .collect();
+    let mut scratch = [0; 4];
+    let scope = Scope::new(&objects, &mut scratch).unwrap();
+    assert_eq!(scope.order(), &[0, 3, 1, 2]);
+    let mut output = vec![0; images[0].output_length().unwrap()];
+    scope.write(0, &mut output).unwrap();
+    assert_eq!(loaded_word(&output, 0x20001300), 0x23001255);
+    assert_eq!(
+        images[0].write(0x20000000, &mut output),
+        Err(Error::Unsupported)
+    );
+}
+
+#[test]
+fn link_scope_keeps_hidden_protected_local_and_symbolic_bindings_local() {
+    use mochios_posix_client::pie::link_scope::{Object, Scope};
+    for mode in [0, 1, 2, 3, 4, 5] {
+        let root = with_needed(symbol_image(1, false, false), &[b"dep"]);
+        let mut dep = symbol_image(1, false, false);
+        if mode <= 3 {
+            dep[0x111d] = mode;
+        }
+        if mode == 4 {
+            w64(&mut dep, 0x1080, 16); // DT_SYMBOLIC
+            w64(&mut dep, 64 + 2 * 56 + 32, 160);
+        }
+        if mode == 5 {
+            dep[0x111c] = 1;
+        } // STB_LOCAL
+        let root = Pie::parse_object(&root).unwrap();
+        let dep = Pie::parse_object(&dep).unwrap();
+        let objects = [
+            Object {
+                name: b"root",
+                image: &root,
+                bias: 0x20000000,
+            },
+            Object {
+                name: b"dep",
+                image: &dep,
+                bias: 0x30000000,
+            },
+        ];
+        let mut scratch = [0; 2];
+        let scope = Scope::new(&objects, &mut scratch).unwrap();
+        let mut output = vec![0; dep.output_length().unwrap()];
+        scope.write(1, &mut output).unwrap();
+        assert_eq!(
+            loaded_word(&output, 0x30001300),
+            if mode == 0 { 0x20001255 } else { 0x30001255 }
+        );
+    }
+}
+
+#[test]
+fn link_scope_rejects_missing_duplicate_unreachable_and_overlapping_objects() {
+    use mochios_posix_client::pie::link_scope::{Object, Scope};
+    let root = with_needed(symbol_image(1, false, false), &[b"dep"]);
+    let root = Pie::parse_object(&root).unwrap();
+    let dep = symbol_image(1, false, false);
+    let dep = Pie::parse_object(&dep).unwrap();
+    for (name, bias) in [
+        (b"missing".as_slice(), 0x30000000),
+        (b"root", 0x30000000),
+        (b"dep", 0x20000000),
+        (b"dep", 0x30000001),
+        (b"dep", 0x800000000000),
+        (b"dep", 0),
+    ] {
+        let objects = [
+            Object {
+                name: b"root",
+                image: &root,
+                bias: 0x20000000,
+            },
+            Object {
+                name,
+                image: &dep,
+                bias,
+            },
+        ];
+        assert!(Scope::new(&objects, &mut [0; 2]).is_err());
+    }
+    let objects = [Object {
+        name: b"root",
+        image: &root,
+        bias: 0x20000000,
+    }];
+    assert!(Scope::new(&objects, &mut [0]).is_err());
+    let objects = [
+        Object {
+            name: b"root",
+            image: &dep,
+            bias: 0x20000000,
+        },
+        Object {
+            name: b"unused",
+            image: &dep,
+            bias: 0x30000000,
+        },
+    ];
+    assert!(Scope::new(&objects, &mut [0; 2]).is_err());
+    assert!(Scope::new(&objects, &mut [0]).is_err());
+}
+
+#[test]
+fn link_scope_skips_nonexported_symbols_and_bounds_corrupt_hash_cycles() {
+    use mochios_posix_client::pie::link_scope::{Object, Scope};
+    let mut root = with_needed(symbol_image(1, false, false), &[b"hidden", b"visible"]);
+    w16(&mut root, 0x111e, 0);
+    let mut hidden = symbol_image(0, false, false); // No relocation references its hidden TLS symbol.
+    hidden[0x111c] = 0x16;
+    hidden[0x111d] = 2;
+    let visible = symbol_image(1, false, false);
+    let images: Vec<_> = [&root, &hidden, &visible]
+        .into_iter()
+        .map(|bytes| Pie::parse_object(bytes).unwrap())
+        .collect();
+    let objects: Vec<_> = [b"root".as_slice(), b"hidden", b"visible"]
+        .into_iter()
+        .zip(&images)
+        .enumerate()
+        .map(|(index, (name, image))| Object {
+            name,
+            image,
+            bias: 0x20000000 + index as u64 * 0x1000000,
+        })
+        .collect();
+    let mut scratch = [0; 3];
+    let scope = Scope::new(&objects, &mut scratch).unwrap();
+    let mut output = vec![0; images[0].output_length().unwrap()];
+    scope.write(0, &mut output).unwrap();
+    assert_eq!(loaded_word(&output, 0x20001300), 0x22001255);
+
+    let mut root = with_needed(symbol_image(1, false, false), &[b"dep"]);
+    w16(&mut root, 0x111e, 0);
+    // The unresolved root's chain points to itself. Lookup must fail boundedly.
+    w32(&mut root, 0x10d0, 1);
+    let dep = symbol_image(1, false, false);
+    let root = Pie::parse_object(&root).unwrap();
+    let dep = Pie::parse_object(&dep).unwrap();
+    let objects = [
+        Object {
+            name: b"root",
+            image: &root,
+            bias: 0x20000000,
+        },
+        Object {
+            name: b"dep",
+            image: &dep,
+            bias: 0x30000000,
+        },
+    ];
+    let mut scratch = [0; 2];
+    let scope = Scope::new(&objects, &mut scratch).unwrap();
+    let mut output = vec![0; root.output_length().unwrap()];
+    assert_eq!(scope.write(0, &mut output), Err(Error::Invalid));
+}
+
+#[test]
+fn link_scope_rejects_dependency_tls_until_a_module_layout_is_available() {
+    use mochios_posix_client::pie::link_scope::{Object, Scope};
+    let root = with_needed(symbol_image(1, false, false), &[b"dep"]);
+    let root = Pie::parse_object(&root).unwrap();
+    let dep = tls_image();
+    let dep = Pie::parse_object(&dep).unwrap();
+    let objects = [
+        Object {
+            name: b"root",
+            image: &root,
+            bias: 0x20000000,
+        },
+        Object {
+            name: b"dep",
+            image: &dep,
+            bias: 0x30000000,
+        },
+    ];
+    assert!(matches!(
+        Scope::new(&objects, &mut [0; 2]),
+        Err(Error::Unsupported)
+    ));
+}
