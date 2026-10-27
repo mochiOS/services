@@ -150,6 +150,18 @@ fn main() {
     // Initialize the retained source before injecting allocation failures.
     PROVIDER.with(|p|assert_eq!(Arc::strong_count(p),1));
     for mode in [0,1] {
+        // A large admitted image still fails allocation safely; metadata over
+        // the shared bound is rejected before allocating or reading payload.
+        let ceiling=mnu_abi::exec::MAX_CAPTURED_IMAGE_BYTES;
+        for length in [64*1024*1024+1,ceiling as u64] {
+            reset(mode);LENGTH.set(length);FAIL_AFTER.set(Some(0));
+            assert_eq!(read_all(7,ceiling).err(),Some(Error::ResourceUnavailable.into_raw()));
+            assert_eq!(FAIL_AFTER.get(),None);assert_eq!(READS.get(),0);
+            assert_eq!(LOCKS.get(),UNLOCKS.get());
+        }
+        reset(mode);LENGTH.set(ceiling as u64+1);
+        assert_eq!(read_all(7,ceiling).err(),Some(Error::LimitExceeded.into_raw()));
+        assert_eq!(READS.get(),0);assert_eq!(LOCKS.get(),UNLOCKS.get());
         for denied in [Error::InvalidArgument,Error::AccessDenied,Error::NotReady] {
             reset(mode);AUTH_ERROR.set(Some(denied));error(denied.into_raw());assert_eq!(READS.get(),0);assert_eq!(SEEKS.get(),0);
         }

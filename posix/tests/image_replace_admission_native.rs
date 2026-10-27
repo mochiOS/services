@@ -78,7 +78,7 @@ mod syscall {
     }
     pub fn copy_from_user(_:u64,_:&mut [u8])->Result<(),u64> {panic!("must use native usercopy")}
     pub mod handle {pub fn read_all(image:u64,maximum:usize)->Result<Vec<u8>,u64> {
-        assert_eq!(image,9);assert_eq!(maximum,64*1024*1024);crate::READS.set(crate::READS.get()+1);
+        assert_eq!(image,9);assert_eq!(maximum,mnu_abi::exec::MAX_CAPTURED_IMAGE_BYTES);crate::READS.set(crate::READS.get()+1);
         if let Some(error)=crate::READ_ERROR.get(){Err(error)}else{Ok(Vec::new())}
     }}
 }

@@ -1646,6 +1646,7 @@ dependencies = [
  "libc",
  "mochi-user-platform",
  "mochios-filesystem-protocol",
+ "mochios-fonts",
  "mochios-keychain-protocol",
  "mochios-posix-client",
  "mochios-posix-protocol",
@@ -1704,6 +1705,14 @@ source = "git+https://github.com/mochiOS/syscalls#38b10ca1d8b95d8ad638e24a2f83ad
 [[package]]
 name = "mochios-filesystem-protocol"
 version = "0.1.0"
+
+[[package]]
+name = "mochios-fonts"
+version = "0.1.0"
+dependencies = [
+ "sha2",
+ "ttf-parser",
+]
 
 [[package]]
 name = "mochios-http-client"
@@ -3713,6 +3722,7 @@ dependencies = [
  "image",
  "mochi-user-platform",
  "mochi-user-syscall",
+ "mochios-fonts",
  "mochios-viewkit-gpu-protocol",
  "pollster",
  "postcard",

@@ -54,7 +54,7 @@ pub(crate) fn read_file(path: &str) -> SysResult<Vec<u8>> {
 }
 
 pub(crate) fn read_image(path: &str) -> SysResult<Vec<u8>> {
-    read_bounded(path, 64 * 1024 * 1024)
+    read_bounded(path, mnu_abi::exec::MAX_CAPTURED_IMAGE_BYTES)
 }
 
 fn read_bounded(path: &str, maximum: usize) -> SysResult<Vec<u8>> {

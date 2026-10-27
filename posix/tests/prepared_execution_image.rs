@@ -235,7 +235,7 @@ mod server;
 fn oversized_image_uses_userspace_file_size_status_before_allocating_or_authorizing() {
     fn oversized_read(_: &str) -> Result<Vec<u8>, syscall::SysError> {
         event("read oversized");
-        Ok(vec![0; 64 * 1024 * 1024 + 1])
+        Ok(vec![0; mnu_abi::exec::MAX_CAPTURED_IMAGE_BYTES + 1])
     }
     STATE.set(State::default());
     assert_eq!(

@@ -29,7 +29,7 @@ pub(crate) fn prepare(
     let identity =
         crate::resolver::application_identity(&record.manifest, &record.manifest_path, read)?;
     let bytes = read(path)?;
-    if bytes.len() > 64 * 1024 * 1024 {
+    if bytes.len() > mnu_abi::exec::MAX_CAPTURED_IMAGE_BYTES {
         return Err(SysError::from_raw(mochios_posix_protocol::STATUS_EFBIG as i64));
     }
     let image = platform::memory_object::MemoryObject::create_resizable(bytes.len() as u64)?;
