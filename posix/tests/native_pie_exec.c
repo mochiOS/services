@@ -35,6 +35,13 @@ static int64_t handles(void) {
 int main(int argc, char **arguments) {
   if (argc == 2 && strcmp(arguments[1], "--path-reexec") == 0)
     return 0;
+  int standalone = argc == 2 &&
+                   strncmp(arguments[1], "--expect-euid=", 14) == 0;
+  if (standalone) {
+    CHECK(strcmp(arguments[1], "--expect-euid=0") == 0 ||
+          strcmp(arguments[1], "--expect-euid=501") == 0);
+    CHECK(geteuid() == (strcmp(arguments[1], "--expect-euid=0") == 0 ? 0 : 501));
+  }
   alarm(180);
   char *argv[] = {"static-pie", NULL}, *env[] = {NULL};
   errno = 0;
@@ -60,7 +67,7 @@ int main(int argc, char **arguments) {
     CHECK(check_child(child) == 0);
   }
   puts("static-pie: PASS pathname PIE, relative pointers, BSS, bias and "
-       "original auxiliary headers");
+       "original TLS auxiliary headers");
   const char *path = "/tmp/static-pie-204";
   unlink(path);
   int input = open("/system/tests/static-pie-204", O_RDONLY),
@@ -90,6 +97,10 @@ int main(int argc, char **arguments) {
         close(image) == 0);
   puts("static-pie: PASS unregistered unlinked descriptor PIE and unchanged "
        "shared offset");
+  if (standalone) {
+    alarm(0);
+    return 0;
+  }
   execve("/system/tests/execve-regression-204", argv, environ);
   fprintf(stderr, "static-pie: regression launch errno=%d\n", errno);
   return 1;

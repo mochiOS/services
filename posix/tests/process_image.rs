@@ -159,6 +159,7 @@ fn userspace_loader_metadata_describes_the_program_instead_of_the_native_contain
         program_header_size: 56,
         program_header_count: 4,
         interpreter_base: 0x70000000,
+        load_bias: 0x20000000,
     };
     let mut output = [0u8; process_image::MAX_IMAGE_BYTES];
     let length = encode_initial_stack_for_image(
@@ -188,6 +189,10 @@ fn userspace_loader_metadata_describes_the_program_instead_of_the_native_contain
         (5, 4),
         (7, image.interpreter_base),
         (9, image.entry),
+        (
+            mochios_posix_client::process_image::AT_IMAGE_LOAD_BIAS,
+            image.load_bias,
+        ),
     ] {
         assert_eq!(
             aux.iter()
@@ -213,5 +218,42 @@ fn userspace_loader_metadata_describes_the_program_instead_of_the_native_contain
         startup
             .relocations()
             .any(|r| r.kind == RelocationKind::PageSize)
+    );
+}
+
+#[test]
+fn loader_bias_is_distinct_from_interpreter_base_and_cannot_be_shadowed() {
+    use mochios_posix_client::process_image::{AT_IMAGE_LOAD_BIAS, encode_initial_stack_with_aux};
+    let mut output = [0u8; process_image::MAX_IMAGE_BYTES];
+    assert_eq!(
+        encode_initial_stack_with_aux(
+            &[b"program"],
+            &[],
+            b"program",
+            [0; 16],
+            &[(AT_IMAGE_LOAD_BIAS, 123)],
+            &mut output
+        ),
+        Err(EncodeError::InvalidText)
+    );
+    let length =
+        encode_initial_stack(&[b"program"], &[], b"program", [0; 16], &mut output).unwrap();
+    let startup = process_image::decode(&output[..length]).unwrap();
+    let aux = startup.stack()[32..]
+        .chunks_exact(16)
+        .map(|pair| {
+            (
+                u64::from_le_bytes(pair[..8].try_into().unwrap()),
+                u64::from_le_bytes(pair[8..].try_into().unwrap()),
+            )
+        })
+        .take_while(|pair| pair.0 != 0)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        aux.iter()
+            .filter(|pair| pair.0 == AT_IMAGE_LOAD_BIAS)
+            .copied()
+            .collect::<Vec<_>>(),
+        [(AT_IMAGE_LOAD_BIAS, 0)]
     );
 }

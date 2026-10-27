@@ -1,14 +1,13 @@
 //! Run the real runtime allocator with deterministic VM and copy failures.
 #![allow(non_camel_case_types)]
-extern crate self as mochios_posix_client;
 #[path = "../../../user/crates/newlib-runtime/src/static_tls.rs"]
 mod runtime;
-#[path = "../../../user/crates/posix-client/src/static_tls.rs"]
-pub mod static_tls;
+pub use mochios_posix_client::{process_image, static_tls};
 use std::cell::{Cell, RefCell};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 type c_int = i32;
 const ENOEXEC: i32 = 8;
+const ENOENT: i32 = 2;
 const EOVERFLOW: i32 = 75;
 const PAGE_SIZE: usize = 4096;
 const NATIVE_READ_WRITE: u64 = 3;
@@ -35,6 +34,7 @@ mod auxiliary {
     pub struct Vector {
         pub table: usize,
         pub count: usize,
+        pub bias: Result<usize, i32>,
     }
     pub fn vector() -> Option<Vector> {
         super::AUX.get()
@@ -45,6 +45,9 @@ mod auxiliary {
                 3 => self.table,
                 4 => 56,
                 5 => self.count,
+                key if key == crate::process_image::AT_IMAGE_LOAD_BIAS as usize => {
+                    return self.bias;
+                }
                 _ => panic!(),
             })
         }
@@ -164,6 +167,7 @@ fn copies_initial_bytes_zeros_tbss_aligns_and_owns_independent_mappings() {
     AUX.set(Some(auxiliary::Vector {
         table: headers.as_ptr() as usize,
         count: 2,
+        bias: Ok(0),
     }));
     let template = static_tls::template(headers.as_ptr() as usize, 56, 2, 0, user_read)
         .unwrap()
@@ -206,6 +210,7 @@ fn every_copy_failure_unmaps_unpublished_memory() {
     AUX.set(Some(auxiliary::Vector {
         table: headers.as_ptr() as usize,
         count: 2,
+        bias: Ok(0),
     }));
     // Three header reads, six chunk copies and the self-pointer write.
     for fail in 0..10 {
@@ -231,4 +236,51 @@ fn admission_and_activation_errors_propagate_without_silent_fallback() {
     assert_eq!(runtime::activate(&control), Err(13));
     assert_eq!(INSTALLED_BASE.get(), 0);
     destroy(&control);
+}
+
+#[test]
+fn copies_from_a_relocated_program_and_preserves_metadata_errors() {
+    let data = [41u8; 32];
+    let mut headers = headers(&data);
+    let bias = 0x20000000usize;
+    for header in &mut headers {
+        header[2] -= bias as u64;
+    }
+    AUX.set(Some(auxiliary::Vector {
+        table: headers.as_ptr() as usize,
+        count: 2,
+        bias: Ok(bias),
+    }));
+    let template = static_tls::template(headers.as_ptr() as usize, 56, 2, bias, user_read)
+        .unwrap()
+        .unwrap();
+    let layout = static_tls::Layout::new(Some(template), PAGE_SIZE).unwrap();
+    let control = ThreadControl::default();
+    runtime::allocate(&control).unwrap();
+    let placement = layout
+        .place(control.tls_mapping_base.load(Ordering::Acquire))
+        .unwrap();
+    let bytes =
+        unsafe { std::slice::from_raw_parts(placement.data as *const u8, template.memory_size) };
+    assert_eq!(&bytes[..data.len()], data);
+    assert!(bytes[data.len()..].iter().all(|byte| *byte == 0));
+    destroy(&control);
+    AUX.set(Some(auxiliary::Vector {
+        table: headers.as_ptr() as usize,
+        count: 2,
+        bias: Err(14),
+    }));
+    assert_eq!(runtime::allocate(&ThreadControl::default()), Err(14));
+    assert!(MAPPINGS.with_borrow(|m| m.is_empty()));
+
+    let fixed = self::headers(&data);
+    AUX.set(Some(auxiliary::Vector {
+        table: fixed.as_ptr() as usize,
+        count: 2,
+        bias: Err(ENOENT),
+    }));
+    let control = ThreadControl::default();
+    runtime::allocate(&control).unwrap();
+    destroy(&control);
+    assert!(MAPPINGS.with_borrow(|m| m.is_empty()));
 }

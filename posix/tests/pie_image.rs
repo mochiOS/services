@@ -84,8 +84,8 @@ fn rebases_entry_and_relative_bss_target_without_materializing_the_rest_of_bss()
     assert_eq!(b, image());
 }
 #[test]
-fn rejects_interpreters_dependencies_tls_symbol_relocations_and_overlapping_fixups() {
-    for kind in [3, 7] {
+fn rejects_interpreters_dependencies_symbol_relocations_and_overlapping_fixups() {
+    for kind in [3] {
         let mut b = image();
         w32(&mut b, 64 + 2 * 56, kind);
         assert!(matches!(Pie::parse(&b), Err(Error::Unsupported)));
@@ -169,4 +169,87 @@ fn relative_values_use_elf64_modular_arithmetic_not_address_range_arithmetic() {
         let offset = r64(&output, 64 + 3 * 56 + 8) as usize + 0x200;
         assert_eq!(r64(&output, offset), bias.wrapping_add(addend as u64));
     }
+}
+
+fn tls_image() -> Vec<u8> {
+    let mut bytes = image();
+    w16(&mut bytes, 56, 4);
+    segment(&mut bytes, 3, 7, 4, 0x1080, 0x1080, 8, 0x5000);
+    w64(&mut bytes, 64 + 3 * 56 + 48, 64);
+    bytes[0x1080..0x1088].copy_from_slice(b"template");
+    bytes
+}
+
+#[test]
+fn preserves_original_tls_headers_and_supplies_the_bias_for_the_loaded_template() {
+    let bytes = tls_image();
+    let pie = Pie::parse(&bytes).unwrap();
+    let bias = 0x20000000;
+    let executable = pie.executable(bias).unwrap();
+    assert_eq!(executable.load_bias, bias);
+    assert_eq!(executable.interpreter_base, 0);
+    let mut output = vec![0; pie.output_length().unwrap()];
+    pie.write(bias, &mut output).unwrap();
+    let read = |address: usize, buffer: &mut [u8]| -> Result<(), i32> {
+        let count = u16::from_le_bytes(output[56..58].try_into().unwrap()) as usize;
+        for index in 0..count {
+            let header = 64 + index * 56;
+            let kind = u32::from_le_bytes(output[header..header + 4].try_into().unwrap());
+            let base = r64(&output, header + 16) as usize;
+            let length = r64(&output, header + 32) as usize;
+            if kind == 1
+                && address >= base
+                && address
+                    .checked_add(buffer.len())
+                    .is_some_and(|end| end <= base + length)
+            {
+                let offset = r64(&output, header + 8) as usize + address - base;
+                buffer.copy_from_slice(&output[offset..offset + buffer.len()]);
+                return Ok(());
+            }
+        }
+        Err(14)
+    };
+    let template = mochios_posix_client::static_tls::template(
+        executable.program_headers as usize,
+        56,
+        executable.program_header_count as usize,
+        executable.load_bias as usize,
+        read,
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(template.source, bias as usize + 0x1080);
+    assert_eq!(template.file_size, 8);
+    assert_eq!(template.memory_size, 0x5000);
+    let mut data = [0; 8];
+    read(template.source, &mut data).unwrap();
+    assert_eq!(&data, b"template");
+}
+
+#[test]
+fn validates_tls_including_zero_fill_duplicate_headers_and_symbol_relocations() {
+    let bytes = tls_image();
+    for (field, value) in [(8, 0x1081), (32, 0x101), (40, 7), (48, 3)] {
+        let mut invalid = bytes.clone();
+        w64(&mut invalid, 64 + 3 * 56 + field, value);
+        assert!(
+            matches!(Pie::parse(&invalid), Err(Error::Invalid)),
+            "field={field}"
+        );
+    }
+    let mut duplicate = bytes.clone();
+    w16(&mut duplicate, 56, 5);
+    segment(&mut duplicate, 4, 7, 4, 0x1080, 0x1080, 8, 8);
+    assert!(matches!(Pie::parse(&duplicate), Err(Error::Invalid)));
+    for info in [16, 17, 18, 36] {
+        let mut unsupported = bytes.clone();
+        w64(&mut unsupported, 0x1048, info);
+        assert!(matches!(Pie::parse(&unsupported), Err(Error::Unsupported)));
+    }
+    let mut zero = bytes;
+    segment(&mut zero, 3, 7, 4, 0, 0x8000, 0, 4096);
+    let pie = Pie::parse(&zero).unwrap();
+    let mut output = vec![0; pie.output_length().unwrap()];
+    pie.write(0x20000000, &mut output).unwrap();
 }

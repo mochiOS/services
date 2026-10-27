@@ -585,6 +585,16 @@ fn real_compiler_pie_uses_a_readonly_prepared_image_and_closes_all_temporary_han
     );
     let bytes = std::fs::read(binary).unwrap();
     let pie = mochios_posix_client::pie::Pie::parse(&bytes).unwrap();
+    let headers = u64::from_le_bytes(bytes[32..40].try_into().unwrap()) as usize;
+    let count = u16::from_le_bytes(bytes[56..58].try_into().unwrap()) as usize;
+    let tls = bytes[headers..headers + count * 56]
+        .chunks_exact(56)
+        .find(|header| u32::from_le_bytes(header[..4].try_into().unwrap()) == 7)
+        .expect("real compiler must retain the TLS template");
+    let word = |offset| u64::from_le_bytes(tls[offset..offset + 8].try_into().unwrap());
+    assert!(word(32) >= 4 && word(40) > word(32));
+    assert_eq!(word(48), 8192);
+    assert_eq!(pie.executable(0x20000000).unwrap().load_bias, 0x20000000);
     assert!(pie.output_length().unwrap() > 4096);
     for (failure, error) in [
         (0, ENOEXEC),
