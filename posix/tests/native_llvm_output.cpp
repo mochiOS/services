@@ -25,13 +25,14 @@ struct Descriptor {
   std::fprintf(stderr, "llvm-output: FAIL line=%d: %s errno=%d\n", __LINE__, #x, errno); \
   return 1; } } while (0)
 
-extern "C" int mochi_llvm_output_probe() {
+static int exercise_output(size_t tail_size) {
   namespace fs = llvm::sys::fs;
   Scratch output;
   Descriptor old, writable;
   CHECK(!fs::createTemporaryFile("llvm-output", "elf", old.value, output.path));
   CHECK(::write(old.value, "old", 3) == 3);
-  const std::string expected(8192, 'L');
+  constexpr size_t tail_offset = 8192;
+  const std::string expected(tail_offset + tail_size, 'L');
   auto buffer = llvm::FileOutputBuffer::create(output.path, expected.size(),
                                               llvm::FileOutputBuffer::F_executable);
   if (!buffer) {
@@ -61,16 +62,18 @@ extern "C" int mochi_llvm_output_probe() {
   {
     std::error_code error;
     fs::mapped_file_region region(writable.value, fs::mapped_file_region::readwrite,
-                                 4096, 4096, error);
-    CHECK(!error && region.size() == 4096);
+                                 tail_size, tail_offset, error);
+    CHECK(!error && region.size() == tail_size);
     std::memcpy(region.data(), "mapped", 6);
+    region.data()[tail_size - 1] = 'T';
     // LLD's commit path relies on unmap; no explicit msync is used here.
     region.unmap();
   }
   CHECK(::lseek(writable.value, 0, SEEK_CUR) == 19);
   contents = llvm::MemoryBuffer::getFile(output.path);
   std::string updated = expected;
-  updated.replace(4096, 6, "mapped");
+  updated.replace(tail_offset, 6, "mapped");
+  updated.back() = 'T';
   CHECK(contents && (*contents)->getBuffer() == updated);
 
   // Abandoning an output buffer must not replace the existing destination.
@@ -84,6 +87,14 @@ extern "C" int mochi_llvm_output_probe() {
   }
   contents = llvm::MemoryBuffer::getFile(output.path);
   CHECK(contents && (*contents)->getBuffer() == updated);
-  std::puts("llvm-output: PASS mapped output commit executable mode atomic replacement old FD offset writes and discard");
+  return 0;
+}
+
+extern "C" int mochi_llvm_output_probe() {
+  // Flush a whole page and a partial final page without changing logical EOF.
+  for (size_t tail : {size_t(4096), size_t(37)}) {
+    if (exercise_output(tail)) return 1;
+  }
+  std::puts("llvm-output: PASS aligned and partial EOF commit mode replacement old FD offset writes and discard");
   return 0;
 }
