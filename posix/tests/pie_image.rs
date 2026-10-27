@@ -84,7 +84,7 @@ fn rebases_entry_and_relative_bss_target_without_materializing_the_rest_of_bss()
     assert_eq!(b, image());
 }
 #[test]
-fn rejects_interpreters_dependencies_symbol_relocations_and_overlapping_fixups() {
+fn rejects_interpreters_dependencies_unresolvable_relocations_and_overlapping_fixups() {
     for kind in [3] {
         let mut b = image();
         w32(&mut b, 64 + 2 * 56, kind);
@@ -413,4 +413,189 @@ fn dense_relr_bitmaps_keep_unreferenced_bss_out_of_the_prepared_file() {
     }
     assert_eq!(r64(&output, 64 + 3 * 56 + 40), 0x30000);
     assert!(output.len() < 0x20000);
+}
+
+fn symbol_image(kind: u32, gnu: bool, plt: bool) -> Vec<u8> {
+    let mut bytes = image();
+    bytes.resize(0x1500, 0);
+    segment(&mut bytes, 1, 1, 6, 0x1000, 0x1000, 0x500, 0x3000);
+    let tags = [
+        (
+            if gnu { 0x6ffffef5 } else { 4 },
+            if gnu { 0x1160 } else { 0x10c0 },
+        ),
+        (5, 0x1140),
+        (6, 0x1100),
+        (10, 8),
+        (11, 24),
+        (if plt { 23 } else { 7 }, 0x10a0),
+        (if plt { 2 } else { 8 }, 24),
+        (if plt { 20 } else { 9 }, if plt { 7 } else { 24 }),
+        (0, 0),
+    ];
+    segment(&mut bytes, 2, 2, 6, 0x1000, 0x1000, 144, 144);
+    for (index, (tag, value)) in tags.into_iter().enumerate() {
+        w64(&mut bytes, 0x1000 + index * 16, tag);
+        w64(&mut bytes, 0x1008 + index * 16, value);
+    }
+    w64(&mut bytes, 0x10a0, 0x1300);
+    w64(&mut bytes, 0x10a8, (1u64 << 32) | kind as u64);
+    w64(&mut bytes, 0x10b0, 0x55);
+    for (index, value) in [1, 2, 1, 0, 0].into_iter().enumerate() {
+        w32(&mut bytes, 0x10c0 + index * 4, value);
+    }
+    w32(&mut bytes, 0x1118, 1);
+    bytes[0x111c] = 0x11; // GLOBAL OBJECT
+    w16(&mut bytes, 0x111e, 1);
+    w64(&mut bytes, 0x1120, 0x1200);
+    w64(&mut bytes, 0x1128, 8);
+    bytes[0x1140..0x1148].copy_from_slice(b"\0symbol\0");
+    for (index, value) in [1, 1, 1, 5, 0, 0, 1, 1].into_iter().enumerate() {
+        w32(&mut bytes, 0x1160 + index * 4, value);
+    }
+    bytes
+}
+
+fn relocated_symbol(bytes: &[u8]) -> Result<u64, Error> {
+    let pie = Pie::parse(bytes)?;
+    let mut output = vec![0; pie.output_length()?];
+    pie.write(0x20000000, &mut output)?;
+    Ok(loaded_word(&output, 0x20001300))
+}
+
+#[test]
+fn symbols_bind_defined_absolute_and_unresolved_weak_values_with_correct_addends() {
+    for gnu in [false, true] {
+        for (kind, plt) in [(1, false), (6, false), (7, true)] {
+            let mut bytes = symbol_image(kind, gnu, plt);
+            let addend = if kind == 1 { 0x55 } else { 0 };
+            assert_eq!(relocated_symbol(&bytes), Ok(0x20001200 + addend));
+            w16(&mut bytes, 0x111e, 0xfff1); // SHN_ABS must not receive bias.
+            w64(&mut bytes, 0x1120, u64::MAX - 3);
+            assert_eq!(
+                relocated_symbol(&bytes),
+                Ok((u64::MAX - 3).wrapping_add(addend))
+            );
+            w16(&mut bytes, 0x111e, 0); // Undefined weak binds zero, even if st_value is nonzero.
+            bytes[0x111c] = 0x21;
+            assert_eq!(relocated_symbol(&bytes), Ok(addend));
+            bytes[0x111c] = 0x11;
+            assert_eq!(relocated_symbol(&bytes), Err(Error::Unsupported));
+            w64(&mut bytes, 0x10a8, kind as u64); // Symbol zero has absolute value zero.
+            assert_eq!(relocated_symbol(&bytes), Ok(addend));
+        }
+    }
+}
+
+#[test]
+fn symbols_reject_invalid_indices_names_extents_and_unsupported_resolution_rules() {
+    for gnu in [false, true] {
+        for (offset, value) in [
+            (0x10a8, (2u64 << 32) | 1),
+            (0x1120, 0x5000),
+            (0x1128, u64::MAX),
+        ] {
+            let mut bytes = symbol_image(1, gnu, false);
+            w64(&mut bytes, offset, value);
+            assert!(relocated_symbol(&bytes).is_err());
+        }
+        let mut bytes = symbol_image(1, gnu, false);
+        w32(&mut bytes, 0x1118, 8);
+        assert_eq!(relocated_symbol(&bytes), Err(Error::Invalid));
+        for info in [0x16, 0x1a, 0xa1] {
+            // TLS, IFUNC, GNU_UNIQUE
+            let mut bytes = symbol_image(1, gnu, false);
+            bytes[0x111c] = info;
+            assert_eq!(relocated_symbol(&bytes), Err(Error::Unsupported));
+        }
+        for section in [0xfff2, 0xffff] {
+            let mut bytes = symbol_image(1, gnu, false);
+            w16(&mut bytes, 0x111e, section);
+            assert_eq!(relocated_symbol(&bytes), Err(Error::Unsupported));
+        }
+        let mut bytes = symbol_image(1, gnu, false);
+        w64(&mut bytes, 0x1080, 0x6ffffff0); // DT_VERSYM cannot be ignored.
+        w64(&mut bytes, 64 + 2 * 56 + 32, 160);
+        assert_eq!(relocated_symbol(&bytes), Err(Error::Unsupported));
+    }
+}
+
+#[test]
+fn symbol_tables_use_bounded_hash_counts_and_complete_dynamic_metadata() {
+    for (gnu, offset, value) in [
+        (false, 0x10c0, 0),
+        (false, 0x10c4, 0),
+        (false, 0x10c8, 2),
+        (false, 0x10d0, 2),
+        (true, 0x1160, 0),
+        (true, 0x1164, 0),
+        (true, 0x1168, 0),
+        (true, 0x1168, 3),
+        (true, 0x1178, u32::MAX),
+        (true, 0x117c, 0),
+    ] {
+        let mut bytes = symbol_image(1, gnu, false);
+        w32(&mut bytes, offset, value);
+        assert!(
+            relocated_symbol(&bytes).is_err(),
+            "gnu={gnu} offset={offset:x}"
+        );
+    }
+    for offset in [0x1000, 0x1010, 0x1020, 0x1030, 0x1040] {
+        let mut bytes = symbol_image(1, false, false);
+        w64(&mut bytes, offset, 0x60000000);
+        assert!(relocated_symbol(&bytes).is_err());
+    }
+    for (offset, value) in [(0x1018, 0x3fff), (0x1028, 0x3ff8), (0x1038, 0), (0x1048, 8)] {
+        let mut bytes = symbol_image(1, false, false);
+        w64(&mut bytes, offset, value);
+        assert!(relocated_symbol(&bytes).is_err());
+    }
+    for offset in [0x1100, 0x1140, 0x1147] {
+        let mut bytes = symbol_image(1, false, false);
+        bytes[offset] = 1;
+        assert_eq!(relocated_symbol(&bytes), Err(Error::Invalid));
+    }
+    // Both hash formats may coexist, but must agree on the symbol count.
+    let mut bytes = symbol_image(1, false, false);
+    w64(&mut bytes, 0x1080, 0x6ffffef5);
+    w64(&mut bytes, 0x1088, 0x1160);
+    w64(&mut bytes, 0x1090, 0);
+    w64(&mut bytes, 64 + 2 * 56 + 32, 160);
+    assert_eq!(relocated_symbol(&bytes), Ok(0x20001255));
+    w32(&mut bytes, 0x1164, 2);
+    w32(&mut bytes, 0x1178, 2);
+    assert_eq!(relocated_symbol(&bytes), Err(Error::Invalid));
+}
+
+#[test]
+fn eager_plt_validates_its_metadata_and_overlaps_with_other_relocations() {
+    for (offset, value) in [
+        (0x1050, 0x60000000),
+        (0x1060, 0x60000000),
+        (0x1070, 0x60000000),
+        (0x1058, 0x3ff8),
+        (0x1068, 25),
+        (0x1078, 17),
+    ] {
+        let mut bytes = symbol_image(7, false, true);
+        w64(&mut bytes, offset, value);
+        assert!(relocated_symbol(&bytes).is_err());
+    }
+    let mut bytes = symbol_image(7, false, true);
+    bytes.resize(0x1600, 0);
+    segment(&mut bytes, 1, 1, 6, 0x1000, 0x1000, 0x600, 0x3000);
+    // Give RELA a separate table, writing the same word as PLT.
+    let tags = [(7, 0x1500), (8, 24), (9, 24), (0, 0)];
+    for (i, (tag, value)) in tags.into_iter().enumerate() {
+        w64(&mut bytes, 0x1480 + i * 16, tag);
+        w64(&mut bytes, 0x1488 + i * 16, value);
+    }
+    // Extend the dynamic array into an unused part of the same LOAD.
+    let dynamic = bytes[0x1000..0x1080].to_vec();
+    bytes[0x1400..0x1480].copy_from_slice(&dynamic);
+    segment(&mut bytes, 2, 2, 6, 0x1400, 0x1400, 192, 192);
+    w64(&mut bytes, 0x1500, 0x1300);
+    w64(&mut bytes, 0x1508, 8);
+    assert_eq!(relocated_symbol(&bytes), Err(Error::Invalid));
 }
