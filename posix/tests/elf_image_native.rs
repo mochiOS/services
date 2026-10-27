@@ -5,6 +5,10 @@ mod probe;
 
 #[test]
 fn elf_validation_bounds_and_mapping_failures_use_native_errors() {
+    probe::run(&native_program());
+}
+
+fn native_program() -> String {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
         .canonicalize()
@@ -211,5 +215,24 @@ fn main() {
 }
 "#,
     );
+    program
+}
+
+/// Run the production native ELF parser/mapper with only physical page mapping
+/// replaced, against a caller-owned real generated image.
+pub(crate) fn assert_captured_image(path: &std::path::Path) {
+    let mut program = native_program().replacen("fn main() {", "fn legacy_main() {", 1);
+    program.push_str(&format!(r#"
+fn main() {{
+    let data = std::fs::read({path:?}).unwrap();
+    let offset = u64::from_le_bytes(data[32..40].try_into().unwrap()) as usize;
+    let count = u16::from_le_bytes(data[56..58].try_into().unwrap()) as usize;
+    let headers = data[offset..offset + count * 56].chunks_exact(56);
+    let loads = headers.clone().filter(|header| u32::from_le_bytes(header[..4].try_into().unwrap()) == 1).count();
+    let address = headers.filter(|header| u32::from_le_bytes(header[..4].try_into().unwrap()) == 6)
+        .map(|header| u64::from_le_bytes(header[16..24].try_into().unwrap())).next().unwrap();
+    metadata(&data, address, loads, false);
+}}
+"#));
     probe::run(&program);
 }

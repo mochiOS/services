@@ -1,5 +1,8 @@
 //! Compare real linker-generated dynamic bindings with its symbol/relocation
 //! tools. No section-table decoding or duplicate loader implementation here.
+#[path = "elf_image_native.rs"]
+mod native_image;
+
 use mochios_posix_client::pie::Pie;
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -325,10 +328,14 @@ fn scoped_real_library_bindings_execute_with_root_preemption_and_eager_plt() {
                 "hash={hash} symbol={name}"
             );
         }
+        let mut bundle = vec![0xcc; scope.bundle_length().unwrap()];
+        assert_eq!(scope.write_bundle(&mut bundle).unwrap(), bundle.len());
+        assert_eq!(word(&bundle, 24), 0x20000000 + root_symbols["_start"]);
+        let bundle_path = temporary.0.join("bundle.elf");
+        std::fs::write(&bundle_path, &bundle).unwrap();
+        native_image::assert_captured_image(&bundle_path);
         let mut mappings = Mappings(Vec::new());
-        for output in &outputs {
-            mappings.install(output);
-        }
+        mappings.install(&bundle);
         // Execute only these locally compiled, syscall-free fixture functions.
         // Host mappings test relocation/code behavior, not mochiOS ProcessCreate.
         let shared: extern "C" fn(i32) -> i32 = unsafe {

@@ -836,3 +836,115 @@ fn link_scope_rejects_dependency_tls_until_a_module_layout_is_available() {
         Err(Error::Unsupported)
     ));
 }
+
+#[test]
+fn combined_scope_preserves_member_phdr_views_permissions_and_sparse_bss() {
+    use mochios_posix_client::pie::link_scope::{Object, Scope};
+    let root = with_needed(symbol_image(1, false, false), &[b"dep"]);
+    let dep = symbol_image(1, false, false);
+    let source_root = root.clone();
+    let source_dep = dep.clone();
+    let images = [
+        Pie::parse_object(&root).unwrap(),
+        Pie::parse_object(&dep).unwrap(),
+    ];
+    let objects = [
+        Object {
+            name: b"root",
+            image: &images[0],
+            bias: 0x20000000,
+        },
+        Object {
+            name: b"dep",
+            image: &images[1],
+            bias: 0x30000000,
+        },
+    ];
+    let mut order = [0; 2];
+    let scope = Scope::new(&objects, &mut order).unwrap();
+    let length = scope.bundle_length().unwrap();
+    assert!(length < 0xc000);
+    let mut output = vec![0xcc; length + 16];
+    assert_eq!(
+        scope.write_bundle(&mut output[..length - 1]),
+        Err(Error::BufferTooSmall)
+    );
+    assert!(output.iter().all(|byte| *byte == 0xcc));
+    assert_eq!(scope.write_bundle(&mut output).unwrap(), length);
+    assert!(output[length..].iter().all(|byte| *byte == 0xcc));
+    assert_eq!(r64(&output, 24), 0x20000180);
+    let count = u16::from_le_bytes(output[56..58].try_into().unwrap()) as usize;
+    assert_eq!(count, 8); // Global LOAD/PHDR + two member metadata/code/data LOADs.
+    assert_eq!(r64(&output, 64 + 16), 0x1fffe000);
+    assert_eq!(r64(&output, 120 + 16), 0x1fffe040);
+    let mut ranges = Vec::new();
+    for header in output[64..64 + count * 56].chunks_exact(56) {
+        if header[0] != 1 {
+            continue;
+        }
+        let address = r64(header, 16);
+        let file = r64(header, 32);
+        let memory = r64(header, 40);
+        let flags = u32::from_le_bytes(header[4..8].try_into().unwrap());
+        assert_ne!(flags & 3, 3);
+        assert!(r64(header, 8) + file <= length as u64);
+        if address == 0x20001000 || address == 0x30001000 {
+            assert!(memory > file);
+        }
+        ranges.push((address, address + memory));
+    }
+    ranges.sort_unstable();
+    assert!(ranges.windows(2).all(|pair| pair[0].1 <= pair[1].0));
+    for (index, object) in objects.iter().enumerate() {
+        let executable = images[index].executable(object.bias).unwrap();
+        assert_eq!(
+            loaded_word(&output, executable.program_headers),
+            r64(if index == 0 { &root } else { &dep }, 64)
+        );
+        assert_eq!(loaded_word(&output, object.bias + 0x1300), 0x20001255);
+    }
+    assert_eq!(root, source_root);
+    assert_eq!(dep, source_dep);
+}
+
+#[test]
+fn combined_scope_requires_executable_root_and_room_for_global_metadata() {
+    use mochios_posix_client::pie::link_scope::{Object, Scope};
+    let mut bytes = symbol_image(1, false, false);
+    for (entry, bias) in [(0x1300, 0x20000000), (0x180, 0x401000)] {
+        w64(&mut bytes, 24, entry);
+        let image = Pie::parse_object(&bytes).unwrap();
+        let objects = [Object {
+            name: b"root",
+            image: &image,
+            bias,
+        }];
+        let mut order = [0];
+        let scope = Scope::new(&objects, &mut order).unwrap();
+        assert_eq!(scope.bundle_length(), Err(Error::Invalid));
+        assert_eq!(scope.write_bundle(&mut [0; 8192]), Err(Error::Invalid));
+    }
+}
+
+#[test]
+fn combined_scope_rejects_program_header_count_that_needs_extended_numbering() {
+    use mochios_posix_client::pie::link_scope::{Object, Scope};
+    let count = 65533usize;
+    let mut bytes = vec![0; 64 + count * 56];
+    bytes[..64].copy_from_slice(&image()[..64]);
+    w16(&mut bytes, 56, count as u16);
+    let length = bytes.len() as u64;
+    segment(&mut bytes, 0, 1, 5, 0, 0, length, length);
+    for index in 1..count {
+        w32(&mut bytes, 64 + index * 56, 0x6474e550); // Retained, empty unwind headers.
+    }
+    let image = Pie::parse_object(&bytes).unwrap();
+    let objects = [Object {
+        name: b"root",
+        image: &image,
+        bias: 0x20000000,
+    }];
+    let mut order = [0];
+    let scope = Scope::new(&objects, &mut order).unwrap();
+    assert_eq!(scope.bundle_length(), Err(Error::Invalid));
+}
