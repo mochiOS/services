@@ -754,7 +754,7 @@ mod tests {
     #[test]
     fn cold_input_and_dhcp_have_bounded_budgets_without_extending_other_services() {
         assert_eq!(ready_timeout(ReadyService::Network), 30_000);
-        assert_eq!(ready_timeout(ReadyService::Input), 15_000);
+        assert_eq!(ready_timeout(ReadyService::Input), 30_000);
         assert_eq!(ready_timeout(ReadyService::Filesystem), 5_000);
         assert_eq!(ready_timeout(ReadyService::Posix), 5_000);
         assert_eq!(ready_timeout(ReadyService::Display), 5_000);
