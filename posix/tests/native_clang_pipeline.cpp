@@ -40,6 +40,8 @@ bool write(llvm::StringRef path, llvm::StringRef contents) {
 
 int execute(const std::vector<std::string> &arguments,
             const std::string &output, const std::string &diagnostics) {
+  // LLVM opens redirects without O_TRUNC. Each command needs fresh captures.
+  if (!write(output, "") || !write(diagnostics, "")) return -1;
   std::vector<llvm::StringRef> views(arguments.begin(), arguments.end());
   const std::optional<llvm::StringRef> redirects[] = {
       std::nullopt, output, diagnostics};
@@ -127,7 +129,11 @@ int main(int argc, char **argv) {
       "--end-group", "-o", executable}, output, diagnostics) == 0);
   CHECK(execute({executable, "25"}, output, diagnostics) == 37);
   auto buffer = llvm::MemoryBuffer::getFile(output);
+  if (buffer && (*buffer)->getBuffer() != "native-clang-generated: tls=42\n")
+    llvm::errs() << "native-clang: unexpected stdout: " << (*buffer)->getBuffer();
   CHECK(buffer && (*buffer)->getBuffer() == "native-clang-generated: tls=42\n");
+  CHECK(!llvm::sys::fs::remove_directories(scratch.path, false));
+  scratch.path.clear();
   std::puts("native-clang: PASS diagnostics C compilation object LLD ELF execution and compiler TLS");
   return 0;
 }
