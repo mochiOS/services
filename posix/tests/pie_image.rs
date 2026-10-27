@@ -948,3 +948,35 @@ fn combined_scope_rejects_program_header_count_that_needs_extended_numbering() {
     let scope = Scope::new(&objects, &mut order).unwrap();
     assert_eq!(scope.bundle_length(), Err(Error::Invalid));
 }
+
+#[test]
+fn direct_scope_requires_supported_startup_and_conservative_placement() {
+    for (tag, value, supported) in [
+        (12, 1, false),
+        (13, 1, false),
+        (25, 1, false),
+        (27, 8, false),
+        (29, 0, false),
+        (15, 0, false),
+        (32, 1, false),
+        (33, 8, false),
+        (12, 0, true),
+    ] {
+        let mut bytes = symbol_image(1, false, false);
+        w64(&mut bytes, 0x1080, tag);
+        w64(&mut bytes, 0x1088, value);
+        w64(&mut bytes, 64 + 2 * 56 + 32, 160);
+        let image = Pie::parse_object(&bytes).unwrap();
+        assert_eq!(
+            image.validate_direct_scope_startup().is_ok(),
+            supported,
+            "tag={tag}"
+        );
+    }
+    let bytes = tls_image();
+    let image = Pie::parse_object(&bytes).unwrap();
+    let (bias, end) = image.placement(0x20000001).unwrap();
+    assert_eq!(bias % image.alignment(), 0);
+    assert!(bias >= 0x20001001 && end > bias);
+    assert!(image.placement(u64::MAX).is_err());
+}

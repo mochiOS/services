@@ -56,6 +56,18 @@ int main(int argc, char **arguments) {
   }
   CHECK(handles() == before);
   puts("static-pie: PASS unsupported interpreter preserves image and handles");
+#ifdef MOCHIOS_SHARED_SCOPE
+  struct stat library_status;
+  CHECK(stat("/system/tests/libscope.so", &library_status) == 0);
+  CHECK((library_status.st_mode & 0777) == 0644);
+  before = handles();
+  for (int i = 0; i < 12; ++i) {
+    errno = 0;
+    CHECK(execve("/system/tests/missing-library-root", argv, env) == -1 && errno == ENOENT);
+  }
+  CHECK(handles() == before);
+  puts("dynamic-pie: PASS missing dependency preserves image and handles");
+#endif
   for (int i = 0; i < 3; i++) {
     pid_t child = fork();
     CHECK(child >= 0);
@@ -68,6 +80,9 @@ int main(int argc, char **arguments) {
   }
   puts("static-pie: PASS pathname PIE, relative pointers, BSS, bias and "
        "original TLS auxiliary headers");
+#ifdef MOCHIOS_SHARED_SCOPE
+  puts("dynamic-pie: PASS pathname exec, shared function and root preemption");
+#endif
   const char *path = "/tmp/static-pie-204";
   unlink(path);
   int input = open("/system/tests/static-pie-204", O_RDONLY),

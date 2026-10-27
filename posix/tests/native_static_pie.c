@@ -1,5 +1,13 @@
 /* Real static PIE with relative data/function pointers and demand-zero BSS.
    The entry ABI and native exit are used directly; no host libc/Linux ABI. */
+#ifdef MOCHIOS_SHARED_SCOPE
+extern int shared_function(int);
+extern int shared_value;
+int root_override = 41;
+#define MAX_TEST_BIAS 0x25000000UL
+#else
+#define MAX_TEST_BIAS 0x24000000UL
+#endif
 extern unsigned char __ehdr_start[];
 /* Metadata for the compiler-generated template; this native entry does not
    stand in for the C runtime's TLS allocator. */
@@ -50,14 +58,23 @@ __attribute__((noreturn, used)) static void run(unsigned long *stack) {
       entry != (unsigned long)_start || __ehdr_start[16] != 3 || bias != base ||
       tls_found != 1)
     status = 98;
-  else if (base >= 0x20000000 && base < 0x24000000 &&
+  else if (base >= 0x20000000 && base < MAX_TEST_BIAS &&
            modular_value == base - 0x40000000UL &&
            value_pointer == (int *)&value && *value_pointer == 31 &&
            zeroes[sizeof zeroes - 1] == 0 && function_pointer(31) == 42) {
+#ifdef MOCHIOS_SHARED_SCOPE
+    if (shared_value != 31 || shared_function(2) != 91) {
+      status = 97;
+      goto finish;
+    }
+#endif
     zeroes[sizeof zeroes - 1] = 77;
     if (zeroes[sizeof zeroes - 1] == 77)
       status = 42;
   }
+#ifdef MOCHIOS_SHARED_SCOPE
+finish:
+#endif
   unsigned long number = 574;
   __asm__ volatile("syscall"
                    : "+a"(number)

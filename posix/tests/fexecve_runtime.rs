@@ -41,6 +41,8 @@ struct State {
     entered: usize,
     bytes: Vec<u8>,
     prepared: Vec<u8>,
+    libraries: Vec<(Vec<u8>, Vec<u8>)>,
+    library_paths: Vec<Vec<u8>>,
     mutate: Option<(usize, usize)>,
 }
 thread_local! {static STATE:RefCell<State>=RefCell::new(State::default());static DEFER:Cell<u32>=const{Cell::new(0)};}
@@ -131,6 +133,30 @@ impl Client {
         mode: u32,
         path: impl AsRef<[u8]>,
     ) -> Result<ObjectHandleAttachment<u32>, i32> {
+        if options == posix_protocol::OPEN_READ | posix_protocol::OPEN_NONBLOCK {
+            assert_eq!(mode, 0);
+            assert!(DEFER.get() > 0);
+            return STATE.with_borrow_mut(|s| {
+                let path = path.as_ref();
+                s.library_paths.push(path.to_vec());
+                if s.failure == 20 {
+                    return Err(EACCES);
+                }
+                let index = s
+                    .libraries
+                    .iter()
+                    .position(|(name, _)| name == path)
+                    .ok_or(ENOENT)?;
+                Ok(ObjectHandleAttachment {
+                    handle: 200 + index as u32,
+                    rights: if s.failure == 21 {
+                        0
+                    } else {
+                        posix_protocol::CHECK_EXECUTABLE_RIGHTS
+                    },
+                })
+            });
+        }
         assert_eq!(
             options,
             posix_protocol::OPEN_READ | posix_protocol::OPEN_EXECUTE
@@ -151,6 +177,25 @@ impl Client {
                 rights: s
                     .open_rights
                     .unwrap_or(posix_protocol::CHECK_EXECUTABLE_RIGHTS),
+            })
+        })
+    }
+
+    fn fstat(&self, file: ObjectHandleAttachment<u32>) -> Result<posix_protocol::FileStatus, i32> {
+        assert!(file.handle >= 200);
+        STATE.with_borrow(|s| {
+            if s.failure == 22 {
+                return Err(EIO);
+            }
+            if s.failure == 26 {
+                return Err(ENOENT);
+            }
+            if s.failure == 27 {
+                return Err(ENOTDIR);
+            }
+            Ok(posix_protocol::FileStatus {
+                mode: if s.failure == 23 { 0o040755 } else { 0o100644 },
+                ..Default::default()
             })
         })
     }
@@ -240,7 +285,7 @@ mod syscall {
             });
         }
         assert_eq!(n, SyscallNumber::HandleReadAt);
-        assert!(h == 19 || h == 29);
+        assert!(h == 19 || h == 29 || h >= 200);
         assert_eq!(super::DEFER.get(), 0);
         super::STATE.with_borrow_mut(|s| {
             s.reads += 1;
@@ -250,7 +295,19 @@ mod syscall {
             if s.failure == 3 {
                 return Ok(len + 1);
             }
-            let bytes = if h == 19 { &s.bytes } else { &s.prepared };
+            if h >= 200 && s.failure == 24 {
+                return Err(super::EIO);
+            }
+            if h >= 200 && s.failure == 25 {
+                return Ok(len + 1);
+            }
+            let bytes = if h == 19 {
+                &s.bytes
+            } else if h == 29 {
+                &s.prepared
+            } else {
+                &s.libraries[(h - 200) as usize].1
+            };
             let start = (offset as usize).min(bytes.len());
             let count = (bytes.len() - start).min(len as usize).min(17);
             unsafe {
@@ -713,4 +770,217 @@ fn real_compiler_pie(packed: bool) {
             }
         });
     }
+}
+
+#[test]
+fn dependency_capture_uses_readable_regular_handles_and_preserves_all_failure_ownership() {
+    struct Temporary(std::path::PathBuf);
+    impl Drop for Temporary {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+    let temporary = Temporary(std::env::temp_dir().join(
+        format!("mochios-exec-deps-{}-{}", std::process::id(),
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()),
+    ));
+    std::fs::create_dir(&temporary.0).unwrap();
+    let library = temporary.0.join("libscope.so");
+    let root = temporary.0.join("root");
+    for (source, output, extra) in [
+        (
+            "elf_scope_dependency.c",
+            &library,
+            vec!["-Wl,-soname,libscope.so".to_owned()],
+        ),
+        (
+            "elf_scope_root.c",
+            &root,
+            vec![
+                "-Wl,-e,_start".to_owned(),
+                format!("-L{}", temporary.0.display()),
+                "-l:libscope.so".to_owned(),
+            ],
+        ),
+    ] {
+        let result = std::process::Command::new("x86_64-elf-gcc")
+            .args([
+                "-fPIC",
+                "-ffreestanding",
+                "-fno-stack-protector",
+                "-nostdlib",
+                "-Wl,-shared,-z,noexecstack",
+            ])
+            .arg(
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("tests")
+                    .join(source),
+            )
+            .args(extra)
+            .arg("-o")
+            .arg(output)
+            .output()
+            .unwrap();
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+    }
+    let bytes = std::fs::read(root).unwrap();
+    let library = std::fs::read(library).unwrap();
+    for (failure, expected) in [
+        (0, ENOEXEC),
+        (4, EAGAIN),
+        (5, EACCES),
+        (9, ENOMEM),
+        (10, EIO),
+        (11, EACCES),
+        (20, EACCES),
+        (21, EACCES),
+        (22, EIO),
+        (23, ENOEXEC),
+        (24, EIO),
+        (25, EIO),
+    ] {
+        reset(failure);
+        STATE.with_borrow_mut(|s| {
+            s.bytes = bytes.clone();
+            s.libraries = vec![(b"/usr/lib/libscope.so".to_vec(), library.clone())];
+        });
+        assert_eq!(
+            implementation::replace(0, ptr::null(), ptr::null(), &table()),
+            Err(expected),
+            "failure={failure}"
+        );
+        STATE.with_borrow(|s| {
+            assert_eq!(s.bytes, bytes);
+            assert_eq!(s.libraries[0].1, library);
+            assert!(!s.closed.contains(&19));
+            assert_eq!(s.entered, usize::from(failure == 0));
+            if failure == 20 {
+                assert!(!s.closed.contains(&200));
+            } else {
+                assert_eq!(
+                    s.closed.iter().filter(|handle| **handle == 200).count(),
+                    1,
+                    "failure={failure}"
+                );
+            }
+            assert_eq!(
+                s.library_paths,
+                vec![
+                    b"/lib/libscope.so".to_vec(),
+                    b"/usr/lib/libscope.so".to_vec()
+                ]
+            );
+            if failure == 0 {
+                let count = u16::from_le_bytes(s.prepared[56..58].try_into().unwrap()) as usize;
+                assert!(count > 6, "authorizer must receive the whole linked image");
+                assert!(s.closed.contains(&28) && s.closed.contains(&29));
+            }
+        });
+    }
+    // Only an open failure may try another search directory. An fstat failure
+    // after acquiring a Handle must propagate and close that exact reference.
+    for (failure, error) in [(26, ENOENT), (27, ENOTDIR)] {
+        reset(failure);
+        STATE.with_borrow_mut(|s| {
+            s.bytes = bytes.clone();
+            s.libraries = vec![
+                (b"/lib/libscope.so".to_vec(), library.clone()),
+                (b"/usr/lib/libscope.so".to_vec(), library.clone()),
+            ];
+        });
+        assert_eq!(
+            implementation::replace(0, ptr::null(), ptr::null(), &table()),
+            Err(error)
+        );
+        STATE.with_borrow(|s| {
+            assert_eq!(s.library_paths, vec![b"/lib/libscope.so".to_vec()]);
+            assert_eq!(s.closed.iter().filter(|h| **h == 200).count(), 1);
+            assert!(!s.closed.contains(&201));
+        });
+    }
+
+    // Force Node storage to grow while parsing the first captured library.
+    // Its bytes stay in a separate owned allocation across that move.
+    let mut nested = library.clone();
+    let headers = u64::from_le_bytes(nested[32..40].try_into().unwrap()) as usize;
+    let count = u16::from_le_bytes(nested[56..58].try_into().unwrap()) as usize;
+    let dynamic = nested[headers..headers + count * 56]
+        .chunks_exact(56)
+        .find(|header| u32::from_le_bytes(header[..4].try_into().unwrap()) == 2)
+        .unwrap();
+    let offset = u64::from_le_bytes(dynamic[8..16].try_into().unwrap()) as usize;
+    let length = u64::from_le_bytes(dynamic[32..40].try_into().unwrap()) as usize;
+    let soname = (offset..offset + length)
+        .step_by(16)
+        .find(|&offset| u64::from_le_bytes(nested[offset..offset + 8].try_into().unwrap()) == 14)
+        .unwrap();
+    nested[soname..soname + 8].copy_from_slice(&1u64.to_le_bytes());
+    let name = nested
+        .windows(12)
+        .position(|bytes| bytes == b"libscope.so\0")
+        .unwrap();
+    nested[name..name + 12].copy_from_slice(b"libinner.so\0");
+    reset(0);
+    STATE.with_borrow_mut(|s| {
+        s.bytes = bytes.clone();
+        s.libraries = vec![
+            (b"/usr/lib/libscope.so".to_vec(), nested),
+            (b"/usr/lib/libinner.so".to_vec(), library.clone()),
+        ];
+    });
+    assert_eq!(
+        implementation::replace(0, ptr::null(), ptr::null(), &table()),
+        Err(ENOEXEC)
+    );
+    STATE.with_borrow(|s| {
+        assert_eq!(s.entered, 1);
+        for handle in [200, 201, 28, 29] {
+            assert_eq!(s.closed.iter().filter(|h| **h == handle).count(), 1);
+        }
+        assert_eq!(s.library_paths.len(), 4);
+    });
+
+    let mut initialized = bytes.clone();
+    let headers = u64::from_le_bytes(initialized[32..40].try_into().unwrap()) as usize;
+    let count = u16::from_le_bytes(initialized[56..58].try_into().unwrap()) as usize;
+    let dynamic = initialized[headers..headers + count * 56]
+        .chunks_exact(56)
+        .find(|header| u32::from_le_bytes(header[..4].try_into().unwrap()) == 2)
+        .unwrap();
+    let offset = u64::from_le_bytes(dynamic[8..16].try_into().unwrap()) as usize;
+    let length = u64::from_le_bytes(dynamic[32..40].try_into().unwrap()) as usize;
+    let got = (offset..offset + length)
+        .step_by(16)
+        .find(|&offset| {
+            u64::from_le_bytes(initialized[offset..offset + 8].try_into().unwrap()) == 3
+        })
+        .unwrap();
+    initialized[got..got + 8].copy_from_slice(&12u64.to_le_bytes()); // DT_INIT is unsupported, never ignored.
+    reset(0);
+    STATE.with_borrow_mut(|s| {
+        s.bytes = initialized;
+        s.libraries = vec![(b"/usr/lib/libscope.so".to_vec(), library)];
+    });
+    assert_eq!(
+        implementation::replace(0, ptr::null(), ptr::null(), &table()),
+        Err(ENOEXEC)
+    );
+    STATE.with_borrow(|s| {
+        assert!(s.library_paths.is_empty() && s.prepared.is_empty());
+    });
+
+    reset(0);
+    STATE.with_borrow_mut(|s| s.bytes = bytes);
+    assert_eq!(
+        implementation::replace(0, ptr::null(), ptr::null(), &table()),
+        Err(ENOENT)
+    );
+    STATE.with_borrow(|s| {
+        assert!(s.prepared.is_empty());
+        assert_eq!(s.entered, 0);
+    });
 }
