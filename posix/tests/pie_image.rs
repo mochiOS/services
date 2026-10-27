@@ -956,8 +956,8 @@ fn direct_scope_requires_supported_startup_and_conservative_placement() {
         (13, 1, false),
         (25, 1, false),
         (27, 8, false),
-        (29, 0, false),
-        (15, 0, false),
+        (29, 0, true),
+        (15, 0, true),
         (32, 1, false),
         (33, 8, false),
         (12, 0, true),
@@ -979,4 +979,28 @@ fn direct_scope_requires_supported_startup_and_conservative_placement() {
     assert_eq!(bias % image.alignment(), 0);
     assert!(bias >= 0x20001001 && end > bias);
     assert!(image.placement(u64::MAX).is_err());
+}
+
+#[test]
+fn search_metadata_validates_string_offsets_duplicates_and_runpath_presence() {
+    let mut bytes = symbol_image(1, false, false);
+    w64(&mut bytes, 0x1080, 15);
+    w64(&mut bytes, 0x1088, 1); // "symbol"
+    w64(&mut bytes, 0x1090, 29);
+    w64(&mut bytes, 0x1098, 0); // An explicitly empty RUNPATH still shadows RPATH.
+    // Move the relocation table so the extended dynamic array cannot alias it.
+    let relocation = bytes[0x10a0..0x10b8].to_vec();
+    bytes[0x1180..0x1198].copy_from_slice(&relocation);
+    w64(&mut bytes, 0x1058, 0x1180);
+    w64(&mut bytes, 0x10a0, 0);
+    w64(&mut bytes, 64 + 2 * 56 + 32, 176);
+    let image = Pie::parse_object(&bytes).unwrap();
+    let paths = image.search_paths().unwrap();
+    assert_eq!(paths.rpath, Some(b"symbol".as_slice()));
+    assert_eq!(paths.runpath, Some(b"".as_slice()));
+    w64(&mut bytes, 0x1090, 15);
+    assert!(matches!(Pie::parse_object(&bytes), Err(Error::Invalid)));
+    w64(&mut bytes, 0x1090, 29);
+    w64(&mut bytes, 0x1098, 8);
+    assert!(matches!(Pie::parse_object(&bytes), Err(Error::Invalid)));
 }

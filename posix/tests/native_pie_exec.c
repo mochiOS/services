@@ -67,6 +67,20 @@ int main(int argc, char **arguments) {
   }
   CHECK(handles() == before);
   puts("dynamic-pie: PASS missing dependency preserves image and handles");
+#ifdef MOCHIOS_LIBRARY_SEARCH
+  char *search_environment[] = {"LD_LIBRARY_PATH=/system/tests", NULL};
+  int secure = getuid() != geteuid() || getgid() != getegid();
+  pid_t search_child = fork();
+  CHECK(search_child >= 0);
+  if (search_child == 0) {
+    execve("/system/tests/environment-library-root", argv, search_environment);
+    if (secure && errno == ENOENT) _exit(42);
+    fprintf(stderr, "library-search: FAIL secure=%d errno=%d\n", secure, errno);
+    _exit(99);
+  }
+  CHECK(check_child(search_child) == 0);
+  puts("library-search: PASS environment lookup and secure identity exclusion");
+#endif
 #endif
   for (int i = 0; i < 3; i++) {
     pid_t child = fork();

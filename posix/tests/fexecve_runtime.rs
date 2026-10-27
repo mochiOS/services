@@ -43,6 +43,8 @@ struct State {
     prepared: Vec<u8>,
     libraries: Vec<(Vec<u8>, Vec<u8>)>,
     library_paths: Vec<Vec<u8>>,
+    secure_identity: u8,
+    identity_queries: usize,
     mutate: Option<(usize, usize)>,
 }
 thread_local! {static STATE:RefCell<State>=RefCell::new(State::default());static DEFER:Cell<u32>=const{Cell::new(0)};}
@@ -177,6 +179,20 @@ impl Client {
                 rights: s
                     .open_rights
                     .unwrap_or(posix_protocol::CHECK_EXECUTABLE_RIGHTS),
+            })
+        })
+    }
+
+    fn session_info(&self) -> Result<posix_protocol::SessionInfo, i32> {
+        STATE.with_borrow_mut(|s| {
+            s.identity_queries += 1;
+            if s.failure == 28 {
+                return Err(EIO);
+            }
+            Ok(posix_protocol::SessionInfo {
+                effective_uid: if s.secure_identity == 1 { 501 } else { 0 },
+                effective_gid: if s.secure_identity == 2 { 501 } else { 0 },
+                ..Default::default()
             })
         })
     }
@@ -772,8 +788,7 @@ fn real_compiler_pie(packed: bool) {
     }
 }
 
-#[test]
-fn dependency_capture_uses_readable_regular_handles_and_preserves_all_failure_ownership() {
+fn dependency_fixture(root_flags: &[&str], library_flags: &[&str]) -> (Vec<u8>, Vec<u8>) {
     struct Temporary(std::path::PathBuf);
     impl Drop for Temporary {
         fn drop(&mut self) {
@@ -817,6 +832,11 @@ fn dependency_capture_uses_readable_regular_handles_and_preserves_all_failure_ow
                     .join(source),
             )
             .args(extra)
+            .args(if source == "elf_scope_root.c" {
+                root_flags
+            } else {
+                library_flags
+            })
             .arg("-o")
             .arg(output)
             .output()
@@ -829,6 +849,12 @@ fn dependency_capture_uses_readable_regular_handles_and_preserves_all_failure_ow
     }
     let bytes = std::fs::read(root).unwrap();
     let library = std::fs::read(library).unwrap();
+    (bytes, library)
+}
+
+#[test]
+fn dependency_capture_uses_readable_regular_handles_and_preserves_all_failure_ownership() {
+    let (bytes, library) = dependency_fixture(&[], &[]);
     for (failure, expected) in [
         (0, ENOEXEC),
         (4, EAGAIN),
@@ -983,4 +1009,230 @@ fn dependency_capture_uses_readable_regular_handles_and_preserves_all_failure_ow
         assert!(s.prepared.is_empty());
         assert_eq!(s.entered, 0);
     });
+}
+
+fn search_exec(
+    root: &[u8],
+    available: &[(&[u8], &[u8])],
+    environment: &[&std::ffi::CStr],
+    secure: u8,
+    failure: u8,
+) -> Result<(), i32> {
+    reset(failure);
+    STATE.with_borrow_mut(|s| {
+        s.bytes = root.to_vec();
+        s.secure_identity = secure;
+        s.libraries = available
+            .iter()
+            .map(|(path, bytes)| (path.to_vec(), bytes.to_vec()))
+            .collect();
+    });
+    let environment: Vec<_> = environment
+        .iter()
+        .map(|text| text.as_ptr())
+        .chain(std::iter::once(ptr::null()))
+        .collect();
+    implementation::replace(0, ptr::null(), environment.as_ptr(), &table())
+}
+fn search_paths(expected: &[&[u8]], entered: usize) {
+    STATE.with_borrow(|s| {
+        assert_eq!(
+            s.library_paths
+                .iter()
+                .map(Vec::as_slice)
+                .collect::<Vec<_>>(),
+            expected
+        );
+        assert_eq!(s.entered, entered);
+    });
+}
+
+#[test]
+fn copied_environment_search_handles_secure_identity_empty_entries_and_unsupported_tokens() {
+    let (root, library) = dependency_fixture(&[], &[]);
+    assert_eq!(
+        search_exec(
+            &root,
+            &[(b"/second/libscope.so", &library)],
+            &[c"LD_LIBRARY_PATH=/first;/second"],
+            0,
+            0
+        ),
+        Err(ENOEXEC)
+    );
+    search_paths(&[b"/first/libscope.so", b"/second/libscope.so"], 1);
+    STATE.with_borrow(|s| assert_eq!(s.identity_queries, 1));
+    assert_eq!(
+        search_exec(
+            &root,
+            &[(b"libscope.so", &library)],
+            &[c"LD_LIBRARY_PATH=:/second"],
+            0,
+            0
+        ),
+        Err(ENOEXEC)
+    );
+    search_paths(&[b"libscope.so"], 1);
+    assert_eq!(
+        search_exec(
+            &root,
+            &[(b"/usr/lib/libscope.so", &library)],
+            &[c"LD_LIBRARY_PATH="],
+            0,
+            0
+        ),
+        Err(ENOEXEC)
+    );
+    search_paths(&[b"/lib/libscope.so", b"/usr/lib/libscope.so"], 1);
+    STATE.with_borrow(|s| assert_eq!(s.identity_queries, 0));
+    for secure in [1, 2] {
+        assert_eq!(
+            search_exec(
+                &root,
+                &[(b"/usr/lib/libscope.so", &library)],
+                &[
+                    c"LD_LIBRARY_PATH=/untrusted",
+                    c"LD_PRELOAD=inject.so",
+                    c"LD_AUDIT=audit.so"
+                ],
+                secure,
+                0
+            ),
+            Err(ENOEXEC)
+        );
+        search_paths(&[b"/lib/libscope.so", b"/usr/lib/libscope.so"], 1);
+        STATE.with_borrow(|s| assert_eq!(s.identity_queries, 1));
+    }
+    for variable in [
+        c"LD_LIBRARY_PATH=$ORIGIN",
+        c"LD_PRELOAD=inject.so",
+        c"LD_AUDIT=audit.so",
+    ] {
+        assert_eq!(search_exec(&root, &[], &[variable], 0, 0), Err(ENOEXEC));
+        search_paths(&[], 0);
+    }
+    assert_eq!(
+        search_exec(
+            &root,
+            &[(b"/lib/libscope.so", &library)],
+            &[c"LD_LIBRARY_PATH=/override"],
+            0,
+            28
+        ),
+        Err(EIO)
+    );
+    search_paths(&[], 0);
+    let mut original = b"LD_LIBRARY_PATH=/captured\0".to_vec();
+    let vector = [original.as_ptr().cast(), ptr::null()];
+    let mut inputs = exec_inputs::Inputs::new();
+    inputs.capture_fd(ptr::null(), vector.as_ptr()).unwrap();
+    original.fill(b'X');
+    assert_eq!(
+        inputs.environment(b"LD_LIBRARY_PATH"),
+        Some(b"/captured".as_slice())
+    );
+    assert_eq!(inputs.environment(b"LD_LIBRARY"), None);
+}
+
+#[test]
+fn rpath_precedes_environment_runpath_follows_it_and_nodefaultlib_is_honored() {
+    let (root, library) = dependency_fixture(&["-Wl,--disable-new-dtags,-rpath,/legacy"], &[]);
+    assert_eq!(
+        search_exec(
+            &root,
+            &[
+                (b"/legacy/libscope.so", &library),
+                (b"/environment/libscope.so", &library)
+            ],
+            &[c"LD_LIBRARY_PATH=/environment"],
+            0,
+            0
+        ),
+        Err(ENOEXEC)
+    );
+    search_paths(&[b"/legacy/libscope.so"], 1);
+    let (root, library) = dependency_fixture(&["-Wl,--enable-new-dtags,-rpath,/modern"], &[]);
+    assert_eq!(
+        search_exec(
+            &root,
+            &[
+                (b"/modern/libscope.so", &library),
+                (b"/environment/libscope.so", &library)
+            ],
+            &[c"LD_LIBRARY_PATH=/environment"],
+            0,
+            0
+        ),
+        Err(ENOEXEC)
+    );
+    search_paths(&[b"/environment/libscope.so"], 1);
+    assert_eq!(
+        search_exec(&root, &[(b"/modern/libscope.so", &library)], &[], 0, 0),
+        Err(ENOEXEC)
+    );
+    search_paths(&[b"/modern/libscope.so"], 1);
+    let (root, library) = dependency_fixture(&["-Wl,-z,nodefaultlib"], &[]);
+    assert_eq!(
+        search_exec(&root, &[(b"/lib/libscope.so", &library)], &[], 0, 0),
+        Err(ENOENT)
+    );
+    search_paths(&[], 0);
+}
+
+#[test]
+fn rpath_is_inherited_by_transitive_dependencies_while_runpath_is_not() {
+    for modern in [false, true] {
+        let flags = if modern {
+            "-Wl,--enable-new-dtags,-rpath,/embedded"
+        } else {
+            "-Wl,--disable-new-dtags,-rpath,/embedded"
+        };
+        let (root, library) = dependency_fixture(&[flags], &[]);
+        let mut nested = library.clone();
+        let headers = u64::from_le_bytes(nested[32..40].try_into().unwrap()) as usize;
+        let count = u16::from_le_bytes(nested[56..58].try_into().unwrap()) as usize;
+        let dynamic = nested[headers..headers + count * 56]
+            .chunks_exact(56)
+            .find(|header| u32::from_le_bytes(header[..4].try_into().unwrap()) == 2)
+            .unwrap();
+        let offset = u64::from_le_bytes(dynamic[8..16].try_into().unwrap()) as usize;
+        let length = u64::from_le_bytes(dynamic[32..40].try_into().unwrap()) as usize;
+        let soname = (offset..offset + length)
+            .step_by(16)
+            .find(|&offset| {
+                u64::from_le_bytes(nested[offset..offset + 8].try_into().unwrap()) == 14
+            })
+            .unwrap();
+        nested[soname..soname + 8].copy_from_slice(&1u64.to_le_bytes());
+        let name = nested
+            .windows(12)
+            .position(|bytes| bytes == b"libscope.so\0")
+            .unwrap();
+        nested[name..name + 12].copy_from_slice(b"libinner.so\0");
+        assert_eq!(
+            search_exec(
+                &root,
+                &[
+                    (b"/embedded/libscope.so", &nested),
+                    (b"/embedded/libinner.so", &library)
+                ],
+                &[],
+                0,
+                0
+            ),
+            Err(if modern { ENOENT } else { ENOEXEC })
+        );
+        if modern {
+            search_paths(
+                &[
+                    b"/embedded/libscope.so",
+                    b"/lib/libinner.so",
+                    b"/usr/lib/libinner.so",
+                ],
+                0,
+            );
+        } else {
+            search_paths(&[b"/embedded/libscope.so", b"/embedded/libinner.so"], 1);
+        }
+    }
 }
