@@ -8,6 +8,7 @@
 #include <cstdio>
 #include <cstring>
 #include <string>
+#include <unistd.h>
 #include <vector>
 
 namespace {
@@ -88,9 +89,11 @@ extern "C" int mochi_native_clang_pipeline_probe() {
   CHECK(write(source, R"C(
 #include <stdio.h>
 #include <stdlib.h>
+#include <unistd.h>
 static _Thread_local volatile int initialized = 17;
 static _Thread_local volatile int zeroed;
 int main(int argc, char **argv) {
+  if ((unsigned)geteuid() != EXPECT_EUID) return 91;
   if (argc != 2 || atoi(argv[1]) != 25 || initialized != 17 || zeroed != 0) return 90;
   initialized += argc;
   zeroed = 23;
@@ -102,6 +105,7 @@ int main(int argc, char **argv) {
   std::vector<std::string> compile = {
       compiler, "--target=x86_64-unknown-none-elf", "--sysroot=" + under(sdk, "sysroot"), "-std=c11", "-O2",
       "-D__mochios__=1",
+      "-DEXPECT_EUID=" + std::to_string(static_cast<unsigned>(geteuid())),
       "-fno-pie", "-mno-red-zone", "-nostdinc", "-isystem",
       under(sdk, "sysroot/include"), "-isystem", under(root, "resource/include"),
       "-resource-dir", under(root, "resource"),

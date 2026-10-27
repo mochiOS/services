@@ -133,6 +133,18 @@ int main(int argc, char **argv) {
     return 37;
   }
 #endif
+  if (argc != 1) {
+    unsigned expected;
+    if (argc == 2 && !std::strcmp(argv[1], "--expect-euid=0")) expected = 0;
+    else if (argc == 2 && !std::strcmp(argv[1], "--expect-euid=501")) expected = 501;
+    else return 33;
+    const auto actual = static_cast<unsigned>(geteuid());
+    if (actual != expected) {
+      std::fprintf(stderr, "llvm-runtime: FAIL exec euid=%u expected=%u\n", actual, expected);
+      return 33;
+    }
+    std::printf("llvm-runtime: verified exec euid=%u\n", actual);
+  }
   return mochi_llvm_runtime_probe();
 }
 #endif

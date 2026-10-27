@@ -69,6 +69,11 @@ pub fn run() {
                     }
                     let arguments = [
                         c"deliberately-unrelated-argv0".as_ptr().cast(),
+                        if reduced_identity {
+                            c"--expect-euid=501".as_ptr().cast()
+                        } else {
+                            c"--expect-euid=0".as_ptr().cast()
+                        },
                         core::ptr::null(),
                     ];
                     let environment = [core::ptr::null()];
