@@ -549,6 +549,15 @@ fn executable_open_needs_read_and_transfer_but_no_shared_cursor_authority() {
 
 #[test]
 fn real_compiler_pie_uses_a_readonly_prepared_image_and_closes_all_temporary_handles() {
+    real_compiler_pie(false);
+}
+
+#[test]
+fn real_compiler_relr_pie_uses_a_readonly_prepared_image_and_closes_all_temporary_handles() {
+    real_compiler_pie(true);
+}
+
+fn real_compiler_pie(packed: bool) {
     struct Temporary(std::path::PathBuf);
     impl Drop for Temporary {
         fn drop(&mut self) {
@@ -573,6 +582,11 @@ fn real_compiler_pie_uses_a_readonly_prepared_image_and_closes_all_temporary_han
             "-nostdlib",
             "-Wl,-pie,--no-dynamic-linker,-e,_start,-z,noexecstack",
         ])
+        .arg(if packed {
+            "-Wl,-z,pack-relative-relocs"
+        } else {
+            "-Wl,-z,nopack-relative-relocs"
+        })
         .arg(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/native_static_pie.c"))
         .arg("-o")
         .arg(&binary)
@@ -583,10 +597,26 @@ fn real_compiler_pie_uses_a_readonly_prepared_image_and_closes_all_temporary_han
         "{}",
         String::from_utf8_lossy(&compiled.stderr)
     );
-    let bytes = std::fs::read(binary).unwrap();
+    let bytes = std::fs::read(&binary).unwrap();
     let pie = mochios_posix_client::pie::Pie::parse(&bytes).unwrap();
     let headers = u64::from_le_bytes(bytes[32..40].try_into().unwrap()) as usize;
     let count = u16::from_le_bytes(bytes[56..58].try_into().unwrap()) as usize;
+    let dynamic = bytes[headers..headers + count * 56]
+        .chunks_exact(56)
+        .find(|header| u32::from_le_bytes(header[..4].try_into().unwrap()) == 2)
+        .unwrap();
+    let offset = u64::from_le_bytes(dynamic[8..16].try_into().unwrap()) as usize;
+    let length = u64::from_le_bytes(dynamic[32..40].try_into().unwrap()) as usize;
+    let has_relr = bytes[offset..offset + length]
+        .chunks_exact(16)
+        .any(|entry| {
+            u64::from_le_bytes(entry[..8].try_into().unwrap()) == 35
+                && u64::from_le_bytes(entry[8..].try_into().unwrap()) != 0
+        });
+    assert_eq!(
+        has_relr, packed,
+        "linker must actually emit the requested relocation format"
+    );
     let tls = bytes[headers..headers + count * 56]
         .chunks_exact(56)
         .find(|header| u32::from_le_bytes(header[..4].try_into().unwrap()) == 7)
@@ -596,6 +626,58 @@ fn real_compiler_pie_uses_a_readonly_prepared_image_and_closes_all_temporary_han
     assert_eq!(word(48), 8192);
     assert_eq!(pie.executable(0x20000000).unwrap().load_bias, 0x20000000);
     assert!(pie.output_length().unwrap() > 4096);
+    // Use the compiler/linker's symbol addresses as an independent oracle for
+    // data and function pointers, rather than decoding RELR a second time.
+    let symbols = std::process::Command::new("x86_64-elf-nm")
+        .arg(&binary)
+        .output()
+        .unwrap();
+    assert!(symbols.status.success());
+    let symbols = String::from_utf8(symbols.stdout).unwrap();
+    let address = |name: &str| -> u64 {
+        symbols
+            .lines()
+            .find_map(|line| {
+                let fields: Vec<_> = line.split_whitespace().collect();
+                (fields.len() == 3 && fields[2] == name)
+                    .then(|| u64::from_str_radix(fields[0], 16).unwrap())
+            })
+            .unwrap_or_else(|| panic!("missing symbol {name}"))
+    };
+    let bias = 0x20000000u64;
+    let mut relocated = vec![0; pie.output_length().unwrap()];
+    pie.write(bias, &mut relocated).unwrap();
+    for (name, addend) in [
+        (
+            "modular_value",
+            address("__ehdr_start").wrapping_sub(0x40000000),
+        ),
+        ("value_pointer", address("value")),
+        ("function_pointer", address("addition")),
+    ] {
+        let phnum = u16::from_le_bytes(relocated[56..58].try_into().unwrap()) as usize;
+        let target = bias + address(name);
+        let actual = relocated[64..64 + phnum * 56]
+            .chunks_exact(56)
+            .find_map(|header| {
+                let word =
+                    |offset| u64::from_le_bytes(header[offset..offset + 8].try_into().unwrap());
+                let base = word(16);
+                if header[0] != 1 || target < base || target + 8 > base + word(32) {
+                    return None;
+                }
+                let offset = (word(8) + target - base) as usize;
+                Some(u64::from_le_bytes(
+                    relocated[offset..offset + 8].try_into().unwrap(),
+                ))
+            })
+            .expect("relocation target must be loaded");
+        assert_eq!(
+            actual,
+            bias.wrapping_add(addend),
+            "symbol={name} packed={packed}"
+        );
+    }
     for (failure, error) in [
         (0, ENOEXEC),
         (4, EAGAIN),

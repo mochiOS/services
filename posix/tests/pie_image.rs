@@ -253,3 +253,164 @@ fn validates_tls_including_zero_fill_duplicate_headers_and_symbol_relocations() 
     let mut output = vec![0; pie.output_length().unwrap()];
     pie.write(0x20000000, &mut output).unwrap();
 }
+
+fn relr_image(words: &[u64], rela: Option<u64>) -> Vec<u8> {
+    let mut bytes = image();
+    // Keep both tables outside the dynamic array and inside its backing LOAD.
+    let mut tags = vec![(36, 0x10a0), (35, words.len() as u64 * 8), (37, 8)];
+    if let Some(target) = rela {
+        tags.extend([(7, 0x1080), (8, 24), (9, 24)]);
+        w64(&mut bytes, 0x1080, target);
+        w64(&mut bytes, 0x1088, 8);
+        w64(&mut bytes, 0x1090, 0x180);
+    }
+    tags.push((0, 0));
+    segment(
+        &mut bytes,
+        2,
+        2,
+        6,
+        0x1000,
+        0x1000,
+        tags.len() as u64 * 16,
+        tags.len() as u64 * 16,
+    );
+    for (index, (tag, value)) in tags.into_iter().enumerate() {
+        w64(&mut bytes, 0x1000 + index * 16, tag);
+        w64(&mut bytes, 0x1008 + index * 16, value);
+    }
+    for (index, word) in words.iter().enumerate() {
+        w64(&mut bytes, 0x10a0 + index * 8, *word);
+    }
+    bytes
+}
+
+fn loaded_word(output: &[u8], address: u64) -> u64 {
+    let count = u16::from_le_bytes(output[56..58].try_into().unwrap()) as usize;
+    for index in 0..count {
+        let header = 64 + index * 56;
+        let base = r64(output, header + 16);
+        if output[header] == 1 && address >= base && address + 8 <= base + r64(output, header + 32)
+        {
+            return r64(output, (r64(output, header + 8) + address - base) as usize);
+        }
+    }
+    panic!("not file-backed: {address:x}");
+}
+
+#[test]
+fn relr_bitmaps_advance_over_empty_words_and_materialize_only_needed_bss() {
+    let mut bytes = relr_image(&[0x10e0, 0b1011, 3, 1, 1 | (1 << 63)], Some(0x1200));
+    w64(&mut bytes, 0x10e0, 0x180);
+    w64(&mut bytes, 0x10e8, (-0x40000000i64) as u64);
+    w64(&mut bytes, 0x10f8, u64::MAX);
+    let source = bytes.clone();
+    let pie = Pie::parse(&bytes).unwrap();
+    let bias = 0x20000000u64;
+    let mut output = vec![0; pie.output_length().unwrap()];
+    pie.write(bias, &mut output).unwrap();
+    for (target, addend) in [
+        (0x10e0, 0x180),
+        (0x10e8, (-0x40000000i64) as u64),
+        (0x10f8, u64::MAX),
+        (0x12e0, 0),
+        (0x18c0, 0),
+        (0x1200, 0x180),
+    ] {
+        assert_eq!(
+            loaded_word(&output, bias + target),
+            bias.wrapping_add(addend),
+            "target={target:x}"
+        );
+    }
+    // Unselected words stay unchanged and the rest of the BSS stays demand-zero.
+    assert_eq!(loaded_word(&output, bias + 0x10f0), 0);
+    assert_eq!(loaded_word(&output, bias + 0x12e8), 0);
+    assert_eq!(r64(&output, 64 + 3 * 56 + 32), 0x8c8);
+    assert_eq!(r64(&output, 64 + 3 * 56 + 40), 0x3000);
+    assert_eq!(bytes, source);
+}
+
+#[test]
+fn relr_implicit_addends_can_straddle_file_and_zero_fill() {
+    let mut bytes = relr_image(&[0x10fc], None);
+    bytes[0x10fc..].copy_from_slice(&0x12345678u32.to_le_bytes());
+    let pie = Pie::parse(&bytes).unwrap();
+    let mut output = vec![0; pie.output_length().unwrap()];
+    pie.write(0x20000000, &mut output).unwrap();
+    assert_eq!(loaded_word(&output, 0x200010fc), 0x32345678);
+}
+
+#[test]
+fn relr_rejects_missing_duplicate_malformed_and_unbacked_tables() {
+    for offset in [0x1000, 0x1010, 0x1020] {
+        let mut bytes = relr_image(&[0x10e0], None);
+        w64(&mut bytes, offset, 0x60000000); // Remove each required tag.
+        assert!(matches!(Pie::parse(&bytes), Err(Error::Invalid)));
+    }
+    for tag in [35, 36, 37] {
+        let mut bytes = relr_image(&[0x10e0], None);
+        w64(&mut bytes, 0x1030, tag);
+        w64(&mut bytes, 64 + 2 * 56 + 32, 80);
+        assert!(matches!(Pie::parse(&bytes), Err(Error::Invalid)));
+    }
+    for (offset, value) in [
+        (0x1008, 0x3ff8),
+        (0x1018, 9),
+        (0x1028, 16),
+        (0x1008, u64::MAX),
+    ] {
+        let mut bytes = relr_image(&[0x10e0], None);
+        w64(&mut bytes, offset, value);
+        assert!(Pie::parse(&bytes).is_err());
+    }
+    assert!(Pie::parse(&relr_image(&[], None)).is_ok());
+}
+
+#[test]
+fn relr_rejects_bitmap_without_base_overflow_outside_load_and_overlapping_writes() {
+    for words in [
+        vec![1],
+        vec![3],
+        vec![0x3ffc],
+        vec![0x10e0, 0x10e0],
+        vec![0x10e0, 0x10e2],
+        vec![0x10e0, 3, 0x10e8],
+        vec![0x3ff8, 3],
+        vec![u64::MAX - 1],
+    ] {
+        assert!(
+            Pie::parse(&relr_image(&words, None)).is_err(),
+            "words={words:x?}"
+        );
+    }
+    for target in [0x10e0, 0x10df, 0x10e7, 0x12e0] {
+        assert!(matches!(
+            Pie::parse(&relr_image(&[0x10e0, 3, 3], Some(target))),
+            Err(Error::Invalid)
+        ));
+    }
+    // Unsorted but disjoint direct entries are legal.
+    assert!(Pie::parse(&relr_image(&[0x1200, 0x10e0], None)).is_ok());
+}
+
+#[test]
+fn dense_relr_bitmaps_keep_unreferenced_bss_out_of_the_prepared_file() {
+    let mut bytes = relr_image(&[0x8000], None);
+    bytes.resize(0x2000, 0);
+    segment(&mut bytes, 1, 1, 6, 0x1000, 0x1000, 0x1000, 0x30000);
+    w64(&mut bytes, 0x1008, 0x1100);
+    w64(&mut bytes, 0x1018, 129 * 8);
+    w64(&mut bytes, 0x1100, 0x8000);
+    for index in 1..129 {
+        w64(&mut bytes, 0x1100 + index * 8, u64::MAX);
+    }
+    let pie = Pie::parse(&bytes).unwrap();
+    let mut output = vec![0; pie.output_length().unwrap()];
+    pie.write(0x20000000, &mut output).unwrap();
+    for index in 0..=128 * 63 {
+        assert_eq!(loaded_word(&output, 0x20008000 + index * 8), 0x20000000);
+    }
+    assert_eq!(r64(&output, 64 + 3 * 56 + 40), 0x30000);
+    assert!(output.len() < 0x20000);
+}
