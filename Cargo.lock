@@ -4690,9 +4690,9 @@ dependencies = [
 ]
 
 [[patch.unused]]
-name = "mnu"
+name = "mochi-user-runtime"
 version = "0.1.0"
 
 [[patch.unused]]
-name = "mochi-user-runtime"
+name = "mnu"
 version = "0.1.0"

@@ -21,12 +21,21 @@ pub fn run(posix: u32, network: u32) {
         fn alarm(seconds: u32) -> u32;
     }
     unsafe {
-        alarm(90);
+        // Real compiler images take substantially longer than socket probes.
+        // Keep a finite watchdog, including both credential cases.
+        alarm(if cfg!(mochios_llvm_runtime_probe_215) {
+            900
+        } else {
+            90
+        });
     }
     p::io::stdout(b"inet-socket: starting native factory/Provider checks\n").unwrap();
     #[cfg(mochios_llvm_runtime_probe_215)]
     {
         llvm_runtime::run();
+        unsafe {
+            alarm(0);
+        }
         return;
     }
     let client = Client::new(SyscallEndpointTransport::new(posix));

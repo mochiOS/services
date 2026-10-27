@@ -55,6 +55,12 @@ pub fn run() {
         ];
         for path in paths {
             for reduced_identity in [false, true] {
+                mochi_user_platform::io::stdout(if reduced_identity {
+                    b"llvm-runtime: starting euid 501 child\n"
+                } else {
+                    b"llvm-runtime: starting euid 0 child\n"
+                })
+                .unwrap();
                 let child = fork();
                 assert!(child >= 0, "C++ probe fork errno={}", *__errno());
                 if child == 0 {
@@ -76,6 +82,8 @@ pub fn run() {
                 let mut status = 0;
                 assert_eq!(waitpid(child, &mut status, 0), child);
                 assert_eq!(status, 0, "C++ probe child wait status={status}");
+                mochi_user_platform::io::stdout(b"llvm-runtime: child completed status 0\n")
+                    .unwrap();
             }
         }
         mochi_user_platform::io::stdout(b"llvm-runtime: PASS child exec and wait\n").unwrap();
