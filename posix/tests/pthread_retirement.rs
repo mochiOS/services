@@ -97,21 +97,13 @@ fn main(){
 
 #[test]
 fn join_waits_for_native_retirement_before_reclaiming_user_mappings() {
-    let join = RUNTIME
-        .split("fn pthread_join(")
-        .nth(1)
-        .unwrap()
-        .split("fn pthread_detach(")
-        .next()
-        .unwrap();
-    assert!(join.contains("match native_thread_retired(control)"));
-    assert!(join.contains(
-        "Ok(true) => {\n                    join_cancel_point(control);\n                    break;"
-    ));
+    let join = include_str!("../../../user/crates/newlib-runtime/src/thread_join.rs");
+    assert!(join.contains("native_thread_retired(target)?"));
+    assert!(join.contains("creation_pending.load(Ordering::Acquire) == 0"));
     assert!(join.contains("SyscallNumber::ThreadYield"));
     assert!(
-        join.find("native_thread_retired(control)").unwrap()
-            < join.find("release_thread_control(control)").unwrap()
+        join.find("native_thread_retired(target)").unwrap()
+            < join.find("release_thread_control(target)").unwrap()
     );
     let check = RUNTIME
         .split("fn native_thread_retired(")

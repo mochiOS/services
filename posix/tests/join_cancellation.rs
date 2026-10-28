@@ -6,7 +6,14 @@ fn production_join_cancellation_releases_the_claim_before_cleanup_and_preserves_
     let runtime = include_str!("../../../user/crates/newlib-runtime/src/lib.rs");
     let mut program = String::from(
         r#"
-use std::ffi::c_void;
+extern crate self as mochios_posix_client;
+extern crate self as mnu_abi;
+use std::ffi::{c_char,c_void};
+pub mod memory_copy {pub const MAX_BYTES:usize=4096;}
+mod posix_protocol {pub const MAX_PATH_LEN:usize=4096;}
+#[derive(Debug,PartialEq)]pub enum SyscallNumber {ThreadYield,MemoryCopy}
+const EFAULT:i32=14; const EIO:i32=5; const ENOENT:i32=2; const ENAMETOOLONG:i32=91;
+const PAGE_SIZE:usize=4096;
 use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
 type c_int = i32;
 const ESRCH: i32 = 3;
@@ -24,6 +31,8 @@ struct ThreadControl {
     state: AtomicU32, creation_pending:AtomicU32, joinability: AtomicU32, join_waiter: AtomicU32, result: AtomicUsize,
     cancel_state: AtomicU32, cancel_pending: AtomicU32, wait_generation: AtomicU32,
     multiplex_generation: AtomicU64,
+    callback_resources:callback_resources::Chain,active_signal_scope_id:AtomicU64,
+    native_delivery_defer:AtomicU32,
 }
 impl ThreadControl {
     const fn new() -> Self { Self {
@@ -31,8 +40,26 @@ impl ThreadControl {
         join_waiter: AtomicU32::new(0), result: AtomicUsize::new(55), cancel_state: AtomicU32::new(0),
         cancel_pending: AtomicU32::new(0), wait_generation: AtomicU32::new(0),
         multiplex_generation: AtomicU64::new(0),
+        callback_resources:callback_resources::Chain::new(),active_signal_scope_id:AtomicU64::new(0),
+        native_delivery_defer:AtomicU32::new(0),
     } }
 }
+static FORK_EPOCH:AtomicU64=AtomicU64::new(0);
+static DELIVERIES:AtomicU32=AtomicU32::new(0);
+struct Delivery {guard:Option<upcall_guard::Guard<'static>>,sequence:u32}
+impl Drop for Delivery {fn drop(&mut self) {
+    drop(self.guard.take());
+    if CASE.load(Ordering::Acquire)==14 && self.sequence==2 {
+        assert_eq!(CALLER.native_delivery_defer.load(Ordering::Acquire),0);
+        FORK_EPOCH.fetch_add(1,Ordering::AcqRel);
+        CALLER.wait_generation.fetch_add(1,Ordering::Release);
+        TARGET.join_waiter.store(77,Ordering::Release);
+    }
+}}
+fn defer_native_delivery()->Delivery {Delivery {
+    guard:upcall_guard::Guard::enter(&CALLER.native_delivery_defer),
+    sequence:DELIVERIES.fetch_add(1,Ordering::AcqRel)+1,
+}}
 static CALLER: ThreadControl = ThreadControl::new();
 static TARGET: ThreadControl = ThreadControl::new();
 static CASE: AtomicU32 = AtomicU32::new(0);
@@ -70,6 +97,8 @@ fn native_thread_retired(_: &ThreadControl) -> Result<bool, i32> {
 }
 fn map_kernel_errno(raw: u64) -> i32 { -(raw as i64) as i32 }
 fn finish_thread(_: &ThreadControl, result: *mut c_void) -> ! {
+    {let _delivery=defer_native_delivery();unsafe{CALLER.callback_resources.abandon_from(0)}}
+    assert!(CALLER.callback_resources.is_empty());
     assert_eq!(result as usize, usize::MAX);
     assert_eq!(TARGET.join_waiter.load(Ordering::Acquire), 0);
     assert_eq!(TARGET.joinability.load(Ordering::Acquire), THREAD_JOINABLE);
@@ -82,7 +111,11 @@ fn finish_thread(_: &ThreadControl, result: *mut c_void) -> ! {
 mod syscall {
     use super::*;
     pub const ADDRESS_WAIT_INFINITE: u64 = u64::MAX;
-    pub enum SyscallNumber { ThreadYield }
+    pub use crate::SyscallNumber;
+    pub fn raw_syscall3(number:SyscallNumber,destination:u64,source:u64,length:u64)->Result<u64,i32>{
+        assert_ne!(CALLER.native_delivery_defer.load(Ordering::Acquire),0);
+        crate::user_copy_native::syscall::raw_syscall3(number,destination,source,length)
+    }
     pub fn raw_syscall0(_: SyscallNumber) -> u64 {
         let case=CASE.load(Ordering::Acquire);assert!(matches!(case,6|9|10));
         assert_eq!(RELEASED.load(Ordering::Acquire),0);
@@ -91,24 +124,32 @@ mod syscall {
         0
     }
 }
-mod mochios_posix_client { pub mod synchronization {
-    use super::super::*;
+pub mod synchronization {
+    use super::*;
     pub struct Error;
     impl Error { pub fn raw(&self) -> u64 { (-5i64) as u64 } }
     pub fn wait_u32(address: &AtomicU32, expected: u32, deadline: u64) -> Result<(), Error> {
         assert!(std::ptr::eq(address, &CALLER.wait_generation));
         assert_eq!(deadline, syscall::ADDRESS_WAIT_INFINITE);
+        assert_eq!(CALLER.native_delivery_defer.load(Ordering::Acquire),0);
+        drop(CALLER.callback_resources.capture_for_fork().expect("join must permit a stable fork"));
         let count = WAITS.fetch_add(1, Ordering::AcqRel);
         assert!(count < 3, "join spun without completing");
         match CASE.load(Ordering::Acquire) {
             1 | 5 => { pthread_cancel(1); assert_ne!(address.load(Ordering::Acquire), expected); },
             3 if count == 0 => { pthread_cancel(1); },
             4 => return Err(Error),
+            11 => finish_thread(&CALLER,usize::MAX as *mut c_void),
+            13 => {
+                FORK_EPOCH.fetch_add(1,Ordering::AcqRel);
+                TARGET.join_waiter.store(77,Ordering::Release);
+            },
+            14 => assert_ne!(address.load(Ordering::Acquire),expected),
             _ => { TARGET.state.store(THREAD_EXITED, Ordering::Release); notify_join_waiter(&TARGET); assert_ne!(address.load(Ordering::Acquire), expected); }
         }
         Ok(())
     }
-} }
+}
 "#,
     );
     program.push_str(
@@ -123,14 +164,42 @@ mod mochios_posix_client { pub mod synchronization {
         "pub extern \"C\" fn pthread_cancel(",
         "pub extern \"C\" fn pthread_testcancel(",
         "fn notify_thread_waiter(",
-        "fn release_join_claim(",
-        "fn join_cancel_point(",
         "fn notify_join_waiter(",
     ] {
         let start = runtime.find(entry).unwrap();
         let end = start + runtime[start..].find("\n}\n").unwrap() + 3;
         program.push_str(&runtime[start..end]);
     }
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    for (name, path) in [
+        (
+            "upcall_guard",
+            "user/crates/posix-client/src/upcall_guard.rs",
+        ),
+        (
+            "callback_resources",
+            "user/crates/newlib-runtime/src/callback_resources.rs",
+        ),
+        (
+            "io_resources",
+            "user/crates/newlib-runtime/src/io_resources.rs",
+        ),
+        (
+            "thread_join",
+            "user/crates/newlib-runtime/src/thread_join.rs",
+        ),
+        ("user_copy", "user/crates/newlib-runtime/src/user_copy.rs"),
+        (
+            "user_copy_native",
+            "services/posix/tests/support/user_copy_native.rs",
+        ),
+    ] {
+        program.push_str(&format!(
+            "#[path=\"{}/{path}\"]pub mod {name};\n",
+            root.display()
+        ));
+    }
+    program.push_str("use user_copy_native::syscall_errno;\n");
     program.push_str(
         r#"
 fn main() {
@@ -138,12 +207,18 @@ fn main() {
     CASE.store(case, Ordering::Release);
     if case == 0 { pthread_cancel(1); }
     if case == 3 { CALLER.cancel_state.store(1, Ordering::Release); }
-    if matches!(case,6|7|9|10) {TARGET.state.store(THREAD_EXITED,Ordering::Release);}
+    if matches!(case,6|7|9|10|12) {TARGET.state.store(THREAD_EXITED,Ordering::Release);}
     if matches!(case,9|10) {TARGET.creation_pending.store(1,Ordering::Release);}
-    let result = unsafe { pthread_join(2, &raw mut OUTPUT) };
-    assert!(!matches!(case, 0 | 1 | 5 | 6 | 10), "cancellation returned");
-    if case == 4 || case == 7 {
-        assert_eq!(result, 5);
+    let output=if case==12 {1usize as *mut *mut c_void}else{&raw mut OUTPUT};
+    let result = unsafe { pthread_join(2,output) };
+    assert!(CALLER.callback_resources.is_empty());
+    assert!(!matches!(case, 0 | 1 | 5 | 6 | 10 | 11), "cancellation returned");
+    if matches!(case,13|14) {
+        assert_eq!(result,ESRCH);assert_eq!(RELEASED.load(Ordering::Acquire),0);
+        assert_eq!(TARGET.join_waiter.load(Ordering::Acquire),77);
+        assert_eq!(TARGET.joinability.load(Ordering::Acquire),THREAD_JOIN_CLAIMED);
+    } else if matches!(case,4|7|12) {
+        assert_eq!(result,if case==12 {EFAULT}else{5});
         assert_eq!(unsafe { OUTPUT } as usize, 99);
         assert_eq!(TARGET.joinability.load(Ordering::Acquire), THREAD_JOINABLE);
         assert_eq!(TARGET.join_waiter.load(Ordering::Acquire), 0);
@@ -187,12 +262,12 @@ fn main() {
         "{}",
         String::from_utf8_lossy(&compiled.stderr)
     );
-    for case in 0..11 {
+    for case in 0..15 {
         let executed = Command::new(&executable)
             .arg(case.to_string())
             .output()
             .unwrap();
-        let expected = if matches!(case, 0 | 1 | 5 | 6 | 10) {
+        let expected = if matches!(case, 0 | 1 | 5 | 6 | 10 | 11) {
             73
         } else {
             0
