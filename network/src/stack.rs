@@ -276,6 +276,17 @@ impl NetworkStack {
         payload: &[u8],
         now: u64,
     ) -> Result<(), PacketError> {
+        let config = self.config.ok_or(PacketError::Mismatch)?;
+        let mask = u32::from_be_bytes(config.subnet_mask);
+        // A physical interface cannot receive loopback-source TCP. Do not
+        // generate resets/challenge ACKs toward a directed broadcast either.
+        if header.source[0] == 127
+            || mask.count_ones() < 31
+                && mask != 0
+                && u32::from_be_bytes(header.source) == u32::from_be_bytes(config.address) | !mask
+        {
+            return Err(PacketError::Mismatch);
+        }
         let segment = match TcpSegment::decode(header.source, header.destination, payload) {
             Ok(segment) => segment,
             Err(PacketError::InvalidChecksum) => {
@@ -291,23 +302,10 @@ impl NetworkStack {
             remote_port: segment.source_port,
         };
         self.stats.tcp_segments_received = self.stats.tcp_segments_received.saturating_add(1);
-        let received = {
-            let connection = self
-                .tcp
-                .find_tuple_mut(tuple)
-                .ok_or(PacketError::Mismatch)?;
-            connection.on_segment(&segment, now).map(|result| {
-                let acknowledgment = matches!(
-                    result,
-                    TcpReceiveResult::Acknowledge
-                        | TcpReceiveResult::DuplicateSegment
-                        | TcpReceiveResult::OutOfOrder
-                )
-                .then(|| connection.acknowledgment());
-                (result, acknowledgment)
-            })
-        };
-        let (result, acknowledgment) = match received {
+        let received = self.tcp.receive_packet(tuple, &segment, now, || {
+            platform::service_ready::generate_token().ok()
+        });
+        let received = match received {
             Ok(received) => received,
             Err(TcpConnectionError::ReceiveBufferFull) => {
                 self.stats.tcp_receive_drops = self.stats.tcp_receive_drops.saturating_add(1);
@@ -315,17 +313,20 @@ impl NetworkStack {
             }
             Err(_) => return Err(PacketError::Mismatch),
         };
-        if result == TcpReceiveResult::Reset {
+        if received.event == Some(TcpReceiveResult::Reset) {
             self.stats.tcp_resets = self.stats.tcp_resets.saturating_add(1);
         }
         if segment.flags
             & (mochios_network_stack::TCP_FLAG_SYN | mochios_network_stack::TCP_FLAG_ACK)
             == mochios_network_stack::TCP_FLAG_SYN | mochios_network_stack::TCP_FLAG_ACK
-            && result == TcpReceiveResult::Acknowledge
+            && received.event == Some(TcpReceiveResult::Acknowledge)
         {
             platform::logln!("network.service: TCP SYN+ACK received");
         }
-        if let Some(acknowledgment) = acknowledgment {
+        if let Some(acknowledgment) = received.reply {
+            if acknowledgment.retransmission {
+                self.stats.tcp_retransmissions = self.stats.tcp_retransmissions.saturating_add(1);
+            }
             self.send_tcp(tuple, acknowledgment, now)
                 .map_err(|_| PacketError::Capacity)?;
         }
@@ -1095,6 +1096,7 @@ fn tcp_errno(error: TcpConnectionError) -> u64 {
             mochios_net_device_protocol::STATUS_PEER_CLOSED as i64 as u64
         }
         TcpConnectionError::Timeout | TcpConnectionError::RetryLimit => mochi_user_syscall::EAGAIN,
+        TcpConnectionError::EntropyUnavailable => mochi_user_syscall::EIO,
         TcpConnectionError::InvalidState | TcpConnectionError::InvalidAcknowledgment => {
             mochi_user_syscall::EINVAL
         }
