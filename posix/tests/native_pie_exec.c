@@ -43,7 +43,23 @@ int main(int argc, char **arguments) {
     CHECK(geteuid() == (strcmp(arguments[1], "--expect-euid=0") == 0 ? 0 : 501));
   }
   alarm(180);
-  char *argv[] = {"static-pie", NULL}, *env[] = {NULL};
+#ifdef MOCHIOS_STARTUP_IDENTITY
+  char ids[4][24];
+  snprintf(ids[0], sizeof ids[0], "%lu", (unsigned long)getuid());
+  snprintf(ids[1], sizeof ids[1], "%lu", (unsigned long)geteuid());
+  snprintf(ids[2], sizeof ids[2], "%lu", (unsigned long)getgid());
+  snprintf(ids[3], sizeof ids[3], "%lu", (unsigned long)getegid());
+#endif
+  char *argv[] = {"static-pie",
+#ifdef MOCHIOS_STARTUP_IDENTITY
+    ids[0], ids[1], ids[2], ids[3],
+#endif
+    NULL};
+  char *env[] = {
+#ifdef MOCHIOS_STARTUP_IDENTITY
+    "LD_LIBRARY_PATH=", "LD_PRELOAD=", "LD_AUDIT=", "MOCHIOS_STARTUP_MARKER=preserved",
+#endif
+    NULL};
   errno = 0;
   CHECK(execve("/system/tests/interpreted-pie-204", argv, env) == -1 &&
         errno == ENOEXEC);
@@ -68,7 +84,11 @@ int main(int argc, char **arguments) {
   CHECK(handles() == before);
   puts("dynamic-pie: PASS missing dependency preserves image and handles");
 #ifdef MOCHIOS_LIBRARY_SEARCH
-  char *search_environment[] = {"LD_LIBRARY_PATH=/system/tests", NULL};
+  char *search_environment[] = {"LD_LIBRARY_PATH=/system/tests",
+#ifdef MOCHIOS_STARTUP_IDENTITY
+    "LD_PRELOAD=", "LD_AUDIT=", "MOCHIOS_STARTUP_MARKER=preserved",
+#endif
+    NULL};
   int secure = getuid() != geteuid() || getgid() != getegid();
   pid_t search_child = fork();
   CHECK(search_child >= 0);
@@ -96,6 +116,9 @@ int main(int argc, char **arguments) {
        "original TLS auxiliary headers");
 #ifdef MOCHIOS_SHARED_SCOPE
   puts("dynamic-pie: PASS pathname exec, shared function and root preemption");
+#ifdef MOCHIOS_STARTUP_IDENTITY
+  puts("entry-identity: PASS literal IDs and secure vector before CRT");
+#endif
 #endif
   const char *path = "/tmp/static-pie-204";
   unlink(path);

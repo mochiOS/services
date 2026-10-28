@@ -41,6 +41,7 @@ struct State {
     entered: usize,
     bytes: Vec<u8>,
     prepared: Vec<u8>,
+    startup: Vec<u8>,
     libraries: Vec<(Vec<u8>, Vec<u8>)>,
     library_paths: Vec<Vec<u8>>,
     secure_identity: u8,
@@ -427,7 +428,10 @@ mod syscall {
                     assert!(startup.windows(7).any(|w| w == b"fexecve"));
                 }
             });
-            super::super::STATE.with_borrow_mut(|s| s.entered += 1);
+            super::super::STATE.with_borrow_mut(|s| {
+                s.entered += 1;
+                s.startup = startup.to_vec();
+            });
             Err(mochi_user_syscall::SysError::from_raw(
                 mnu_abi::status::Error::InvalidFormat.into_raw() as i64,
             ))
@@ -1084,7 +1088,7 @@ fn copied_environment_search_handles_secure_identity_empty_entries_and_unsupport
         Err(ENOEXEC)
     );
     search_paths(&[b"/lib/libscope.so", b"/usr/lib/libscope.so"], 1);
-    STATE.with_borrow(|s| assert_eq!(s.identity_queries, 0));
+    STATE.with_borrow(|s| assert_eq!(s.identity_queries, 1));
     for secure in [1, 2] {
         assert_eq!(
             search_exec(
@@ -1235,4 +1239,74 @@ fn rpath_is_inherited_by_transitive_dependencies_while_runpath_is_not() {
             search_paths(&[b"/embedded/libscope.so", b"/embedded/libinner.so"], 1);
         }
     }
+}
+
+#[test]
+fn exec_publishes_authenticated_auxiliary_identity_and_removes_secure_loader_environment() {
+    for (secure, expected) in [
+        (0, [0, 0, 0, 0, 0]),
+        (1, [0, 501, 0, 0, 1]),
+        (2, [0, 0, 0, 501, 1]),
+    ] {
+        assert_eq!(
+            search_exec(
+                &[],
+                &[],
+                &[
+                    c"KEEP=original",
+                    c"LD_LIBRARY_PATH=/untrusted",
+                    c"LD_PRELOAD=inject.so",
+                    c"LD_AUDIT=audit.so",
+                    c"LD_LIBRARY_PATH_SUFFIX=retained"
+                ],
+                secure,
+                0
+            ),
+            Err(ENOEXEC)
+        );
+        STATE.with_borrow(|s| {
+            assert_eq!(s.identity_queries, 1);
+            assert_eq!(s.entered, 1);
+            let image = mnu_abi::process_image::decode(&s.startup).unwrap();
+            let stack = image.stack();
+            let word =
+                |offset| u64::from_le_bytes(stack[offset..offset + 8].try_into().unwrap()) as usize;
+            let mut cursor = (word(0) + 2) * 8;
+            let mut environment = Vec::new();
+            while word(cursor) != 0 {
+                let text = &stack[word(cursor)..];
+                environment.push(&text[..text.iter().position(|byte| *byte == 0).unwrap()]);
+                cursor += 8;
+            }
+            cursor += 8;
+            if secure == 0 {
+                assert_eq!(environment.len(), 5);
+            } else {
+                assert_eq!(
+                    environment,
+                    [
+                        b"KEEP=original".as_slice(),
+                        b"LD_LIBRARY_PATH_SUFFIX=retained"
+                    ]
+                );
+            }
+            for (key, value) in [11, 12, 13, 14, 23].into_iter().zip(expected) {
+                let mut matches = 0;
+                let mut entry = cursor;
+                while word(entry) != 0 {
+                    if word(entry) == key {
+                        assert_eq!(word(entry + 8), value);
+                        matches += 1;
+                    }
+                    entry += 16;
+                }
+                assert_eq!(matches, 1, "key={key}");
+            }
+        });
+    }
+    assert_eq!(search_exec(&[], &[], &[], 0, 28), Err(EIO));
+    STATE.with_borrow(|s| {
+        assert!(s.startup.is_empty());
+        assert_eq!(s.entered, 0);
+    });
 }

@@ -257,3 +257,88 @@ fn loader_bias_is_distinct_from_interpreter_base_and_cannot_be_shadowed() {
         [(AT_IMAGE_LOAD_BIAS, 0)]
     );
 }
+
+#[test]
+fn process_entry_identity_is_literal_userspace_data_before_any_runtime_patch() {
+    use mochios_posix_client::process_image::{
+        Identity, Process, encode_initial_stack_for_process,
+    };
+    for identity in [
+        Identity {
+            real_uid: 501,
+            effective_uid: 501,
+            real_gid: 20,
+            effective_gid: 20,
+        },
+        Identity {
+            real_uid: 0,
+            effective_uid: 501,
+            real_gid: 20,
+            effective_gid: 20,
+        },
+        Identity {
+            real_uid: u32::MAX,
+            effective_uid: u32::MAX,
+            real_gid: 20,
+            effective_gid: 21,
+        },
+    ] {
+        let mut output = [0u8; process_image::MAX_IMAGE_BYTES];
+        let length = encode_initial_stack_for_process(
+            &[b"program"],
+            &[],
+            b"/program",
+            [0; 16],
+            &[],
+            Process {
+                image: None,
+                identity,
+            },
+            &mut output,
+        )
+        .unwrap();
+        let decoded = process_image::decode(&output[..length]).unwrap();
+        let words: Vec<_> = decoded
+            .stack()
+            .chunks_exact(8)
+            .map(|bytes| u64::from_le_bytes(bytes.try_into().unwrap()))
+            .collect();
+        let auxiliary: Vec<_> = words[4..]
+            .chunks_exact(2)
+            .take_while(|pair| pair[0] != 0)
+            .collect();
+        let expected = [
+            (11, identity.real_uid as u64),
+            (12, identity.effective_uid as u64),
+            (13, identity.real_gid as u64),
+            (14, identity.effective_gid as u64),
+            (23, if identity.real_uid == 501 { 0 } else { 1 }),
+        ];
+        for (key, value) in expected {
+            let matches: Vec<_> = auxiliary.iter().filter(|pair| pair[0] == key).collect();
+            assert_eq!(matches.len(), 1);
+            assert_eq!(matches[0][1], value);
+            let offset = 4 * 8 + auxiliary.iter().position(|pair| pair[0] == key).unwrap() * 16 + 8;
+            assert!(
+                !decoded
+                    .relocations()
+                    .any(|relocation| relocation.offset as usize == offset)
+            );
+        }
+        assert_eq!(
+            encode_initial_stack_for_process(
+                &[b"program"],
+                &[],
+                b"/program",
+                [0; 16],
+                &[(11, 0)],
+                Process {
+                    image: None,
+                    identity
+                },
+                &mut output
+            ),
+            Err(EncodeError::InvalidText)
+        );
+    }
+}
