@@ -157,7 +157,7 @@ fn reply_error(
 pub(crate) fn failure_status(raw: u64) -> i32 {
     match i32::try_from((raw as i64).unsigned_abs()) {
         Ok(errno) if errno != 0 => -errno,
-        _ => syscall::EIO as i32,
+        _ => -(syscall::EIO as i32),
     }
 }
 

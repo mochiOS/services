@@ -1,6 +1,6 @@
 //! TCP factories and resources. Only native-authenticated object delivery or
 //! explicit validated Handle attachments authorize operations after acquire.
-use crate::stream::{Loopback, Socket};
+use crate::stream::{Transport, Socket};
 use alloc::vec::Vec;
 use mnu_abi::provider;
 use mochi_user_platform as platform;
@@ -34,7 +34,6 @@ pub(crate) struct Server {
     next: u64,
     factories: Vec<Factory>,
     resources: Vec<Resource>,
-    backend: Loopback,
 }
 impl Server {
     pub(crate) fn new(endpoint: Option<u32>) -> Self {
@@ -43,7 +42,6 @@ impl Server {
             next: 1,
             factories: Vec::new(),
             resources: Vec::new(),
-            backend: Loopback::new(),
         }
     }
     fn id(&mut self, tag: u64) -> Result<u64, i32> {
@@ -94,6 +92,7 @@ impl Server {
         source: Option<u64>,
         scopes: u32,
         now: u64,
+        backend: &mut Transport,
     ) -> Result<(u64, u32), i32> {
         if self.resources.len() >= LIMIT {
             return Err(-24);
@@ -101,15 +100,14 @@ impl Server {
         self.resources.try_reserve(1).map_err(|_| -12)?;
         let id = self.id(RESOURCE_TAG)?;
         // Allocate the native reference before consuming a queued accept.
-        let h =
-            platform::handle::create_provider_object(self.endpoint.ok_or(-5)?, id, RESOURCE_RIGHTS)
-                .map_err(|_| -5)?;
+        let h = platform::handle::create_provider_object(self.endpoint.ok_or(-5)?, id, RESOURCE_RIGHTS)
+            .map_err(|_| -5)?;
         let opened = match source {
-            None => self.backend.open(),
+            None => backend.open(),
             Some(listener) => {
                 let r = self.resources.iter().find(|r| r.id == listener).ok_or(-13);
                 match r {
-                    Ok(r) => self.backend.accept(r.socket),
+                    Ok(r) => backend.accept(r.socket),
                     Err(e) => Err(e),
                 }
             }
@@ -122,25 +120,23 @@ impl Server {
             }
         };
         if platform::handle::signal_provider_object(id, 0, SIGNALS).is_err() {
-            self.backend.release(socket, now);
+            backend.release(socket, now);
             let _ = platform::handle::close(h);
             return Err(-5);
         }
         self.resources.push(Resource { id, socket, scopes });
         Ok((id, h))
     }
-    fn remove(&mut self, id: u64, now: u64) {
+    fn remove(&mut self, id: u64, now: u64, backend: &mut Transport) {
         self.factories.retain(|f| f.id != id);
         if let Some(i) = self.resources.iter().position(|r| r.id == id) {
-            self.backend
-                .release(self.resources.swap_remove(i).socket, now);
+            backend.release(self.resources.swap_remove(i).socket, now);
         }
     }
-    pub(crate) fn pump(&mut self, now: u64) {
-        self.backend
-            .advance(now, || platform::service_ready::generate_token().ok());
+    pub(crate) fn pump(&mut self, now: u64, backend: &mut Transport) {
+        backend.advance(now, || platform::service_ready::generate_token().ok());
         for r in &self.resources {
-            let set = match self.backend.status(r.socket) {
+            let set = match backend.status(r.socket) {
                 Ok(s) => {
                     let mut set = 0;
                     if s.readable {
@@ -165,6 +161,7 @@ impl Server {
         bytes: &[u8],
         handles: &platform::ipc::IpcObjectHandles,
         now: u64,
+        backend: &mut Transport,
     ) -> bool {
         if bytes.starts_with(b"NTCP") {
             let op = bytes
@@ -210,7 +207,7 @@ impl Server {
                     }
                     wire::OPEN if bytes.len() == 8 => {
                         let scopes = self.factory_scope(handles)?;
-                        self.issue_resource(None, scopes, now).map(Some)
+                        self.issue_resource(None, scopes, now, backend).map(Some)
                     }
                     wire::ACCEPT if bytes.len() == 8 => {
                         let id = self.attached(handles)?;
@@ -221,7 +218,7 @@ impl Server {
                         {
                             return Err(-13);
                         }
-                        self.issue_resource(Some(id), 0, now).map(Some)
+                        self.issue_resource(Some(id), 0, now, backend).map(Some)
                     }
                     wire::VALIDATE | wire::OPEN | wire::ACCEPT => Err(-22),
                     _ => Err(-38),
@@ -242,9 +239,9 @@ impl Server {
                             RESOURCE_RIGHTS
                         },
                     };
-                    self.pump(now);
+                    self.pump(now, backend);
                     if platform::ipc::reply_object_handles(sender, &response, &attached).is_err() {
-                        self.remove(id, now);
+                        self.remove(id, now, backend);
                     }
                     let _ = platform::handle::close(h);
                 }
@@ -264,7 +261,7 @@ impl Server {
         let native =
             handles.count == 0 && handles.delivery_flags == mnu_abi::IPC_DELIVERY_NATIVE_OBJECT;
         if native && header.opcode == provider::OP_RELEASE {
-            self.remove(header.object_id, now);
+            self.remove(header.object_id, now, backend);
             return true;
         }
         let mut data = [0; provider::MAX_DATA_LEN];
@@ -287,6 +284,12 @@ impl Server {
                 let n = wire::Limits {
                     scopes: f.scopes,
                     minimum_port: 1024,
+                    routes: wire::ROUTE_LOOPBACK
+                        | if backend.has_interface() {
+                            wire::ROUTE_INTERFACE
+                        } else {
+                            0
+                        },
                 }
                 .encode(&mut data)
                 .map_err(|_| -5)?;
@@ -304,7 +307,7 @@ impl Server {
                     if header.basis != 0 {
                         return Err(-22);
                     }
-                    self.backend
+                    backend
                         .receive(
                             socket,
                             header.opcode == provider::OP_READ_AT,
@@ -312,7 +315,7 @@ impl Server {
                         )
                         .map(|n| (n as u64, n))
                 }
-                provider::OP_WRITE => self.backend.send(socket, input).map(|n| (n as u64, 0)),
+                provider::OP_WRITE => backend.send(socket, input).map(|n| (n as u64, 0)),
                 provider::OP_QUERY => {
                     if !input.is_empty() {
                         return Err(-22);
@@ -320,15 +323,15 @@ impl Server {
                     match header.basis {
                         wire::LOCAL | wire::PEER if header.length == wire::ENDPOINT_LEN as u32 => {
                             let e = if header.basis == wire::LOCAL {
-                                self.backend.local(socket)?
+                                backend.local(socket)?
                             } else {
-                                self.backend.peer(socket)?
+                                backend.peer(socket)?
                             };
                             let n = e.encode(&mut data).map_err(|_| -5)?;
                             Ok((n as u64, n))
                         }
                         wire::STATUS if header.length == wire::STATUS_LEN as u32 => {
-                            let s = self.backend.status(socket)?;
+                            let s = backend.status(socket)?;
                             let flags = u32::from(s.readable) * wire::READABLE
                                 | u32::from(s.writable) * wire::WRITABLE
                                 | u32::from(s.peer_closed) * wire::PEER_CLOSED
@@ -353,12 +356,12 @@ impl Server {
                             if e.port != 0 && e.port < 1024 {
                                 return Err(-13);
                             }
-                            self.backend.bind(socket, e)?;
+                            backend.bind(socket, e)?;
                         } else {
                             if r.scopes & wire::CONNECT_SCOPE == 0 {
                                 return Err(-13);
                             }
-                            self.backend.connect(socket, e, || {
+                            backend.connect(socket, e, || {
                                 platform::service_ready::generate_token().ok()
                             })?;
                         }
@@ -368,7 +371,7 @@ impl Server {
                         if r.scopes & wire::LISTEN_SCOPE == 0 {
                             return Err(-13);
                         }
-                        self.backend.listen(
+                        backend.listen(
                             socket,
                             u32::from_le_bytes(input.try_into().unwrap()) as usize,
                         )?;
@@ -376,11 +379,10 @@ impl Server {
                     }
                     wire::SHUTDOWN if input.len() == 4 && header.length == 0 => {
                         let flags = u32::from_le_bytes(input.try_into().unwrap());
-                        if flags == 0 || flags & !(wire::READ_SHUTDOWN | wire::WRITE_SHUTDOWN) != 0
-                        {
+                        if flags == 0 || flags & !(wire::READ_SHUTDOWN | wire::WRITE_SHUTDOWN) != 0 {
                             return Err(-22);
                         }
-                        self.backend.shutdown(
+                        backend.shutdown(
                             socket,
                             flags & wire::READ_SHUTDOWN != 0,
                             flags & wire::WRITE_SHUTDOWN != 0,
@@ -388,13 +390,12 @@ impl Server {
                         Ok((0, 0))
                     }
                     wire::TAKE_ERROR if input.is_empty() && header.length == 4 => {
-                        data[..4].copy_from_slice(&self.backend.take_error(socket)?.to_le_bytes());
+                        data[..4].copy_from_slice(&backend.take_error(socket)?.to_le_bytes());
                         Ok((4, 4))
                     }
                     wire::CANCEL_CONNECT if input.is_empty() && header.length == 4 => {
-                        data[..4].copy_from_slice(
-                            &u32::from(self.backend.cancel_connect(socket)?).to_le_bytes(),
-                        );
+                        data[..4]
+                            .copy_from_slice(&u32::from(backend.cancel_connect(socket)?).to_le_bytes());
                         Ok((4, 4))
                     }
                     _ => Err(-95),
@@ -416,7 +417,7 @@ impl Server {
         }
         .encode(&data[..n], &mut response)
         .unwrap();
-        self.pump(now);
+        self.pump(now, backend);
         let _ = platform::ipc::reply(sender, &response[..n]);
         true
     }

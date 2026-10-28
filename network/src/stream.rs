@@ -3,10 +3,11 @@
 use alloc::{collections::VecDeque, vec::Vec};
 use mochios_net_device_protocol::datagram::Endpoint;
 use mochios_network_stack::{
-    TCP_EPHEMERAL_END, TCP_EPHEMERAL_START, TCP_FLAG_RST, TcpConnection, TcpConnectionError,
+    Ipv4Config, TCP_EPHEMERAL_END, TCP_EPHEMERAL_START, TCP_FLAG_RST, TcpConnection, TcpConnectionError,
     TcpConnectionTable, TcpListenConfig, TcpOptions, TcpSegment, TcpState, TcpTransmit, TcpTuple,
 };
 
+pub(crate) const RESOURCE_OWNER_TAG: u64 = 1 << 63;
 const RESOURCE_LIMIT: usize = 64;
 const TCP_LIMIT: usize = 32;
 const QUEUE_LIMIT: usize = 64;
@@ -64,14 +65,16 @@ impl Row {
         }
     }
 }
-struct Packet {
-    tuple: TcpTuple,
-    transmit: TcpTransmit,
-    origin: Option<u64>,
+pub(crate) struct Packet {
+    pub(crate) tuple: TcpTuple,
+    pub(crate) transmit: TcpTransmit,
+    pub(crate) origin: Option<u64>,
 }
 
-pub(crate) struct Loopback {
-    table: TcpConnectionTable,
+pub(crate) struct Transport {
+    pub(crate) table: TcpConnectionTable,
+    config: Option<Ipv4Config>,
+    local_mss: u16,
     rows: Vec<Row>,
     pending: VecDeque<Packet>,
     next: u64,
@@ -96,15 +99,134 @@ fn eof(state: TcpState) -> bool {
         TcpState::CloseWait | TcpState::LastAck | TcpState::TimeWait | TcpState::Closed
     )
 }
-impl Loopback {
+fn valid_unicast(address: [u8; 4], config: Ipv4Config) -> bool {
+    let mask = u32::from_be_bytes(config.subnet_mask);
+    address[0] != 0
+        && address[0] != 127
+        && address[0] < 224
+        && !(mask.count_ones() < 31
+            && u32::from_be_bytes(address) == u32::from_be_bytes(config.address) | !mask)
+}
+impl Transport {
     pub(crate) fn new() -> Self {
+        Self::with_capacity(TCP_LIMIT, 1460)
+    }
+    pub(crate) fn with_capacity(capacity: usize, local_mss: u16) -> Self {
         Self {
-            table: TcpConnectionTable::new(TCP_LIMIT),
+            table: TcpConnectionTable::new(capacity),
+            config: None,
+            local_mss,
             rows: Vec::new(),
             pending: VecDeque::new(),
-            next: 1,
+            next: RESOURCE_OWNER_TAG | 1,
             next_port: TCP_EPHEMERAL_START,
         }
+    }
+    /// The network service installs only validated interface configuration.
+    /// Loopback remains available independently of a physical interface.
+    pub(crate) fn configure(&mut self, config: Option<Ipv4Config>) -> Result<(), i32> {
+        if let Some(c) = config {
+            let mask = u32::from_be_bytes(c.subnet_mask);
+            if c.address[0] == 0
+                || c.address[0] == 127
+                || c.address[0] >= 224
+                || mask == 0
+                || mask.leading_ones() + mask.trailing_zeros() != 32
+            {
+                return Err(-22);
+            }
+        }
+        if self.config == config {
+            return Ok(());
+        }
+        self.config = config;
+        let failure = if config.is_some() { -99 } else { -100 };
+        let address = config.map(|c| c.address);
+        for c in self.table.connections_mut() {
+            if c.owner & RESOURCE_OWNER_TAG != 0
+                && c.tuple.local_address[0] != 127
+                && Some(c.tuple.local_address) != address
+            {
+                c.abort();
+            }
+        }
+        for row in &mut self.rows {
+            if row.local.address == [0; 4]
+                || row.local.address[0] == 127
+                || Some(row.local.address) == address
+            {
+                continue;
+            }
+            match row.binding {
+                Binding::Idle => continue,
+                Binding::Listener(id) => {
+                    let _ = self.table.close_listener(id, row.socket.0);
+                }
+                Binding::Connection { .. } => (),
+            }
+            if row.failure.is_none() {
+                row.failure = Some(failure);
+                row.pending_error = failure;
+            }
+        }
+        self.pending
+            .retain(|p| p.tuple.local_address[0] == 127 || Some(p.tuple.local_address) == address);
+        Ok(())
+    }
+    fn is_local(&self, address: [u8; 4]) -> bool {
+        address[0] == 127 || self.config.is_some_and(|c| c.address == address)
+    }
+    pub(crate) fn has_interface(&self) -> bool {
+        self.config.is_some()
+    }
+    /// All TCP users share this port namespace, including bound descriptions
+    /// that have not yet installed a TCB in the common table.
+    pub(crate) fn allocate_legacy_port(&self, seed: u16) -> Result<u16, TcpConnectionError> {
+        let range = u32::from(TCP_EPHEMERAL_END) - u32::from(TCP_EPHEMERAL_START) + 1;
+        for offset in 0..range {
+            let port = TCP_EPHEMERAL_START + ((u32::from(seed) + offset) % range) as u16;
+            if self.port_available(
+                Socket(0),
+                Endpoint {
+                    address: [0; 4],
+                    port,
+                },
+            ) {
+                return Ok(port);
+            }
+        }
+        Err(TcpConnectionError::PortUnavailable)
+    }
+    pub(crate) fn pop_external(&mut self) -> Option<Packet> {
+        let index = self
+            .pending
+            .iter()
+            .position(|p| !self.is_local(p.tuple.remote_address))?;
+        self.pending.remove(index)
+    }
+    /// Restores the slot just removed by pop_external; no intervening producer
+    /// runs while NetworkStack owns this exclusive transport borrow.
+    pub(crate) fn retry_external(&mut self, packet: Packet) {
+        self.pending.push_front(packet);
+    }
+    pub(crate) fn fail_external(&mut self, origin: Option<u64>, failure: i32) {
+        let Some(origin) = origin else {
+            return;
+        };
+        for row in &mut self.rows {
+            if let Binding::Connection { tcp, owner } = row.binding {
+                if tcp == origin {
+                    if let Ok(c) = self.table.get_mut(tcp, owner) {
+                        c.abort();
+                    }
+                    if row.failure.is_none() {
+                        row.failure = Some(failure);
+                        row.pending_error = failure;
+                    }
+                }
+            }
+        }
+        self.pending.retain(|p| p.origin != Some(origin));
     }
     fn index(&self, socket: Socket) -> Result<usize, i32> {
         self.rows
@@ -127,16 +249,20 @@ impl Loopback {
         Ok(socket)
     }
     fn port_available(&self, socket: Socket, local: Endpoint) -> bool {
-        !self.rows.iter().any(|r| {
-            r.socket != socket
-                && r.local.port == local.port
-                && (r.local.address == [0; 4]
-                    || local.address == [0; 4]
-                    || r.local.address == local.address)
-        })
+        !self.table.local_port_in_use(local.address, local.port)
+            && !self.rows.iter().any(|r| {
+                r.socket != socket
+                    && r.local.port == local.port
+                    && (r.local.address == [0; 4]
+                        || local.address == [0; 4]
+                        || r.local.address == local.address)
+            })
     }
     fn local_endpoint(&mut self, socket: Socket, mut local: Endpoint) -> Result<Endpoint, i32> {
-        if local.address != [0; 4] && local.address[0] != 127 {
+        if local.address != [0; 4]
+            && local.address[0] != 127
+            && self.config.is_none_or(|c| c.address != local.address)
+        {
             return Err(-99);
         }
         if local.port != 0 {
@@ -167,6 +293,9 @@ impl Loopback {
     }
     pub(crate) fn bind(&mut self, socket: Socket, local: Endpoint) -> Result<(), i32> {
         let i = self.index(socket)?;
+        if let Some(error) = self.rows[i].failure {
+            return Err(error);
+        }
         if !matches!(self.rows[i].binding, Binding::Idle) || self.rows[i].local != EMPTY {
             return Err(-22);
         }
@@ -195,18 +324,32 @@ impl Loopback {
         entropy: impl FnOnce() -> Option<u64>,
     ) -> Result<(), i32> {
         let i = self.index(socket)?;
+        if let Some(error) = self.rows[i].failure {
+            return Err(error);
+        }
         if !matches!(self.rows[i].binding, Binding::Idle) {
             return Err(-106);
         }
         if remote.port == 0 || remote.address == [0; 4] {
             return Err(-22);
         }
-        if remote.address[0] != 127 {
-            return Err(-101);
-        }
+        let source = if remote.address[0] == 127 {
+            [127, 0, 0, 1]
+        } else {
+            let config = self.config.ok_or(-101)?;
+            if !valid_unicast(remote.address, config)
+                || mochios_network_stack::next_hop(config, remote.address).is_none()
+            {
+                return Err(-101);
+            }
+            config.address
+        };
         let mut local = self.rows[i].local;
         if local.address == [0; 4] {
-            local.address = [127, 0, 0, 1];
+            local.address = source;
+        }
+        if (local.address[0] == 127) != (remote.address[0] == 127) {
+            return Err(-101);
         }
         local = self.local_endpoint(socket, local)?;
         let random = entropy().ok_or(-5)?;
@@ -225,7 +368,7 @@ impl Loopback {
             socket.0,
             tuple,
             (random >> 32) as u32,
-            1460,
+            self.local_mss,
             BUFFER,
             BUFFER,
             500,
@@ -242,6 +385,9 @@ impl Loopback {
     }
     pub(crate) fn listen(&mut self, socket: Socket, backlog: usize) -> Result<(), i32> {
         let i = self.index(socket)?;
+        if let Some(error) = self.rows[i].failure {
+            return Err(error);
+        }
         if backlog == 0 {
             return Err(-22);
         }
@@ -264,7 +410,7 @@ impl Loopback {
                 local.port,
                 TcpListenConfig {
                     backlog: backlog.min(TCP_LIMIT),
-                    local_mss: 1460,
+                    local_mss: self.local_mss,
                     send_capacity: BUFFER,
                     receive_capacity: BUFFER,
                     retransmit_timeout: 500,
@@ -278,6 +424,9 @@ impl Loopback {
     }
     pub(crate) fn accept(&mut self, listener: Socket) -> Result<Socket, i32> {
         let i = self.index(listener)?;
+        if let Some(error) = self.rows[i].failure {
+            return Err(error);
+        }
         let Binding::Listener(tcp) = self.rows[i].binding else {
             return Err(-22);
         };
@@ -311,6 +460,12 @@ impl Loopback {
             connecting: false,
             error: row.pending_error,
         };
+        if row.failure.is_some() {
+            s.readable = true;
+            s.writable = true;
+            s.peer_closed = true;
+            return Ok(s);
+        }
         match row.binding {
             Binding::Idle => {}
             Binding::Listener(tcp) => {
@@ -387,6 +542,9 @@ impl Loopback {
     }
     pub(crate) fn shutdown(&mut self, socket: Socket, read: bool, write: bool) -> Result<(), i32> {
         let i = self.index(socket)?;
+        if let Some(error) = self.rows[i].failure {
+            return Err(error);
+        }
         let row = &mut self.rows[i];
         let Binding::Connection { tcp, owner } = row.binding else {
             return Err(-107);
@@ -534,7 +692,11 @@ impl Loopback {
     /// must return to the service loop so other clients can make progress.
     pub(crate) fn advance(&mut self, now: u64, mut entropy: impl FnMut() -> Option<u64>) -> usize {
         let pending = &mut self.pending;
-        for c in self.table.connections_mut() {
+        for c in self
+            .table
+            .connections_mut()
+            .filter(|c| c.owner & RESOURCE_OWNER_TAG != 0)
+        {
             c.tick(now);
             if pending.len() == QUEUE_LIMIT || pending.try_reserve(1).is_err() {
                 break;
@@ -559,11 +721,21 @@ impl Loopback {
             }
         }
         let mut work = 0;
+        let mut deferred = 0;
         while work < PUMP_BUDGET {
             let Some(packet) = self.pending.pop_front() else {
                 break;
             };
             work += 1;
+            if !self.is_local(packet.tuple.remote_address) {
+                self.pending.push_back(packet);
+                deferred += 1;
+                if deferred >= self.pending.len() {
+                    break;
+                }
+                continue;
+            }
+            deferred = 0;
             let tuple = TcpTuple {
                 local_address: packet.tuple.remote_address,
                 local_port: packet.tuple.remote_port,

@@ -89,14 +89,14 @@ pub(crate) fn run() -> ! {
             }
         }
         authority.pump_datagrams(&mut stack, now);
-        streams.pump(now);
+        streams.pump(now, &mut stack.tcp);
         let mut handles = platform::ipc::IpcObjectHandles::default();
         match platform::ipc::try_wait_object_handles(&mut request, &mut handles) {
             Ok(message) => {
                 let length = (message & 0xffff_ffff) as usize;
                 let sender = message >> 32;
                 if let Some(bytes) = request.get(..length)
-                    && !streams.dispatch(sender, bytes, &handles, now)
+                    && !streams.dispatch(sender, bytes, &handles, now, &mut stack.tcp)
                     && !authority.dispatch_datagram(sender, bytes, &handles, &mut stack, now)
                     && !authority.dispatch(sender, bytes, &handles)
                     && handles.count == 0
@@ -488,11 +488,12 @@ fn unavailable(
     let status = crate::status::failure_status(errno);
     notify_ready(ready, status, &authority);
     let mut backend = crate::datagram::Loopback::new();
+    let mut stream_backend = crate::stream::Transport::new();
     let mut request = [0u8; IPC_BUFFER_LEN];
     let mut response = [0u8; IPC_BUFFER_LEN];
     loop {
         let now = platform::time::ticks().unwrap_or(0);
-        streams.pump(now);
+        streams.pump(now, &mut stream_backend);
         authority.pump_datagrams(&mut backend, 0);
         let mut handles = platform::ipc::IpcObjectHandles::default();
         match platform::ipc::try_wait_object_handles(&mut request, &mut handles) {
@@ -500,7 +501,7 @@ fn unavailable(
                 let length = (message & 0xffff_ffff) as usize;
                 let sender = message >> 32;
                 if let Some(bytes) = request.get(..length)
-                    && !streams.dispatch(sender, bytes, &handles, now)
+                    && !streams.dispatch(sender, bytes, &handles, now, &mut stream_backend)
                     && !authority.dispatch_datagram(sender, bytes, &handles, &mut backend, 0)
                     && !authority.dispatch(sender, bytes, &handles)
                     && handles.count == 0

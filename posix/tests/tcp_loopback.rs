@@ -10,7 +10,7 @@ mod backend {
             port,
         }
     }
-    fn listener(b: &mut Loopback, port: u16, backlog: usize) -> Socket {
+    fn listener(b: &mut Transport, port: u16, backlog: usize) -> Socket {
         let socket = b.open().unwrap();
         b.bind(socket, endpoint(port)).unwrap();
         b.listen(socket, backlog).unwrap();
@@ -19,12 +19,12 @@ mod backend {
     fn entropy() -> Option<u64> {
         Some(0xffff_ffff_1111_2222)
     }
-    fn advance(b: &mut Loopback) {
+    fn advance(b: &mut Transport) {
         for _ in 0..64 {
             assert!(b.advance(0, entropy) <= PUMP_BUDGET);
         }
     }
-    fn pair(b: &mut Loopback) -> (Socket, Socket, Socket) {
+    fn pair(b: &mut Transport) -> (Socket, Socket, Socket) {
         let listener = listener(b, 8000, 4);
         let client = b.open().unwrap();
         b.connect(client, endpoint(8000), entropy).unwrap();
@@ -41,7 +41,7 @@ mod backend {
 
     #[test]
     fn endpoint_binding_is_exclusive_and_ephemeral_ports_are_reserved_before_listen() {
-        let mut b = Loopback::new();
+        let mut b = Transport::new();
         let a = b.open().unwrap();
         let c = b.open().unwrap();
         b.bind(
@@ -75,7 +75,7 @@ mod backend {
 
     #[test]
     fn connect_and_accept_preserve_exact_peer_and_local_endpoints() {
-        let mut b = Loopback::new();
+        let mut b = Transport::new();
         let (_, client, accepted) = pair(&mut b);
         assert_eq!(b.peer(client).unwrap(), b.local(accepted).unwrap());
         assert_eq!(b.peer(accepted).unwrap(), b.local(client).unwrap());
@@ -94,7 +94,7 @@ mod backend {
 
     #[test]
     fn short_writes_backpressure_and_draining_window_update_resume_the_sender() {
-        let mut b = Loopback::new();
+        let mut b = Transport::new();
         let (_, client, accepted) = pair(&mut b);
         let first = vec![1; BUFFER + 17];
         assert_eq!(b.send(client, &first), Ok(BUFFER));
@@ -119,7 +119,7 @@ mod backend {
 
     #[test]
     fn shutdown_write_delivers_queued_data_before_eof_and_preserves_reverse_direction() {
-        let mut b = Loopback::new();
+        let mut b = Transport::new();
         let (_, client, accepted) = pair(&mut b);
         b.send(client, b"tail").unwrap();
         b.shutdown(client, false, true).unwrap();
@@ -139,7 +139,7 @@ mod backend {
 
     #[test]
     fn shutdown_read_discards_text_but_keeps_advertising_receive_space() {
-        let mut b = Loopback::new();
+        let mut b = Transport::new();
         let (_, client, accepted) = pair(&mut b);
         b.shutdown(accepted, true, false).unwrap();
         for _ in 0..3 {
@@ -155,7 +155,7 @@ mod backend {
 
     #[test]
     fn refused_connect_keeps_observable_error_until_release_without_rearming_take_error() {
-        let mut b = Loopback::new();
+        let mut b = Transport::new();
         let c = b.open().unwrap();
         b.connect(c, endpoint(9999), entropy).unwrap();
         advance(&mut b);
@@ -175,7 +175,7 @@ mod backend {
 
     #[test]
     fn backlog_is_recovered_after_accept_without_drawing_entropy_for_refused_syns() {
-        let mut b = Loopback::new();
+        let mut b = Transport::new();
         let listener = listener(&mut b, 8000, 1);
         let a = b.open().unwrap();
         let c = b.open().unwrap();
@@ -202,7 +202,7 @@ mod backend {
 
     #[test]
     fn listener_backlog_updates_do_not_drop_established_unaccepted_connections() {
-        let mut b = Loopback::new();
+        let mut b = Transport::new();
         let listener = listener(&mut b, 8000, 2);
         let a = b.open().unwrap();
         let c = b.open().unwrap();
@@ -217,7 +217,7 @@ mod backend {
 
     #[test]
     fn releasing_listener_preserves_accepted_connections() {
-        let mut b = Loopback::new();
+        let mut b = Transport::new();
         let (listener, client, accepted) = pair(&mut b);
         b.release(listener, 0);
         assert_eq!(b.status(listener), Err(-9));
@@ -230,7 +230,7 @@ mod backend {
 
     #[test]
     fn releasing_listener_resets_established_but_unaccepted_connections() {
-        let mut b = Loopback::new();
+        let mut b = Transport::new();
         let listener = listener(&mut b, 8000, 4);
         let client = b.open().unwrap();
         b.connect(client, endpoint(8000), entropy).unwrap();
@@ -244,7 +244,7 @@ mod backend {
 
     #[test]
     fn resource_capacity_failure_does_not_consume_a_ready_accept() {
-        let mut b = Loopback::new();
+        let mut b = Transport::new();
         let listener = listener(&mut b, 8000, 4);
         let client = b.open().unwrap();
         b.connect(client, endpoint(8000), entropy).unwrap();
@@ -262,7 +262,7 @@ mod backend {
 
     #[test]
     fn graceful_release_keeps_fin_state_but_invalidates_resource_immediately() {
-        let mut b = Loopback::new();
+        let mut b = Transport::new();
         let (listener, client, accepted) = pair(&mut b);
         b.release(client, 0);
         assert_eq!(b.send(client, b"x"), Err(-9));
@@ -279,7 +279,7 @@ mod backend {
 
     #[test]
     fn unread_text_on_release_resets_peer_and_retained_handle_does_not_change_identity() {
-        let mut b = Loopback::new();
+        let mut b = Transport::new();
         let (_, client, accepted) = pair(&mut b);
         b.send(client, b"unread").unwrap();
         advance(&mut b);
@@ -293,7 +293,7 @@ mod backend {
 
     #[test]
     fn abandoned_fin_wait_is_bounded_and_does_not_leak_the_local_port() {
-        let mut b = Loopback::new();
+        let mut b = Transport::new();
         let (_, client, accepted) = pair(&mut b);
         let old = b.local(client).unwrap();
         b.release(client, 0);
@@ -308,7 +308,7 @@ mod backend {
 
     #[test]
     fn pending_connection_retry_expiry_is_timeout_not_connection_refused() {
-        let mut b = Loopback::new();
+        let mut b = Transport::new();
         let c = b.open().unwrap();
         b.connect(c, endpoint(9999), entropy).unwrap();
         let Binding::Connection { tcp, owner } = b.rows[0].binding else {
@@ -334,7 +334,7 @@ mod backend {
 
     #[test]
     fn entropy_failure_and_bad_remote_leave_unbound_resource_retryable() {
-        let mut b = Loopback::new();
+        let mut b = Transport::new();
         let c = b.open().unwrap();
         assert_eq!(b.connect(c, endpoint(8000), || None), Err(-5));
         assert_eq!(b.local(c), Ok(EMPTY));
@@ -355,7 +355,7 @@ mod backend {
 
     #[test]
     fn bounded_resources_are_recovered_without_reusing_socket_ids() {
-        let mut b = Loopback::new();
+        let mut b = Transport::new();
         let mut sockets = Vec::new();
         for _ in 0..RESOURCE_LIMIT {
             sockets.push(b.open().unwrap());
@@ -375,7 +375,7 @@ mod backend {
 
     #[test]
     fn packet_budget_returns_with_queue_intact_and_does_not_starve_other_resource_operations() {
-        let mut b = Loopback::new();
+        let mut b = Transport::new();
         let (_, client, accepted) = pair(&mut b);
         for _ in 0..QUEUE_LIMIT {
             let Binding::Connection { tcp, owner } = b.rows[b.index(client).unwrap()].binding
@@ -420,7 +420,7 @@ mod backend {
 
     #[test]
     fn listener_observation_and_backlog_mutation_check_owner_before_any_cleanup() {
-        let mut b = Loopback::new();
+        let mut b = Transport::new();
         let listener = listener(&mut b, 8000, 4);
         let client = b.open().unwrap();
         b.connect(client, endpoint(8000), entropy).unwrap();

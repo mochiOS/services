@@ -9,7 +9,7 @@ use mochios_network_stack::{
     DHCP_CLIENT_PORT, DHCP_SERVER_PORT, DNS_MAX_MESSAGE_LEN, DNS_PORT, DhcpClient, DhcpMessageType,
     DhcpState, DnsCache, DnsError, DnsErrorKind, DnsName, DnsResponseCode, DnsRetry,
     DnsRetryAction, ETHERTYPE_ARP, ETHERTYPE_IPV4, EchoPacket, EthernetHeader, Ipv4Config,
-    Ipv4Header, PacketError, TCP_PROTOCOL, TcpConnection, TcpConnectionError, TcpConnectionTable,
+    Ipv4Header, PacketError, TCP_PROTOCOL, TcpConnection, TcpConnectionError,
     TcpReceiveResult, TcpSegment, TcpState, TcpTransmit, TcpTuple, UdpDatagram, UdpEndpoint, UdpSocketId,
     UdpSocketTable,
     decode_dns_response, decode_reply, encode_dns_query, encode_request, next_hop,
@@ -48,7 +48,7 @@ pub(crate) struct NetworkStack {
     udp: UdpSocketTable,
     dhcp_socket: UdpSocketId,
     dns_cache: DnsCache,
-    tcp: TcpConnectionTable,
+    pub(crate) tcp: crate::stream::Transport,
     arp: ArpCache,
     stats: StackStatistics,
     last_dhcp_send: u64,
@@ -76,7 +76,10 @@ impl NetworkStack {
             udp,
             dhcp_socket,
             dns_cache: DnsCache::new(DNS_CACHE_LIMIT),
-            tcp: TcpConnectionTable::new(TCP_CONNECTION_LIMIT),
+            tcp: crate::stream::Transport::with_capacity(
+                TCP_CONNECTION_LIMIT + 32,
+                info.mtu.saturating_sub(40).clamp(1, 1460),
+            ),
             arp: ArpCache::new(32),
             stats: StackStatistics::default(),
             last_dhcp_send: 0,
@@ -106,13 +109,11 @@ impl NetworkStack {
         if previous_dhcp_state != DhcpState::Failed && self.dhcp.state == DhcpState::Failed {
             self.stats.dhcp_failures = self.stats.dhcp_failures.saturating_add(1);
             self.config = None;
+            let _ = self.tcp.configure(None);
         }
         if matches!(
             self.dhcp.state,
-            DhcpState::Selecting
-                | DhcpState::Requesting
-                | DhcpState::Renewing
-                | DhcpState::Rebinding
+            DhcpState::Selecting | DhcpState::Requesting | DhcpState::Renewing | DhcpState::Rebinding
         ) && now.saturating_sub(self.last_dhcp_send) >= RETRY_TICKS
         {
             let kind = if self.dhcp.state == DhcpState::Selecting {
@@ -134,10 +135,32 @@ impl NetworkStack {
                 let _ = self.send_arp_request(ip, now);
             }
         }
-        for (handle, owner) in self.tcp.keys() {
-            let _ = self.drive_tcp(handle, owner, now);
+        for (handle, owner) in self.tcp.table.keys() {
+            if owner & crate::stream::RESOURCE_OWNER_TAG == 0 {
+                let _ = self.drive_tcp(handle, owner, now);
+            }
         }
-        self.tcp.remove_closed();
+        self.tcp
+            .table
+            .remove_closed_if(|owner| owner & crate::stream::RESOURCE_OWNER_TAG == 0);
+        for _ in 0..crate::stream::PUMP_BUDGET {
+            let Some(packet) = self.tcp.pop_external() else {
+                break;
+            };
+            // Keep the exact packet until publication succeeds. A full egress
+            // queue is backpressure, not a successful transmit or socket close.
+            match self.send_tcp(packet.tuple, &packet.transmit, now) {
+                Ok(()) => (),
+                Err(errno) => {
+                    let status = crate::status::failure_status(errno);
+                    if status == -11 {
+                        self.tcp.retry_external(packet);
+                        break;
+                    }
+                    self.tcp.fail_external(packet.origin, status);
+                }
+            }
+        }
     }
     pub(crate) fn poll_receive(&mut self, now: u64) -> Result<bool, u64> {
         let frame = match self.driver.receive() {
@@ -191,7 +214,7 @@ impl NetworkStack {
             mac: packet.sender_mac,
             expires_at: now.saturating_add(ARP_TTL),
         });
-        if packet.operation == ARP_REPLY && self.arp_pending == Some(packet.sender_ip) {
+        if self.arp_pending == Some(packet.sender_ip) {
             self.arp_pending = None;
             platform::logln!(
                 "network.service: gateway ARP resolved ip={}.{}.{}.{} mac={:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
@@ -206,8 +229,10 @@ impl NetworkStack {
                 packet.sender_mac[4],
                 packet.sender_mac[5]
             );
-            self.flush_pending(packet.sender_ip, packet.sender_mac);
         }
+        // A valid request also teaches the peer's address. A reply for a
+        // different outstanding next hop must flush its own queued packets.
+        self.flush_pending(packet.sender_ip, packet.sender_mac);
         if packet.operation == ARP_REQUEST && packet.target_ip == config.address {
             let reply = ArpPacket {
                 operation: ARP_REPLY,
@@ -270,12 +295,7 @@ impl NetworkStack {
         Ok(())
     }
 
-    fn handle_tcp(
-        &mut self,
-        header: Ipv4Header,
-        payload: &[u8],
-        now: u64,
-    ) -> Result<(), PacketError> {
+    fn handle_tcp(&mut self, header: Ipv4Header, payload: &[u8], now: u64) -> Result<(), PacketError> {
         let config = self.config.ok_or(PacketError::Mismatch)?;
         let mask = u32::from_be_bytes(config.subnet_mask);
         // A physical interface cannot receive loopback-source TCP. Do not
@@ -302,7 +322,7 @@ impl NetworkStack {
             remote_port: segment.source_port,
         };
         self.stats.tcp_segments_received = self.stats.tcp_segments_received.saturating_add(1);
-        let received = self.tcp.receive_packet(tuple, &segment, now, || {
+        let received = self.tcp.table.receive_packet(tuple, &segment, now, || {
             platform::service_ready::generate_token().ok()
         });
         let received = match received {
@@ -316,8 +336,7 @@ impl NetworkStack {
         if received.event == Some(TcpReceiveResult::Reset) {
             self.stats.tcp_resets = self.stats.tcp_resets.saturating_add(1);
         }
-        if segment.flags
-            & (mochios_network_stack::TCP_FLAG_SYN | mochios_network_stack::TCP_FLAG_ACK)
+        if segment.flags & (mochios_network_stack::TCP_FLAG_SYN | mochios_network_stack::TCP_FLAG_ACK)
             == mochios_network_stack::TCP_FLAG_SYN | mochios_network_stack::TCP_FLAG_ACK
             && received.event == Some(TcpReceiveResult::Acknowledge)
         {
@@ -327,7 +346,7 @@ impl NetworkStack {
             if acknowledgment.retransmission {
                 self.stats.tcp_retransmissions = self.stats.tcp_retransmissions.saturating_add(1);
             }
-            self.send_tcp(tuple, acknowledgment, now)
+            self.send_tcp(tuple, &acknowledgment, now)
                 .map_err(|_| PacketError::Capacity)?;
         }
         Ok(())
@@ -337,8 +356,16 @@ impl NetworkStack {
         self.config = None;
         self.arp_pending = None;
         self.pending_ipv4.clear();
-        self.tcp.abort_all();
-        self.tcp.clear();
+        let _ = self.tcp.configure(None);
+        // Native resources retain terminal state until their final reference.
+        self.tcp
+            .table
+            .connections_mut()
+            .filter(|c| c.owner & crate::stream::RESOURCE_OWNER_TAG == 0)
+            .for_each(|c| c.abort());
+        self.tcp
+            .table
+            .remove_closed_if(|owner| owner & crate::stream::RESOURCE_OWNER_TAG == 0);
     }
     fn handle_dhcp(&mut self, payload: &[u8], now: u64) -> Result<(), PacketError> {
         let message = decode_reply(payload, self.dhcp.xid, self.info.mac)?;
@@ -355,12 +382,16 @@ impl NetworkStack {
             DhcpMessageType::Ack => {
                 self.dhcp.accept(message, now)?;
                 let offer = message.offer;
-                self.config = Some(Ipv4Config {
+                let config = Some(Ipv4Config {
                     address: offer.address,
                     subnet_mask: offer.subnet_mask,
                     gateway: offer.gateway,
                     dns: offer.dns,
                 });
+                self.tcp
+                    .configure(config)
+                    .map_err(|_| PacketError::Mismatch)?;
+                self.config = config;
                 self.stats.dhcp_successes = self.stats.dhcp_successes.saturating_add(1);
                 platform::logln!("network.service: DHCPACK received");
                 platform::logln!(
@@ -466,6 +497,9 @@ impl NetworkStack {
             Ok(Some(mac))
         } else {
             self.stats.arp_cache_misses += 1;
+            if self.arp_pending == Some(target) {
+                return Ok(None);
+            }
             self.arp_retries = 0;
             self.send_arp_request(target, now)?;
             Ok(None)
@@ -768,6 +802,9 @@ impl NetworkStack {
         timeout: u64,
         random: u64,
     ) -> Result<u64, u64> {
+        if owner & crate::stream::RESOURCE_OWNER_TAG != 0 {
+            return Err(mochi_user_syscall::EACCES);
+        }
         if remote_port == 0 {
             return Err(mochi_user_syscall::EINVAL);
         }
@@ -775,9 +812,13 @@ impl NetworkStack {
             .config
             .map(|config| config.address)
             .ok_or(mochios_net_device_protocol::STATUS_NETWORK_UNAVAILABLE as i64 as u64)?;
-        let local_port = self.tcp.allocate_port(random as u16).map_err(tcp_errno)?;
+        let local_port = self
+            .tcp
+            .allocate_legacy_port(random as u16)
+            .map_err(tcp_errno)?;
         let handle = self
             .tcp
+            .table
             .allocate_handle(random.rotate_left(17))
             .map_err(tcp_errno)?;
         let local_mss = self.info.mtu.saturating_sub(40).max(1);
@@ -798,20 +839,23 @@ impl NetworkStack {
             TCP_RETRY_LIMIT,
         )
         .map_err(tcp_errno)?;
-        self.tcp.insert(connection).map_err(tcp_errno)?;
-        self.stats.tcp_connections_attempted =
-            self.stats.tcp_connections_attempted.saturating_add(1);
+        self.tcp.table.insert(connection).map_err(tcp_errno)?;
+        self.stats.tcp_connections_attempted = self.stats.tcp_connections_attempted.saturating_add(1);
         let deadline = started.saturating_add(timeout);
         loop {
             let now = platform::time::ticks().map_err(|error| error.raw().unsigned_abs())?;
             if let Err(errno) = self.drive_tcp(handle, owner, now) {
                 self.remove_tcp_connection(handle, owner);
-                self.stats.tcp_connections_failed =
-                    self.stats.tcp_connections_failed.saturating_add(1);
+                self.stats.tcp_connections_failed = self.stats.tcp_connections_failed.saturating_add(1);
                 return Err(errno);
             }
             while self.poll_receive(now)? {}
-            let state = self.tcp.get_mut(handle, owner).map_err(tcp_errno)?.state;
+            let state = self
+                .tcp
+                .table
+                .get_mut(handle, owner)
+                .map_err(tcp_errno)?
+                .state;
             if state == TcpState::Established {
                 self.stats.tcp_connections_established =
                     self.stats.tcp_connections_established.saturating_add(1);
@@ -827,15 +871,17 @@ impl NetworkStack {
             }
             if state == TcpState::Reset {
                 self.remove_tcp_connection(handle, owner);
-                self.stats.tcp_connections_failed =
-                    self.stats.tcp_connections_failed.saturating_add(1);
+                self.stats.tcp_connections_failed = self.stats.tcp_connections_failed.saturating_add(1);
                 return Err(mochios_net_device_protocol::STATUS_PEER_CLOSED as i64 as u64);
             }
             if now >= deadline {
-                self.tcp.get_mut(handle, owner).map_err(tcp_errno)?.abort();
+                self.tcp
+                    .table
+                    .get_mut(handle, owner)
+                    .map_err(tcp_errno)?
+                    .abort();
                 self.remove_tcp_connection(handle, owner);
-                self.stats.tcp_connections_failed =
-                    self.stats.tcp_connections_failed.saturating_add(1);
+                self.stats.tcp_connections_failed = self.stats.tcp_connections_failed.saturating_add(1);
                 self.stats.tcp_timeouts = self.stats.tcp_timeouts.saturating_add(1);
                 return Err(mochi_user_syscall::EAGAIN);
             }
@@ -851,8 +897,12 @@ impl NetworkStack {
         started: u64,
         timeout: u64,
     ) -> Result<usize, u64> {
+        if owner & crate::stream::RESOURCE_OWNER_TAG != 0 {
+            return Err(mochi_user_syscall::EACCES);
+        }
         if let Err(error) = self
             .tcp
+            .table
             .get_mut(handle, owner)
             .map_err(tcp_errno)?
             .queue_send(data)
@@ -868,7 +918,7 @@ impl NetworkStack {
                 return Err(errno);
             }
             while self.poll_receive(now)? {}
-            let connection = self.tcp.get_mut(handle, owner).map_err(tcp_errno)?;
+            let connection = self.tcp.table.get_mut(handle, owner).map_err(tcp_errno)?;
             if connection.queued_send_len() == 0 && !connection.has_unacknowledged() {
                 platform::logln!(
                     "network.service: TCP payload acknowledged bytes={}",
@@ -898,6 +948,9 @@ impl NetworkStack {
         started: u64,
         timeout: u64,
     ) -> Result<(usize, bool), u64> {
+        if owner & crate::stream::RESOURCE_OWNER_TAG != 0 {
+            return Err(mochi_user_syscall::EACCES);
+        }
         let deadline = started.saturating_add(timeout);
         loop {
             let now = platform::time::ticks().map_err(|error| error.raw().unsigned_abs())?;
@@ -907,7 +960,7 @@ impl NetworkStack {
             }
             while self.poll_receive(now)? {}
             let (length, closed, acknowledgment) = {
-                let connection = self.tcp.get_mut(handle, owner).map_err(tcp_errno)?;
+                let connection = self.tcp.table.get_mut(handle, owner).map_err(tcp_errno)?;
                 if connection.state == TcpState::Reset {
                     self.remove_tcp_connection(handle, owner);
                     return Err(mochios_net_device_protocol::STATUS_PEER_CLOSED as i64 as u64);
@@ -923,7 +976,7 @@ impl NetworkStack {
                 (length, closed, acknowledgment)
             };
             if let Some((tuple, acknowledgment)) = acknowledgment {
-                self.send_tcp(tuple, acknowledgment, now)?;
+                self.send_tcp(tuple, &acknowledgment, now)?;
             }
             if length != 0 || closed {
                 if length != 0 {
@@ -945,7 +998,11 @@ impl NetworkStack {
         started: u64,
         timeout: u64,
     ) -> Result<(), u64> {
+        if owner & crate::stream::RESOURCE_OWNER_TAG != 0 {
+            return Err(mochi_user_syscall::EACCES);
+        }
         self.tcp
+            .table
             .get_mut(handle, owner)
             .map_err(tcp_errno)?
             .request_close()
@@ -958,7 +1015,7 @@ impl NetworkStack {
                 return Err(errno);
             }
             while self.poll_receive(now)? {}
-            let connection = self.tcp.get_mut(handle, owner).map_err(tcp_errno)?;
+            let connection = self.tcp.table.get_mut(handle, owner).map_err(tcp_errno)?;
             if matches!(connection.state, TcpState::TimeWait | TcpState::Closed) {
                 platform::logln!("network.service: TCP FIN close complete");
                 return Ok(());
@@ -979,16 +1036,21 @@ impl NetworkStack {
 
     fn drive_tcp(&mut self, handle: u64, owner: u64, now: u64) -> Result<(), u64> {
         let transmit = {
-            let connection = self.tcp.get_mut(handle, owner).map_err(tcp_errno)?;
+            let connection = self.tcp.table.get_mut(handle, owner).map_err(tcp_errno)?;
             connection.tick(now);
             connection.poll_transmit(now).map_err(tcp_errno)?
         };
         if let Some(transmit) = transmit {
-            let tuple = self.tcp.get_mut(handle, owner).map_err(tcp_errno)?.tuple;
+            let tuple = self
+                .tcp
+                .table
+                .get_mut(handle, owner)
+                .map_err(tcp_errno)?
+                .tuple;
             if transmit.retransmission {
                 self.stats.tcp_retransmissions = self.stats.tcp_retransmissions.saturating_add(1);
             }
-            self.send_tcp(tuple, transmit, now)?;
+            self.send_tcp(tuple, &transmit, now)?;
         }
         Ok(())
     }
@@ -996,6 +1058,7 @@ impl NetworkStack {
     fn remove_tcp_connection(&mut self, handle: u64, owner: u64) {
         let tuple = self
             .tcp
+            .table
             .get_mut(handle, owner)
             .ok()
             .map(|connection| connection.tuple);
@@ -1014,14 +1077,17 @@ impl NetworkStack {
                 .tx_dropped
                 .saturating_add(before.saturating_sub(self.pending_ipv4.len()) as u64);
         }
-        self.tcp.remove(handle, owner);
+        self.tcp.table.remove(handle, owner);
     }
 
     pub(crate) fn tcp_discard(&mut self, owner: u64, handle: u64) {
+        if owner & crate::stream::RESOURCE_OWNER_TAG != 0 {
+            return;
+        }
         self.remove_tcp_connection(handle, owner);
     }
 
-    fn send_tcp(&mut self, tuple: TcpTuple, transmit: TcpTransmit, now: u64) -> Result<(), u64> {
+    fn send_tcp(&mut self, tuple: TcpTuple, transmit: &TcpTransmit, now: u64) -> Result<(), u64> {
         let mut segment = [0u8; 1_500];
         let length = TcpSegment {
             source_port: tuple.local_port,

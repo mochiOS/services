@@ -11,6 +11,8 @@ use std::{cell::RefCell, collections::BTreeMap};
 mod adapter;
 #[path = "../../network/src/stream_provider.rs"]
 mod server;
+#[path = "support/tcp_provider_fixture.rs"]
+mod provider_fixture;
 #[path = "../../network/src/stream.rs"]
 mod stream;
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -24,7 +26,7 @@ struct Reference {
     rights: u64,
 }
 struct State {
-    server: Option<server::Server>,
+    server: Option<provider_fixture::Fixture>,
     handles: BTreeMap<u32, Reference>,
     next: u32,
     releases: Vec<u64>,
@@ -37,7 +39,7 @@ struct State {
 impl Default for State {
     fn default() -> Self {
         Self {
-            server: Some(server::Server::new(Some(5))),
+            server: Some(provider_fixture::Fixture::new(Some(5))),
             handles: BTreeMap::from([(
                 5,
                 Reference {

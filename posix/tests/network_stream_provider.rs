@@ -7,6 +7,8 @@ use mochios_net_device_protocol::stream as wire;
 use std::cell::RefCell;
 #[path = "../../network/src/stream_provider.rs"]
 mod server;
+#[path = "support/tcp_provider_fixture.rs"]
+mod provider_fixture;
 #[path = "../../network/src/stream.rs"]
 mod stream;
 #[derive(Default)]
@@ -109,14 +111,14 @@ pub mod handle {
         })
     }
 }
-fn setup() -> server::Server {
+fn setup() -> provider_fixture::Fixture {
     STATE.with_borrow_mut(|s| {
         *s = State {
             allowed: wire::ALL_SCOPES,
             ..Default::default()
         }
     });
-    server::Server::new(Some(5))
+    provider_fixture::Fixture::new(Some(5))
 }
 fn attached(h: u32) -> ipc::IpcObjectHandles {
     let mut a = ipc::IpcObjectHandles::default();
@@ -129,7 +131,7 @@ fn attached(h: u32) -> ipc::IpcObjectHandles {
     a
 }
 fn rpc(
-    s: &mut server::Server,
+    s: &mut provider_fixture::Fixture,
     op: u16,
     request: &[u8],
     handles: &ipc::IpcObjectHandles,
@@ -142,7 +144,7 @@ fn rpc(
         )
     })
 }
-fn factory(s: &mut server::Server, scopes: u32) -> u32 {
+fn factory(s: &mut provider_fixture::Fixture, scopes: u32) -> u32 {
     let (status, h) = rpc(
         s,
         wire::ACQUIRE,
@@ -152,13 +154,13 @@ fn factory(s: &mut server::Server, scopes: u32) -> u32 {
     assert_eq!(status, 0);
     h.unwrap()
 }
-fn open(s: &mut server::Server, factory: u32) -> u32 {
+fn open(s: &mut provider_fixture::Fixture, factory: u32) -> u32 {
     let (status, h) = rpc(s, wire::OPEN, &wire::header(wire::OPEN), &attached(factory));
     assert_eq!(status, 0);
     h.unwrap()
 }
 fn native(
-    s: &mut server::Server,
+    s: &mut provider_fixture::Fixture,
     h: u32,
     op: u16,
     basis: u64,
@@ -199,7 +201,7 @@ fn native(
         (h.status, h.value, data.to_vec())
     })
 }
-fn control(s: &mut server::Server, h: u32, tag: u64, input: &[u8]) -> i64 {
+fn control(s: &mut provider_fixture::Fixture, h: u32, tag: u64, input: &[u8]) -> i64 {
     native(s, h, provider::OP_CONTROL, tag, input, 0, true).0
 }
 fn endpoint(port: u16) -> [u8; 8] {
@@ -212,7 +214,7 @@ fn endpoint(port: u16) -> [u8; 8] {
     .unwrap();
     bytes
 }
-fn pair(s: &mut server::Server) -> (u32, u32, u32) {
+fn pair(s: &mut provider_fixture::Fixture) -> (u32, u32, u32) {
     let f = factory(s, wire::ALL_SCOPES);
     let listener = open(s, f);
     let client = open(s, f);
@@ -312,6 +314,7 @@ fn held_factory_can_be_attenuated_after_capability_drop_but_never_escalated() {
         wire::Limits::decode(&data).unwrap(),
         wire::Limits {
             scopes: wire::CONNECT_SCOPE,
+            routes: wire::ROUTE_LOOPBACK,
             minimum_port: 1024
         }
     );
@@ -596,6 +599,7 @@ fn wire_replies_limits_and_observations_require_canonical_records() {
     let mut limits = [0; wire::LIMITS_LEN];
     wire::Limits {
         scopes: 3,
+        routes: wire::ROUTE_LOOPBACK,
         minimum_port: 1024,
     }
     .encode(&mut limits)
@@ -619,4 +623,102 @@ fn wire_replies_limits_and_observations_require_canonical_records() {
     status[0] = 0;
     status[4] = 1;
     assert!(wire::Observation::decode(&status).is_err());
+}
+
+#[test]
+fn interface_availability_does_not_expand_factory_scope_or_privileged_bind_authority() {
+    use mochios_network_stack::Ipv4Config;
+    let mut server = setup();
+    let connect = factory(&mut server, wire::CONNECT_SCOPE);
+    let listen = factory(&mut server, wire::LISTEN_SCOPE);
+    let limits = |s: &mut provider_fixture::Fixture, h| {
+        let (status, _, data) = native(
+            s,
+            h,
+            provider::OP_CONTROL,
+            wire::QUERY_LIMITS,
+            &[],
+            wire::LIMITS_LEN,
+            true,
+        );
+        assert_eq!(status, 0);
+        wire::Limits::decode(&data).unwrap()
+    };
+    assert_eq!(limits(&mut server, connect).routes, wire::ROUTE_LOOPBACK);
+    server
+        .transport()
+        .configure(Some(Ipv4Config {
+            address: [10, 0, 2, 15],
+            subnet_mask: [255, 255, 255, 0],
+            gateway: [10, 0, 2, 2],
+            dns: [0; 4],
+        }))
+        .unwrap();
+    let info = limits(&mut server, connect);
+    assert_eq!(info.routes, wire::ROUTE_LOOPBACK | wire::ROUTE_INTERFACE);
+    assert_eq!(info.scopes, wire::CONNECT_SCOPE);
+    let client = open(&mut server, connect);
+    let listener = open(&mut server, listen);
+    let endpoint = |address, port| {
+        let mut bytes = [0; wire::ENDPOINT_LEN];
+        wire::Endpoint { address, port }.encode(&mut bytes).unwrap();
+        bytes
+    };
+    assert_eq!(
+        control(
+            &mut server,
+            listener,
+            wire::BIND,
+            &endpoint([10, 0, 2, 15], 80)
+        ),
+        -13
+    );
+    assert_eq!(
+        control(
+            &mut server,
+            listener,
+            wire::BIND,
+            &endpoint([10, 0, 2, 15], 8000)
+        ),
+        0
+    );
+    assert_eq!(
+        control(&mut server, listener, wire::LISTEN, &2u32.to_le_bytes()),
+        0
+    );
+    assert_eq!(
+        control(
+            &mut server,
+            listener,
+            wire::CONNECT,
+            &endpoint([192, 0, 2, 44], 8000)
+        ),
+        -13
+    );
+    assert_eq!(
+        control(
+            &mut server,
+            client,
+            wire::CONNECT,
+            &endpoint([192, 0, 2, 44], 8000)
+        ),
+        0
+    );
+    assert_eq!(
+        control(&mut server, client, wire::LISTEN, &2u32.to_le_bytes()),
+        -13
+    );
+    server.transport().configure(None).unwrap();
+    assert_eq!(limits(&mut server, connect).routes, wire::ROUTE_LOOPBACK);
+    assert_eq!(limits(&mut server, connect).scopes, wire::CONNECT_SCOPE);
+    assert_eq!(
+        rpc(
+            &mut server,
+            wire::ACCEPT,
+            &wire::header(wire::ACCEPT),
+            &attached(listener)
+        )
+        .0,
+        -100
+    );
 }

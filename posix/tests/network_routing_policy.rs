@@ -39,6 +39,8 @@ pub mod thread {
     }
 }
 
+#[path = "../../network/src/stream.rs"]
+mod stream;
 #[path = "../../network/src/datagram.rs"]
 mod datagram;
 #[path = "../../network/src/status.rs"]
@@ -55,7 +57,7 @@ mod driver {
                 interface_id: 1,
                 mac: [2, 0, 0, 0, 0, 1],
                 link_up: true,
-                mtu: 1500,
+                mtu: if crate::MODE.with(|mode|mode.get())==5 {600}else{1500},
                 driver_id: 0,
                 device_id: 0,
                 driver_name: [0; DRIVER_NAME_LEN],
@@ -65,6 +67,7 @@ mod driver {
             if crate::MODE.with(|mode| mode.get()) == 1 {
                 return Err(mochi_user_syscall::EIO);
             }
+            if crate::MODE.with(|mode| mode.get()) == 6 { return Err(mochi_user_syscall::EAGAIN); }
             if crate::MODE.with(|mode| mode.get()) >= 3 {
                 crate::TRANSMITTED.with(|frames| frames.borrow_mut().push(frame.to_vec()));
                 return Ok(());
@@ -152,7 +155,7 @@ mod production {
     fn real_tcp_input_admits_listener_tracks_accept_and_delivers_data() {
         let (mut stack, tuple) = tcp_fixture();
         stack
-            .tcp
+            .tcp.table
             .listen(
                 1,
                 7,
@@ -175,7 +178,7 @@ mod production {
         let frame = tcp_reply();
         let syn_ack = decode_tcp_reply(&frame);
         assert_eq!(syn_ack.sequence, 500);
-        assert_eq!(stack.tcp.accept(1, 7), Ok(None));
+        assert_eq!(stack.tcp.table.accept(1, 7), Ok(None));
         stack.handle_ipv4(&input, 1).unwrap();
         let retry = tcp_reply();
         assert_eq!(decode_tcp_reply(&retry), syn_ack);
@@ -188,8 +191,8 @@ mod production {
         stack
             .handle_ipv4(&tcp_packet(tuple, &client.acknowledgment()), 2)
             .unwrap();
-        let (accepted, _) = stack.tcp.accept(1, 7).unwrap().unwrap();
-        assert_eq!(stack.tcp.accept(1, 7), Ok(None));
+        let (accepted, _) = stack.tcp.table.accept(1, 7).unwrap().unwrap();
+        assert_eq!(stack.tcp.table.accept(1, 7), Ok(None));
         client.queue_send(b"hello").unwrap();
         let data = client.poll_transmit(3).unwrap().unwrap();
         stack.handle_ipv4(&tcp_packet(tuple, &data), 3).unwrap();
@@ -198,7 +201,7 @@ mod production {
         assert!(!client.has_unacknowledged());
         let mut bytes = [0; 5];
         assert_eq!(
-            stack.tcp.get_mut(accepted, 7).unwrap().receive(&mut bytes),
+            stack.tcp.table.get_mut(accepted, 7).unwrap().receive(&mut bytes),
             5
         );
         assert_eq!(&bytes, b"hello");
@@ -211,7 +214,7 @@ mod production {
     fn tcp_input_rejects_checksum_entropy_and_non_unicast_sources_before_output() {
         let (mut stack, tuple) = tcp_fixture();
         stack
-            .tcp
+            .tcp.table
             .listen(
                 1,
                 7,
@@ -256,7 +259,7 @@ mod production {
             Err(PacketError::Mismatch)
         );
         assert_eq!(crate::ENTROPY_DRAWS.with(|draws| draws.get()), 1);
-        assert!(stack.tcp.is_empty());
+        assert!(stack.tcp.table.is_empty());
         assert!(crate::TRANSMITTED.with(|frames| frames.borrow().is_empty()));
         crate::MODE.with(|mode| mode.set(0));
     }
@@ -502,4 +505,6 @@ mod production {
         );
         assert!(stack.udp.unbind_endpoint(socket));
     }
+    include!("support/routed_tcp_cases.rs");
+
 }

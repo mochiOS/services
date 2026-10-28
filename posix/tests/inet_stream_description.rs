@@ -15,7 +15,7 @@ use std::{
 
 #[derive(Clone)]
 struct Adapter {
-    tcp: Rc<RefCell<transport::Loopback>>,
+    tcp: Rc<RefCell<transport::Transport>>,
     closed: Rc<RefCell<Vec<transport::Socket>>>,
     bad_local: Rc<Cell<bool>>,
     zero_local: Rc<Cell<bool>>,
@@ -26,7 +26,7 @@ struct Adapter {
 impl Adapter {
     fn new() -> Self {
         Self {
-            tcp: Rc::new(RefCell::new(transport::Loopback::new())),
+            tcp: Rc::new(RefCell::new(transport::Transport::new())),
             closed: Default::default(),
             bad_local: Default::default(),
             zero_local: Default::default(),
