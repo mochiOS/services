@@ -1,0 +1,6 @@
+API_1 { global: api_data; };
+API_2 {
+  global: api_data; copy_box; copy_self; copy_zero; copy_partial;
+          provider_address; provider_sum; provider_marker;
+  local: *;
+} API_1;

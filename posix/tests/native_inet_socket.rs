@@ -20,6 +20,9 @@ mod shared_package;
 #[cfg(all(target_os = "mochios", mochios_symbol_versions_265))]
 #[path = "native_symbol_versions.rs"]
 mod symbol_versions;
+#[cfg(all(target_os = "mochios", mochios_copy_relocations_266))]
+#[path = "native_copy_relocations.rs"]
+mod copy_relocations;
 // Executed only by a diagnostic manager after authenticated endpoint handoff.
 // The diagnostic manifest alone adds net.connect; normal manager gets none.
 #[cfg(target_os = "mochios")]
@@ -45,6 +48,12 @@ pub fn run(posix: u32, network: u32) {
         });
     }
     p::io::stdout(b"inet-socket: starting native factory/Provider checks\n").unwrap();
+    #[cfg(mochios_copy_relocations_266)]
+    {
+        copy_relocations::run(posix);
+        unsafe { alarm(0); }
+        return;
+    }
     #[cfg(mochios_symbol_versions_265)]
     {
         symbol_versions::run(posix);

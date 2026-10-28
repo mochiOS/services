@@ -1,10 +1,26 @@
 //! Install locally compiled fixture LOADs on the Linux test host.
 use super::word;
-#[derive(Default)]
-pub struct Mappings(Vec<(*mut libc::c_void, usize)>);
+use std::sync::{Mutex, MutexGuard};
+static ADDRESS_SPACE: Mutex<()> = Mutex::new(());
+pub struct Mappings {
+    ranges: Vec<(*mut libc::c_void, usize)>,
+    _address_space: MutexGuard<'static, ()>,
+}
+impl Default for Mappings {
+    fn default() -> Self {
+        Self {
+            ranges: Vec::new(),
+            // Fixtures use fixed virtual addresses in this shared host
+            // process. Keep that reservation until their mappings are gone.
+            _address_space: ADDRESS_SPACE
+                .lock()
+                .unwrap_or_else(|error| error.into_inner()),
+        }
+    }
+}
 impl Drop for Mappings {
     fn drop(&mut self) {
-        for &(pointer, length) in self.0.iter().rev() {
+        for &(pointer, length) in self.ranges.iter().rev() {
             assert_eq!(unsafe { libc::munmap(pointer, length) }, 0);
         }
     }
@@ -35,7 +51,7 @@ impl Mappings {
                 "{}",
                 std::io::Error::last_os_error()
             );
-            self.0.push((pointer, length));
+            self.ranges.push((pointer, length));
             assert_eq!(pointer as usize, base);
             let offset = word(header, 8) as usize;
             let file = word(header, 32) as usize;

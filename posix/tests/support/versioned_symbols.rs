@@ -1,4 +1,6 @@
 use super::{Mappings, Temporary, word};
+#[path = "copy_relocations.rs"]
+mod copies;
 use mochios_posix_client::pie::{
     Error, Pie,
     link_scope::{Object, Scope},
@@ -6,10 +8,8 @@ use mochios_posix_client::pie::{
 use std::{
     path::{Path, PathBuf},
     process::Command,
-    sync::Mutex,
 };
 
-static EXECUTION: Mutex<()> = Mutex::new(());
 const VERSYM: u64 = 0x6ffffff0;
 const VERDEF: u64 = 0x6ffffffc;
 const VERDEFNUM: u64 = 0x6ffffffd;
@@ -158,7 +158,6 @@ fn prepare(root: &[u8], library: &[u8]) -> Result<Vec<u8>, Error> {
     prepare_named(root, library, b"libversions.so")
 }
 fn execute(bundle: &[u8]) -> i32 {
-    let _guard = EXECUTION.lock().unwrap();
     let mut mappings = Mappings::default();
     mappings.install(bundle);
     let entry: extern "C" fn() -> i32 = unsafe { std::mem::transmute(word(bundle, 24) as usize) };
