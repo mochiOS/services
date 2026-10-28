@@ -21,13 +21,13 @@ const THREAD_JOINABLE: u32 = 0;
 const THREAD_JOIN_CLAIMED: u32 = 2;
 const PTHREAD_CANCEL_ENABLE: u32 = 0;
 struct ThreadControl {
-    state: AtomicU32, joinability: AtomicU32, join_waiter: AtomicU32, result: AtomicUsize,
+    state: AtomicU32, creation_pending:AtomicU32, joinability: AtomicU32, join_waiter: AtomicU32, result: AtomicUsize,
     cancel_state: AtomicU32, cancel_pending: AtomicU32, wait_generation: AtomicU32,
     multiplex_generation: AtomicU64,
 }
 impl ThreadControl {
     const fn new() -> Self { Self {
-        state: AtomicU32::new(THREAD_RUNNING), joinability: AtomicU32::new(THREAD_JOINABLE),
+        state: AtomicU32::new(THREAD_RUNNING), creation_pending:AtomicU32::new(0), joinability: AtomicU32::new(THREAD_JOINABLE),
         join_waiter: AtomicU32::new(0), result: AtomicUsize::new(55), cancel_state: AtomicU32::new(0),
         cancel_pending: AtomicU32::new(0), wait_generation: AtomicU32::new(0),
         multiplex_generation: AtomicU64::new(0),
@@ -83,7 +83,13 @@ mod syscall {
     use super::*;
     pub const ADDRESS_WAIT_INFINITE: u64 = u64::MAX;
     pub enum SyscallNumber { ThreadYield }
-    pub fn raw_syscall0(_: SyscallNumber) -> u64 { assert_eq!(CASE.load(Ordering::Acquire), 6); pthread_cancel(1); 0 }
+    pub fn raw_syscall0(_: SyscallNumber) -> u64 {
+        let case=CASE.load(Ordering::Acquire);assert!(matches!(case,6|9|10));
+        assert_eq!(RELEASED.load(Ordering::Acquire),0);
+        if case==9 {TARGET.creation_pending.store(0,Ordering::Release);}
+        else {pthread_cancel(1);}
+        0
+    }
 }
 mod mochios_posix_client { pub mod synchronization {
     use super::super::*;
@@ -132,9 +138,10 @@ fn main() {
     CASE.store(case, Ordering::Release);
     if case == 0 { pthread_cancel(1); }
     if case == 3 { CALLER.cancel_state.store(1, Ordering::Release); }
-    if case == 6 || case == 7 { TARGET.state.store(THREAD_EXITED, Ordering::Release); }
+    if matches!(case,6|7|9|10) {TARGET.state.store(THREAD_EXITED,Ordering::Release);}
+    if matches!(case,9|10) {TARGET.creation_pending.store(1,Ordering::Release);}
     let result = unsafe { pthread_join(2, &raw mut OUTPUT) };
-    assert!(!matches!(case, 0 | 1 | 5 | 6), "cancellation returned");
+    assert!(!matches!(case, 0 | 1 | 5 | 6 | 10), "cancellation returned");
     if case == 4 || case == 7 {
         assert_eq!(result, 5);
         assert_eq!(unsafe { OUTPUT } as usize, 99);
@@ -180,12 +187,16 @@ fn main() {
         "{}",
         String::from_utf8_lossy(&compiled.stderr)
     );
-    for case in 0..9 {
+    for case in 0..11 {
         let executed = Command::new(&executable)
             .arg(case.to_string())
             .output()
             .unwrap();
-        let expected = if matches!(case, 0 | 1 | 5 | 6) { 73 } else { 0 };
+        let expected = if matches!(case, 0 | 1 | 5 | 6 | 10) {
+            73
+        } else {
+            0
+        };
         assert_eq!(
             executed.status.code(),
             Some(expected),
