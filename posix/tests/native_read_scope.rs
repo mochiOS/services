@@ -4,6 +4,9 @@ use mochios_posix_client::{
     Client, ObjectHandleAttachment as Object, OpenAtBase, SyscallEndpointTransport,
 };
 use mochios_posix_protocol::{self as protocol, read_scope as wire};
+#[cfg(mochios_shared_loader_260)]
+#[path = "support/native_scoped_preparation.rs"]
+mod scoped_preparation;
 
 unsafe extern "C" {
     fn fork() -> i32;
@@ -131,6 +134,9 @@ pub fn run(posix: u32) {
     let n = p::handle::read_at(private.handle, &mut bytes, 0).unwrap();
     assert_eq!(&bytes[..n], b"root secret\n");
     p::handle::close(private.handle).unwrap();
+
+    #[cfg(mochios_shared_loader_260)]
+    scoped_preparation::run(posix, scope);
 
     // A byte-identical final-release request from ordinary IPC has no native
     // delivery provenance and cannot retire even the first provider object.

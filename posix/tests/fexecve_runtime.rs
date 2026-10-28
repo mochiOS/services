@@ -51,6 +51,8 @@ struct State {
 thread_local! {static STATE:RefCell<State>=RefCell::new(State::default());static DEFER:Cell<u32>=const{Cell::new(0)};}
 #[path = "../../../user/crates/newlib-runtime/src/exec_image.rs"]
 mod exec_image;
+#[path = "support/scoped_preparation.rs"]
+mod scoped_preparation;
 #[path = "../../../user/crates/newlib-runtime/src/exec_inputs.rs"]
 mod exec_inputs;
 #[path = "../../../user/crates/newlib-runtime/src/exec_handle.rs"]
