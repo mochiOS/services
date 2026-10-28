@@ -49,6 +49,14 @@ unsafe impl Backend for Mechanisms {
     fn validate_library(&self, _: Object<u32>) -> Result<(), i32> {
         panic!("delegated preparation must use scoped file metadata")
     }
+    fn validate_captured(
+        &self,
+        _: mochios_posix_client::image_preparation::Source<'_>,
+        _: &[u8],
+    ) -> Result<(), i32> {
+        // This diagnostic captures an image only; it grants no execute permit.
+        Ok(())
+    }
     fn entropy(&self, output: &mut [u8]) -> Result<(), i32> {
         let count = p::syscall::call2(
             p::syscall::SyscallNumber::RandomFill,

@@ -57,6 +57,44 @@ pub(crate) struct ApplicationIdentity {
     pub(crate) provenance: InstallProvenance,
 }
 
+/// One authenticated manifest snapshot. Consumers must use this parsed value,
+/// rather than attaching the authentication result to an earlier index copy.
+pub(crate) struct VerifiedManifest {
+    pub(crate) manifest: platform::package::PackageManifest,
+    pub(crate) identity: ApplicationIdentity,
+}
+
+pub(crate) fn verified_manifest(
+    manifest_path: &str,
+    read_file: FileReader,
+) -> Result<VerifiedManifest, mochi_user_syscall::SysError> {
+    let package_root = package_root_from_manifest_path(manifest_path)?;
+    let verification_bytes = read_file(&alloc::format!("{package_root}/verification.bin"))?;
+    let denied = || mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EACCES as i64);
+    let record = InstallRecordView::decode(&verification_bytes).map_err(|_| denied())?;
+    let bytes = read_file(manifest_path)?;
+    if Sha256::digest(&bytes).as_slice() != record.verification.manifest_digest {
+        return Err(denied());
+    }
+    let manifest = core::str::from_utf8(&bytes)
+        .ok()
+        .and_then(platform::package::parse_manifest)
+        .ok_or_else(denied)?;
+    if !install_record_matches_manifest(&manifest, &record) {
+        return Err(denied());
+    }
+    let identity = record.application_identity();
+    Ok(VerifiedManifest {
+        manifest,
+        identity: ApplicationIdentity {
+            package_id: identity.package_id.into(),
+            developer_id: identity.developer_id.into(),
+            subject_key_id: identity.subject_key_id,
+            provenance: identity.provenance,
+        },
+    })
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum CapabilityDenyReason {
     UnknownCapability,

@@ -216,6 +216,13 @@ struct Allocations {
     live: Vec<usize>,
 }
 thread_local! { static ALLOCATIONS: RefCell<Allocations> = RefCell::new(Allocations::default()); }
+#[derive(Default)]
+struct Captures {
+    seen: Vec<(Option<Vec<u8>>, Vec<u8>)>,
+    reject: Option<(usize, i32)>,
+    mutate_after_capture: bool,
+}
+thread_local! { static CAPTURES: RefCell<Captures> = RefCell::new(Captures::default()); }
 struct FaultAllocation;
 // Delegate native references and critical sections to the production adapter.
 // Only allocation failure is injected; every successful allocation still uses
@@ -263,6 +270,42 @@ unsafe impl Backend for FaultAllocation {
     }
     fn validate_library(&self, file: ObjectHandleAttachment<u32>) -> Result<(), i32> {
         exec_image::Runtime.validate_library(file)
+    }
+    fn validate_captured(
+        &self,
+        source: mochios_posix_client::image_preparation::Source<'_>,
+        bytes: &[u8],
+    ) -> Result<(), i32> {
+        use mochios_posix_client::image_preparation::Source;
+        CAPTURES.with_borrow_mut(|captures| {
+            let path = match source {
+                Source::Root => None,
+                Source::Dependency { needed, path } => {
+                    assert_eq!(needed, b"libscope.so");
+                    STATE.with_borrow(|state| assert!(!state.closed.contains(&200)));
+                    Some(path.to_vec())
+                }
+            };
+            captures.seen.push((path, bytes.to_vec()));
+            STATE.with_borrow_mut(|state| {
+                assert!(
+                    state.prepared.is_empty(),
+                    "policy must run before output creation"
+                );
+                if captures.mutate_after_capture {
+                    match source {
+                        Source::Root => state.bytes.fill(0),
+                        Source::Dependency { .. } => state.libraries[0].1.fill(0),
+                    }
+                }
+            });
+            if let Some((index, error)) = captures.reject {
+                if captures.seen.len() == index {
+                    return Err(error);
+                }
+            }
+            Ok(())
+        })
     }
     fn entropy(&self, output: &mut [u8]) -> Result<(), i32> {
         exec_image::Runtime.entropy(output)
@@ -325,4 +368,70 @@ fn each_allocation_failure_reclaims_partial_loader_state_without_closing_the_bor
         }
     }
     panic!("did not reach the complete allocation sequence");
+}
+
+#[test]
+fn scoped_capture_policy_checks_exact_inputs_and_cleans_up_each_rejection() {
+    let (root, library) = dependency_fixture(&[], &[]);
+    for reject in [None, Some((1, EACCES)), Some((2, EIO))] {
+        reset(0);
+        STATE.with_borrow_mut(|state| {
+            state.bytes = root.clone();
+            state.libraries = vec![(b"/usr/lib/libscope.so".to_vec(), library.clone())];
+        });
+        ALLOCATIONS.with_borrow_mut(|state| *state = Allocations::default());
+        CAPTURES.with_borrow_mut(|state| {
+            *state = Captures {
+                reject,
+                mutate_after_capture: true,
+                ..Default::default()
+            }
+        });
+        let client = PosixClient::new(TransportState {
+            deny: false,
+            calls: RefCell::new(Vec::new()),
+        });
+        let scope = Scoped::new(
+            &client,
+            ObjectHandleAttachment {
+                handle: 777,
+                rights: wire::TOKEN_RIGHTS,
+            },
+            &FaultAllocation,
+            translate,
+        )
+        .unwrap();
+        let mut owner = Preparation::default();
+        let result = scope.prepare(&mut owner, 19, Environment::default());
+        match reject {
+            Some((_, error)) => assert!(matches!(result, Err(actual) if actual == error)),
+            None => assert!(result.is_ok(), "parsing must use immutable captures"),
+        }
+        drop(owner);
+        CAPTURES.with_borrow(|state| {
+            assert_eq!(state.seen[0], (None, root.clone()));
+            assert_eq!(
+                state.seen.len(),
+                if reject == Some((1, EACCES)) { 1 } else { 2 }
+            );
+            if state.seen.len() == 2 {
+                assert_eq!(
+                    state.seen[1],
+                    (Some(b"/usr/lib/libscope.so".to_vec()), library.clone())
+                );
+            }
+        });
+        ALLOCATIONS.with_borrow(|state| assert!(state.live.is_empty()));
+        STATE.with_borrow(|state| {
+            assert!(!state.closed.contains(&19));
+            assert!(!state.closed.contains(&777));
+            assert_eq!(
+                state.closed.iter().filter(|&&handle| handle == 200).count(),
+                usize::from(reject != Some((1, EACCES)))
+            );
+            if reject.is_some() {
+                assert!(state.prepared.is_empty());
+            }
+        });
+    }
 }
