@@ -353,6 +353,11 @@ pub struct AuthenticatedProcess<H> {
 }
 
 pub trait FilesystemBackend<H: Copy> {
+    /// Compare locally retained native references without provider RPC. This
+    /// checks object identity, not pathname equality or client-supplied IDs.
+    fn same_object(&mut self, _left: H, _right: H) -> Result<bool, i32> {
+        Err(protocol::STATUS_ENOSYS)
+    }
     /// Opens two independently-owned handles for the filesystem root. They
     /// become the initial process root and current working directory.
     fn open_session_root(
@@ -3959,6 +3964,7 @@ impl<H: Copy> PosixService<H> {
             | protocol::read_scope::OP_CREATE
             | protocol::read_scope::OP_INFO
             | protocol::read_scope::OP_OPEN
+            | protocol::read_scope::OP_REGISTER_CHILD
             | protocol::OP_STAT_AT
             | protocol::OP_CANONICAL_PATH_AT
             | protocol::OP_PATH_LIMITS_AT

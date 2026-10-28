@@ -8,6 +8,9 @@ mod llvm_runtime;
 #[cfg(all(target_os = "mochios", mochios_read_scope_259))]
 #[path = "native_read_scope.rs"]
 mod read_scope;
+#[cfg(all(target_os = "mochios", mochios_scoped_launch_261))]
+#[path = "native_scoped_launch.rs"]
+mod scoped_launch;
 // Executed only by a diagnostic manager after authenticated endpoint handoff.
 // The diagnostic manifest alone adds net.connect; normal manager gets none.
 #[cfg(target_os = "mochios")]
@@ -33,6 +36,12 @@ pub fn run(posix: u32, network: u32) {
         });
     }
     p::io::stdout(b"inet-socket: starting native factory/Provider checks\n").unwrap();
+    #[cfg(mochios_scoped_launch_261)]
+    {
+        scoped_launch::run(posix);
+        unsafe { alarm(0); }
+        return;
+    }
     #[cfg(mochios_read_scope_259)]
     {
         read_scope::run(posix);

@@ -1461,6 +1461,7 @@ struct RecordingFilesystem {
     root_error: Option<i32>,
     root_base: Option<u32>,
     open_rights: Option<u64>,
+    comparison_error: Option<i32>,
     admission_calls: Vec<(u16, Option<AttachedObject<u32>>)>,
     admission_response: Option<Result<OpenedObject<u32>, i32>>,
     fifo_pending: Option<(OpenedObject<u32>, OpenedObject<u32>)>,
@@ -1682,6 +1683,10 @@ impl ProcessBackend<u32> for RecordingProcesses {
 }
 
 impl FilesystemBackend<u32> for RecordingFilesystem {
+    fn same_object(&mut self, left: u32, right: u32) -> Result<bool, i32> {
+        // retain_object in this fixture adds 1000 to each new selector.
+        self.comparison_error.map_or(Ok(left % 1000 == right % 1000), Err)
+    }
     fn open_at_continuation(
         &mut self,
         request: &PreparedOpen,

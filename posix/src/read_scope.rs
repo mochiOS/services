@@ -10,6 +10,7 @@ const MAX_PER_SOURCE: usize = 16;
 struct Credentials {
     session: Session,
     groups: Vec<u32>,
+    image_revision: u64,
 }
 
 pub struct Scope<H> {
@@ -102,7 +103,15 @@ fn capture<H: Copy>(
                 .cloned()
                 .unwrap_or_default();
             Ok((
-                Credentials { session, groups },
+                Credentials {
+                    session,
+                    groups,
+                    image_revision: service
+                        .process_wait_states
+                        .get(&peer.process_id)
+                        .ok_or(protocol::STATUS_ESRCH)?
+                        .observed_image_revision,
+                },
                 protocol::OpenBase::ProcessCwd,
             ))
         },
@@ -131,6 +140,7 @@ fn capture<H: Copy>(
                 credentials: Credentials {
                     session: credentials.session,
                     groups: credentials.groups.clone(),
+                    image_revision: credentials.image_revision,
                 },
                 directories: SessionDirectories { root, cwd },
             })
@@ -160,6 +170,69 @@ pub fn supports(opcode: u16) -> bool {
 }
 
 impl<H: Copy> Registry<H> {
+    /// `id` is obtained from native ProviderObjectIdentify on this endpoint,
+    /// never from request bytes. Both process identities are native observations.
+    /// Validate and adopt under one state lock; filesystem comparison/retention
+    /// below is local reference management and must not perform provider RPC.
+    pub fn register_child(
+        &self,
+        id: u64,
+        service: &mut PosixService<H>,
+        broker: PeerIdentity,
+        requester: AuthenticatedProcess<H>,
+        child: AuthenticatedProcess<H>,
+        filesystem: &mut impl FilesystemBackend<H>,
+        processes: &mut impl ProcessBackend<H>,
+    ) -> Result<(), i32> {
+        if service
+            .sessions
+            .get(&broker.process_id)
+            .ok_or(protocol::STATUS_ESRCH)?
+            .effective_uid
+            != 0
+        {
+            return Err(protocol::STATUS_EPERM);
+        }
+        let scope = &self.entries.iter().find(|(key, _)| *key == id).ok_or(-9)?.1;
+        let expected = &scope.credentials;
+        if requester.process_id != expected.session.process_id {
+            return Err(protocol::STATUS_EPERM);
+        }
+        let peer = service
+            .registered_peer(requester.process_id)
+            .ok_or(protocol::STATUS_ESRCH)?;
+        service.refresh_image_state(peer, processes)?;
+        let current = service
+            .session(requester.process_id)
+            .ok_or(protocol::STATUS_ESRCH)?;
+        let revision = service
+            .process_wait_states
+            .get(&requester.process_id)
+            .ok_or(protocol::STATUS_ESRCH)?
+            .observed_image_revision;
+        let groups = service
+            .supplementary_groups
+            .get(&requester.process_id)
+            .map(Vec::as_slice)
+            .unwrap_or(&[]);
+        if current != &expected.session
+            || groups != expected.groups
+            || revision != expected.image_revision
+        {
+            return Err(protocol::STATUS_EAGAIN);
+        }
+        let directories = service
+            .directories
+            .get(&requester.process_id)
+            .ok_or(protocol::STATUS_ESRCH)?;
+        if !filesystem.same_object(directories.root.handle, scope.directories.root.handle)?
+            || !filesystem.same_object(directories.cwd.handle, scope.directories.cwd.handle)?
+        {
+            return Err(protocol::STATUS_EAGAIN);
+        }
+        service.adopt_launched_child(broker, requester, child, filesystem)
+    }
+
     pub fn release_native(
         &mut self,
         bytes: &[u8],
@@ -251,12 +324,7 @@ impl<H: Copy> Registry<H> {
                 return Err(STATUS_EINVAL);
             }
             let id = identify(handles[0].handle)?;
-            let scope = &self
-                .entries
-                .iter()
-                .find(|(key, _)| *key == id)
-                .ok_or(-9)?
-                .1;
+            let scope = &self.entries.iter().find(|(key, _)| *key == id).ok_or(-9)?.1;
             let mut response = status_response(header.request_id, 0);
             let mut opened = Vec::new();
             if header.opcode == wire::OP_INFO {

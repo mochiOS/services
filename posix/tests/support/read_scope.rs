@@ -2,6 +2,8 @@ use super::*;
 use posix_service::read_scope::Registry;
 use protocol::read_scope as wire;
 use std::sync::{Arc, Mutex};
+#[path = "read_scope_launch.rs"]
+mod launch;
 
 fn header(opcode: u16, payload: &[u8]) -> protocol::Header {
     protocol::Header {

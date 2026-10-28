@@ -1,0 +1,11 @@
+[package]
+provenance = "built-in"
+id = "org.mochios.posix-scoped-launch-probe"
+name = "Scoped Launch Probe"
+version = "1"
+vendor = "mochiOS"
+
+[[binary]]
+path = "/system/bin/scoped-launch-probe"
+kind = "application"
+requires = ["ipc.client"]

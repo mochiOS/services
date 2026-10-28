@@ -1417,6 +1417,61 @@ fn main() {
                 })
             }
             (Some(peer), Some((header, payload)), true)
+                if header.opcode == protocol::read_scope::OP_REGISTER_CHILD
+                    && header.flags == 0
+                    && header.status == 0
+                    && payload.is_empty()
+                    && attachments.len() == 3 =>
+            {
+                let status = (|| {
+                    let expected = [
+                        protocol::read_scope::ATTACH_RIGHTS,
+                        platform::handle::HANDLE_RIGHT_WAIT,
+                        platform::handle::HANDLE_RIGHT_WAIT | platform::handle::HANDLE_RIGHT_SIGNAL,
+                    ];
+                    if attachments
+                        .iter()
+                        .zip(expected)
+                        .any(|(object, rights)| object.rights != rights)
+                    {
+                        return Err(posix_service::STATUS_EINVAL);
+                    }
+                    let id = platform::handle::identify_provider_object(attachments[0].handle)
+                        .map_err(|error| protocol::status::normalize_failure(error.raw()))?;
+                    let requester = platform::process::handle_status(attachments[1].handle)
+                        .map_err(|error| protocol::status::normalize_failure(error.raw()))?;
+                    let child = platform::process::handle_status(attachments[2].handle)
+                        .map_err(|error| protocol::status::normalize_failure(error.raw()))?;
+                    if requester.state == platform::process::PROCESS_STATE_EXITED
+                        || child.state == platform::process::PROCESS_STATE_EXITED
+                    {
+                        return Err(protocol::STATUS_ESRCH);
+                    }
+                    read_scopes.register_child(
+                        id,
+                        &mut service,
+                        peer,
+                        posix_service::AuthenticatedProcess {
+                            handle: attachments[1].handle,
+                            process_id: requester.process_id,
+                        },
+                        posix_service::AuthenticatedProcess {
+                            handle: attachments[2].handle,
+                            process_id: child.process_id,
+                        },
+                        &mut filesystem,
+                        &mut processes,
+                    )
+                })();
+                if status.is_ok() {
+                    retained_handle = Some(attachments[2].handle);
+                }
+                Some(posix_service::ObjectResponse {
+                    response: status_response(header.request_id, status.err().unwrap_or(0)),
+                    handles: Vec::new(),
+                })
+            }
+            (Some(peer), Some((header, payload)), true)
                 if header.opcode == protocol::OP_PROCESS_LAUNCHED
                     && header.flags == 0
                     && payload.is_empty()
@@ -3782,6 +3837,10 @@ fn controlled_file_handle(
 
 #[cfg(target_os = "mochios")]
 impl posix_service::FilesystemBackend<mochi_user_platform::handle::Handle> for RuntimeFilesystem {
+    fn same_object(&mut self, left: u32, right: u32) -> Result<bool, i32> {
+        mochi_user_platform::handle::same_object(left, right)
+            .map_err(|error| mochios_posix_protocol::status::normalize_failure(error.raw()))
+    }
     fn open_at_continuation(
         &mut self,
         request: &posix_service::PreparedOpen,
