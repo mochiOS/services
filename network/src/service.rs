@@ -3,13 +3,12 @@ use mochios_net_device_protocol::{
     HTTP_READ_RESULT_BASE_LEN, Header, HttpFailure, MAX_HTTP_CONTENT_TYPE_LEN,
     MAX_HTTP_IPC_DATA_LEN, MAX_HTTP_URL_LEN, MAX_TCP_IO_LEN, Opcode, PING_RESULT_LEN,
     SECURITY_STATISTICS_LEN, STACK_STATISTICS_LEN, TlsFailure, decode_empty, decode_http_close,
-    decode_http_read, decode_http_request, decode_ping, decode_resolve_ipv4, decode_tcp_close,
-    decode_tcp_connect, decode_tcp_receive, decode_tcp_send, decode_tls_close, decode_tls_connect,
-    decode_tls_receive, decode_tls_send, encode_http_read_result, encode_http_request_result,
-    encode_ping_result, encode_resolve_ipv4_result, encode_security_statistics,
-    encode_stack_statistics, encode_tcp_connect_result, encode_tcp_io_result,
-    encode_tcp_receive_result, encode_tls_connect_result, encode_tls_io_result,
-    encode_tls_receive_result,
+    decode_http_read, decode_http_request, decode_ping, decode_tcp_close, decode_tcp_connect,
+    decode_tcp_receive, decode_tcp_send, decode_tls_close, decode_tls_connect, decode_tls_receive,
+    decode_tls_send, encode_http_read_result, encode_http_request_result, encode_ping_result,
+    encode_security_statistics, encode_stack_statistics, encode_tcp_connect_result,
+    encode_tcp_io_result, encode_tcp_receive_result, encode_tls_connect_result,
+    encode_tls_io_result, encode_tls_receive_result,
 };
 use mochios_network_stack::parse_ipv4_literal;
 
@@ -76,6 +75,7 @@ pub(crate) fn run() -> ! {
     notify_ready(ready, 0, &authority);
     let mut tls = TlsManager::new();
     let mut http = HttpManager::new();
+    let mut dns_replies = crate::resolver_rpc::Replies::new();
 
     let mut request = [0u8; IPC_BUFFER_LEN];
     let mut response = [0u8; IPC_BUFFER_LEN];
@@ -90,6 +90,8 @@ pub(crate) fn run() -> ! {
         }
         authority.pump_datagrams(&mut stack, now);
         streams.pump(now, &mut stack.tcp);
+        stack.pump_dns(now);
+        dns_replies.pump(&mut stack, crate::reply::send);
         let mut handles = platform::ipc::IpcObjectHandles::default();
         match platform::ipc::try_wait_object_handles(&mut request, &mut handles) {
             Ok(message) => {
@@ -105,7 +107,14 @@ pub(crate) fn run() -> ! {
                         0 | mnu_abi::IPC_DELIVERY_ENDPOINT_HANDLE
                     )
                 {
-                    if let Some(length) = handle(
+                    if !dns_replies.dispatch(
+                        &mut stack,
+                        sender,
+                        bytes,
+                        now,
+                        |sender| authorized(sender, Opcode::ResolveIpv4),
+                        crate::reply::send,
+                    ) && let Some(length) = handle(
                         &mut stack,
                         &mut tls,
                         &mut http,
@@ -173,23 +182,13 @@ fn handle(
             )
             .ok()
         }
-        Opcode::ResolveIpv4 => {
-            let (request_id, timeout, hostname) = decode_resolve_ipv4(request).ok()?;
-            let random = random_value(sender, request_id, now);
-            let (status, address, from_cache) =
-                match stack.resolve_ipv4(hostname, now, u64::from(timeout), random) {
-                    Ok((address, from_cache)) => (0, address, from_cache),
-                    Err(errno) => (crate::status::failure_status(errno), [0; 4], false),
-                };
-            encode_resolve_ipv4_result(request_id, status, address, from_cache, reply).ok()
-        }
         Opcode::TcpConnect => {
             let (request_id, timeout, port, host) = decode_tcp_connect(request).ok()?;
             let random = random_value(sender, request_id, now);
             let address = match parse_ipv4_literal(host) {
                 Some(address) => Ok(address),
                 None => stack
-                    .resolve_ipv4(host, now, u64::from(timeout), random)
+                    .resolve_ipv4(host, now, u64::from(timeout))
                     .map(|result| result.0),
             };
             let (status, handle, address) = match address {

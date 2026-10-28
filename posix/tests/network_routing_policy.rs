@@ -41,6 +41,10 @@ pub mod thread {
 
 #[path = "../../network/src/stream.rs"]
 mod stream;
+#[path = "../../network/src/resolver.rs"]
+mod resolver;
+#[path = "../../network/src/resolver_rpc.rs"]
+mod resolver_rpc;
 #[path = "../../network/src/datagram.rs"]
 mod datagram;
 #[path = "../../network/src/status.rs"]
@@ -88,6 +92,7 @@ mod driver {
 
 mod production {
     include!("../../network/src/stack.rs");
+    use mochios_network_stack::{DNS_MAX_MESSAGE_LEN, DnsName, encode_dns_query};
 
     fn tcp_fixture() -> (NetworkStack, TcpTuple) {
         crate::MODE.with(|mode| mode.set(3));
@@ -323,14 +328,14 @@ mod production {
             stack.send_udp(1000, 1001, [192, 0, 2, 1], b"packet", 0),
             Err(failure)
         );
-        assert_eq!(stack.resolve_ipv4("example.com", 0, 1, 9), Err(failure));
+        assert_eq!(stack.resolve_ipv4("example.com", 0, 1), Err(failure));
         assert_eq!(
             stack.tcp_connect(7, [192, 0, 2, 1], 443, 0, 1, 9),
             Err(failure)
         );
         // Literal resolution requires neither DNS nor an installed route.
         assert_eq!(
-            stack.resolve_ipv4("192.0.2.1", 0, 1, 9),
+            stack.resolve_ipv4("192.0.2.1", 0, 1),
             Ok(([192, 0, 2, 1], false))
         );
         assert!(stack.pending_ipv4.is_empty());
@@ -351,7 +356,7 @@ mod production {
             stack.send_routed_ipv4([192, 0, 2, 1], 17, b"packet", 0),
             Err(failure)
         );
-        assert_eq!(stack.resolve_ipv4("example.com", 0, 1, 9), Err(failure));
+        assert_eq!(stack.resolve_ipv4("example.com", 0, 1), Err(failure));
         stack.config = Some(Ipv4Config {
             subnet_mask: [0; 4],
             ..config
@@ -380,7 +385,7 @@ mod production {
                 expires_at: 10000,
             });
             for _ in 0..32 {
-                assert!(stack.resolve_ipv4("example.com", 0, 100, 19).is_err());
+                assert!(stack.resolve_ipv4("example.com", 0, 100).is_err());
                 assert_eq!(
                     stack.udp.local_endpoint(stack.dhcp_socket).unwrap().port,
                     DHCP_CLIENT_PORT
@@ -444,24 +449,12 @@ mod production {
     }
     #[test]
     fn dns_installs_the_server_filter_before_receive_and_rejects_foreign_packets() {
-        let mut stack = NetworkStack::new(DriverClient, 7).unwrap();
+        let mut stack = dns_routing_fixture();
         let local = [192, 0, 2, 1];
         let server = [192, 0, 2, 53];
-        let socket = stack.udp.bind_endpoint(local, 8300).unwrap();
-        crate::MODE.with(|value| value.set(2));
-        assert!(
-            stack
-                .resolve_dns_query(
-                    &DnsName::parse("example.com").unwrap(),
-                    server,
-                    socket,
-                    9,
-                    0,
-                    100
-                )
-                .is_err()
-        );
-        crate::MODE.with(|value| value.set(0));
+        let socket =
+            <NetworkStack as crate::resolver::Transport>::open_datagram(&mut stack, server, 9).unwrap();
+        let destination_port = stack.udp.local_endpoint(socket).unwrap().port;
         assert_eq!(
             stack.udp.peer(socket),
             Ok(Some(UdpEndpoint {
@@ -477,7 +470,7 @@ mod production {
             let mut udp = [0; 32];
             let n = UdpDatagram {
                 source_port: port,
-                destination_port: 8300,
+                destination_port,
                 payload: b"x",
             }
             .encode(source, local, &mut udp)

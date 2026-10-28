@@ -118,7 +118,7 @@ impl TlsManager {
                     TlsFailure::InvalidServerName,
                 ));
             }
-            None => resolve_tls_hostname(stack, hostname, started, timeout, random)?,
+            None => resolve_tls_hostname(stack, hostname, started, timeout)?,
         };
         let tcp_handle = stack
             .tcp_connect(
@@ -579,14 +579,13 @@ fn resolve_tls_hostname(
     hostname: &str,
     started: u64,
     timeout: u64,
-    query_id: u64,
 ) -> Result<[u8; 4], TlsOperationError> {
     #[cfg(feature = "test-web-pki")]
     if hostname.ends_with(".test.mochios") {
         return Ok([10, 0, 2, 2]);
     }
     stack
-        .resolve_ipv4(hostname, started, timeout, query_id)
+        .resolve_ipv4(hostname, started, timeout)
         .map(|result| result.0)
         .map_err(transport_error)
 }

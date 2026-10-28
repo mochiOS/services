@@ -17,7 +17,7 @@ fn unsupported_dns_record_is_a_userspace_wire_status() {
         (37, -95, [0; 4], false)
     );
     assert!(
-        include_str!("../../network/src/stack.rs")
+        include_str!("../../network/src/resolver_stack.rs")
             .contains("mochios_net_device_protocol::STATUS_UNSUPPORTED_RECORD")
     );
     assert!(

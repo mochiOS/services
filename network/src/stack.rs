@@ -6,14 +6,11 @@ use mochi_user_platform as platform;
 use mochios_net_device_protocol::{InterfaceInfo, StackStatistics};
 use mochios_network_stack::{
     ARP_LEN, ARP_REPLY, ARP_REQUEST, ArpCache, ArpEntry, ArpPacket, BROADCAST_MAC,
-    DHCP_CLIENT_PORT, DHCP_SERVER_PORT, DNS_MAX_MESSAGE_LEN, DNS_PORT, DhcpClient, DhcpMessageType,
-    DhcpState, DnsCache, DnsError, DnsErrorKind, DnsName, DnsRecordName, DnsRecordType,
-    DnsRecordValue, DnsResponseCode, DnsRetry,
-    DnsRetryAction, ETHERTYPE_ARP, ETHERTYPE_IPV4, EchoPacket, EthernetHeader, Ipv4Config,
-    Ipv4Header, PacketError, TCP_PROTOCOL, TcpConnection, TcpConnectionError,
-    TcpReceiveResult, TcpSegment, TcpState, TcpTransmit, TcpTuple, UdpDatagram, UdpEndpoint, UdpSocketId,
-    UdpSocketTable,
-    decode_dns_records, decode_reply, encode_dns_query, encode_request, next_hop,
+    DHCP_CLIENT_PORT, DHCP_SERVER_PORT, DNS_PORT, DhcpClient, DhcpMessageType, DhcpState,
+    DnsRecordName, DnsRecordType, DnsRecordValue, ETHERTYPE_ARP, ETHERTYPE_IPV4, EchoPacket,
+    EthernetHeader, Ipv4Config, Ipv4Header, PacketError, TCP_PROTOCOL, TcpConnection,
+    TcpConnectionError, TcpReceiveResult, TcpSegment, TcpState, TcpTransmit, TcpTuple, UdpDatagram,
+    UdpEndpoint, UdpSocketId, UdpSocketTable, decode_reply, encode_request, next_hop,
     parse_ipv4_literal,
 };
 
@@ -24,9 +21,6 @@ const UDP_SOCKET_LIMIT: usize = 8;
 const UDP_QUEUE_LIMIT: usize = 8;
 const UDP_PAYLOAD_LIMIT: usize = 1_472;
 const PENDING_IPV4_LIMIT: usize = 8;
-const DNS_CACHE_LIMIT: usize = 32;
-const DNS_RETRY_DELAY: u64 = 500;
-const DNS_RETRY_LIMIT: u8 = 3;
 const TCP_CONNECTION_LIMIT: usize = 16;
 const TCP_SEND_BUFFER_LIMIT: usize = 16 * 1024;
 const TCP_RECEIVE_BUFFER_LIMIT: usize = 16 * 1024;
@@ -48,7 +42,7 @@ pub(crate) struct NetworkStack {
     dhcp: DhcpClient,
     udp: UdpSocketTable,
     dhcp_socket: UdpSocketId,
-    dns_cache: DnsCache,
+    dns: Option<crate::resolver::Resolver<UdpSocketId, crate::stream::Socket>>,
     pub(crate) tcp: crate::stream::Transport,
     arp: ArpCache,
     stats: StackStatistics,
@@ -76,7 +70,7 @@ impl NetworkStack {
             dhcp: DhcpClient::new(xid, info.mac),
             udp,
             dhcp_socket,
-            dns_cache: DnsCache::new(DNS_CACHE_LIMIT),
+            dns: Some(crate::resolver::Resolver::new()),
             tcp: crate::stream::Transport::with_capacity(
                 TCP_CONNECTION_LIMIT + 32,
                 info.mtu.saturating_sub(40).clamp(1, 1460),
@@ -144,6 +138,7 @@ impl NetworkStack {
         self.tcp
             .table
             .remove_closed_if(|owner| owner & crate::stream::RESOURCE_OWNER_TAG == 0);
+        self.pump_dns(now);
         for _ in 0..crate::stream::PUMP_BUDGET {
             let Some(packet) = self.tcp.pop_external() else {
                 break;
@@ -639,149 +634,6 @@ impl NetworkStack {
         self.send_routed_ipv4(target, 1, &icmp[..n], now)
     }
 
-    pub(crate) fn resolve_ipv4(
-        &mut self,
-        hostname: &str,
-        started: u64,
-        timeout: u64,
-        random: u64,
-    ) -> Result<([u8; 4], bool), u64> {
-        if let Some(address) = parse_ipv4_literal(hostname) {
-            return Ok((address, false));
-        }
-        let name = DnsName::parse(hostname).map_err(dns_errno)?;
-        let dns_server = self
-            .config
-            .map(|config| config.dns)
-            .filter(|address| *address != [0; 4])
-            .ok_or(mochios_net_device_protocol::STATUS_NETWORK_UNAVAILABLE as i64 as u64)?;
-        if let Some(address) = self.dns_cache.lookup(&name, started) {
-            self.stats.dns_cache_hits = self.stats.dns_cache_hits.saturating_add(1);
-            return Ok((address, true));
-        }
-        self.stats.dns_cache_misses = self.stats.dns_cache_misses.saturating_add(1);
-        let local_address = self
-            .config
-            .map(|config| config.address)
-            .filter(|address| *address != [0; 4])
-            .ok_or(mochios_net_device_protocol::STATUS_NETWORK_UNAVAILABLE as i64 as u64)?;
-        let socket = self
-            .udp
-            .bind_endpoint(local_address, 0)
-            .map_err(|_| mochi_user_syscall::EAGAIN)?;
-        let result =
-            self.resolve_dns_query(&name, dns_server, socket, random as u16, started, timeout);
-        self.udp.unbind_endpoint(socket);
-        result.map(|address| (address, false))
-    }
-
-    fn resolve_dns_query(
-        &mut self,
-        name: &DnsName,
-        dns_server: [u8; 4],
-        socket: UdpSocketId,
-        transaction_id: u16,
-        started: u64,
-        timeout: u64,
-    ) -> Result<[u8; 4], u64> {
-        let remote = UdpEndpoint {
-            address: dns_server,
-            port: DNS_PORT,
-        };
-        self.udp
-            .set_peer(socket, Some(remote))
-            .map_err(|_| mochi_user_syscall::EIO)?;
-        let source_port = self
-            .udp
-            .local_endpoint(socket)
-            .map_err(|_| mochi_user_syscall::EIO)?
-            .port;
-        let mut query = [0u8; DNS_MAX_MESSAGE_LEN];
-        let query_length = encode_dns_query(transaction_id, name, &mut query).map_err(dns_errno)?;
-        let question_name = DnsRecordName::from(name);
-        let mut retry = DnsRetry::new(started, timeout, DNS_RETRY_DELAY, DNS_RETRY_LIMIT);
-        loop {
-            let now = platform::time::ticks().map_err(|error| error.raw().unsigned_abs())?;
-            match retry.poll(now) {
-                DnsRetryAction::Send => {
-                    self.send_udp(
-                        source_port,
-                        remote.port,
-                        remote.address,
-                        &query[..query_length],
-                        now,
-                    )?;
-                    self.stats.dns_queries = self.stats.dns_queries.saturating_add(1);
-                    platform::logln!(
-                        "network.service: DNS query sent name={} attempt={}",
-                        name.as_str(),
-                        retry.attempts()
-                    );
-                }
-                DnsRetryAction::Failed(DnsErrorKind::Timeout) => {
-                    self.stats.dns_timeouts = self.stats.dns_timeouts.saturating_add(1);
-                    return Err(mochi_user_syscall::EAGAIN);
-                }
-                DnsRetryAction::Failed(DnsErrorKind::RetryLimit) => {
-                    self.stats.dns_failures = self.stats.dns_failures.saturating_add(1);
-                    return Err(mochi_user_syscall::EAGAIN);
-                }
-                DnsRetryAction::Wait => {}
-            }
-            self.tick(now);
-            while self.poll_receive(now)? {}
-            while let Some(packet) = self
-                .udp
-                .receive_for(socket)
-                .map_err(|_| mochi_user_syscall::EIO)?
-            {
-                if packet.source_address != dns_server
-                    || packet.source_port != DNS_PORT
-                    || packet.destination_port != source_port
-                {
-                    continue;
-                }
-                match decode_dns_records(
-                    &packet.payload,
-                    transaction_id,
-                    &question_name,
-                    DnsRecordType::A,
-                ) {
-                    Ok(records) => {
-                        let address = match records.values().first() {
-                            Some(DnsRecordValue::Ipv4(address)) => *address,
-                            _ => return Err(dns_errno(DnsError::UnsupportedRecord)),
-                        };
-                        platform::logln!(
-                            "network.service: DNS response received name={}",
-                            name.as_str()
-                        );
-                        self.dns_cache
-                            .insert_records(&records, now)
-                            .map_err(dns_errno)?;
-                        platform::logln!(
-                            "network.service: DNS resolved name={} address={}.{}.{}.{}",
-                            name.as_str(),
-                            address[0],
-                            address[1],
-                            address[2],
-                            address[3]
-                        );
-                        return Ok(address);
-                    }
-                    Err(DnsError::TransactionMismatch)
-                    | Err(DnsError::QuestionMismatch)
-                    | Err(DnsError::Response(DnsResponseCode::ServerFailure)) => continue,
-                    Err(error) => {
-                        self.stats.dns_failures = self.stats.dns_failures.saturating_add(1);
-                        return Err(dns_errno(error));
-                    }
-                }
-            }
-            platform::thread::yield_now();
-        }
-    }
-
     fn send_udp(
         &mut self,
         source_port: u16,
@@ -1151,21 +1003,6 @@ impl NetworkStack {
     }
 }
 
-fn dns_errno(error: DnsError) -> u64 {
-    match error {
-        DnsError::Response(DnsResponseCode::NameError) => mochi_user_syscall::ENOENT,
-        DnsError::Response(DnsResponseCode::ServerFailure)
-        | DnsError::TruncatedResponse
-        | DnsError::Timeout
-        | DnsError::RetryLimit => mochi_user_syscall::EAGAIN,
-        DnsError::CacheCapacity => mochi_user_syscall::ENOMEM,
-        DnsError::UnsupportedRecord => {
-            mochios_net_device_protocol::STATUS_UNSUPPORTED_RECORD as i64 as u64
-        }
-        _ => mochi_user_syscall::EINVAL,
-    }
-}
-
 fn tcp_errno(error: TcpConnectionError) -> u64 {
     match error {
         TcpConnectionError::Ownership => mochi_user_syscall::EACCES,
@@ -1211,3 +1048,5 @@ impl crate::datagram::Backend for NetworkStack {
             })
     }
 }
+
+include!("resolver_stack.rs");
