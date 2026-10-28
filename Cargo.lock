@@ -1651,9 +1651,6 @@ dependencies = [
  "mochios-posix-client",
  "mochios-posix-protocol",
  "mochios-workspace-protocol",
- "serde",
- "serde_json",
- "sha2",
  "zeroize",
 ]
 
@@ -1697,6 +1694,15 @@ dependencies = [
  "base64",
  "ed25519-dalek",
  "serde",
+ "sha2",
+]
+
+[[package]]
+name = "mochios-device-consent"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
  "sha2",
 ]
 
@@ -3663,6 +3669,7 @@ dependencies = [
  "mochios-boot-selection",
  "mochios-certificate-database 0.1.0 (git+https://github.com/mochiOS/syscalls)",
  "mochios-developer-ca-trust",
+ "mochios-device-consent",
  "mochios-http-client",
  "mochios-net-device-protocol",
  "mochios-signature-protocol",
@@ -4691,11 +4698,3 @@ checksum = "27bc9d5b815bc103f142aa054f561d9187d191692ec7c2d1e2b4737f8dbd7296"
 dependencies = [
  "zune-core",
 ]
-
-[[patch.unused]]
-name = "mnu"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "mochi-user-runtime"
-version = "0.1.0"

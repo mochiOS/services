@@ -12,7 +12,7 @@ use crate::http::Transport;
 use crate::os_update::{self, Version};
 use crate::public_api::{self, Response};
 
-const CONFIG_PATH: &str = "/var/config/diagnostics/settings.conf";
+use mochios_device_consent::{ConsentRecord, ConsentStore, DataCategory, SCHEMA_VERSION};
 const DATA_ROOT: &str = "/var/lib/diagnostics";
 const INSTALL_DATE_PATH: &str = "/var/lib/diagnostics/install_date";
 const DEVICE_ID_PATH: &str = "/var/lib/diagnostics/device_id";
@@ -96,20 +96,34 @@ pub(crate) fn release_identity() -> Option<(String, u64)> {
     Some((version?, build?))
 }
 
-fn consent_enabled(contents: &str) -> bool {
-    let mut enabled = None;
-    let mut consent = None;
-    for line in contents.lines() {
-        if let Some(value) = line.strip_prefix("diagnostics_enabled=") {
-            if enabled.is_some() { return false; }
-            enabled = Some(value);
-        }
-        if let Some(value) = line.strip_prefix("diagnostics_consent=") {
-            if consent.is_some() { return false; }
-            consent = Some(value);
-        }
+fn category_for_endpoint(endpoint: &str) -> Option<DataCategory> {
+    match endpoint {
+        "/diagnostics" => Some(DataCategory::UsageDiagnostics),
+        "/update-results" => Some(DataCategory::UpdateResults),
+        _ => None,
     }
-    enabled == Some("true") && consent == Some("true")
+}
+
+fn consent_stamp(record: &ConsentRecord, category: DataCategory) -> Option<Value> {
+    if !record.allows(category, category.policy_version()) { return None; }
+    let permission = record.permission(category)?;
+    Some(json!({
+        "schema_version": SCHEMA_VERSION,
+        "category": category.key(),
+        "policy_version": permission.policy_version,
+        "decided_at": permission.decided_at,
+        "revision": permission.revision,
+    }))
+}
+
+fn current_stamp(category: DataCategory) -> Option<Value> {
+    consent_stamp(&ConsentStore::system().load().ok()?, category)
+}
+
+fn queue_authorized(record: &Value, consent: &ConsentRecord) -> bool {
+    let Some(category) = record.get("endpoint").and_then(Value::as_str).and_then(category_for_endpoint) else { return false; };
+    let Some(expected) = consent_stamp(consent, category) else { return false; };
+    record.get("consent") == Some(&expected)
 }
 
 fn queue_files(root: &Path) -> io::Result<Vec<PathBuf>> {
@@ -134,7 +148,7 @@ fn queue_files(root: &Path) -> io::Result<Vec<PathBuf>> {
     Ok(files)
 }
 
-fn purge_queue() -> io::Result<()> {
+fn purge_queue(category: DataCategory) -> io::Result<()> {
     let root = Path::new(QUEUE_ROOT);
     let quarantine = Path::new(DATA_ROOT).join("quarantine");
     for directory in [root, quarantine.as_path()] {
@@ -142,7 +156,10 @@ fn purge_queue() -> io::Result<()> {
         for entry in fs::read_dir(directory)? {
             let path = entry?.path();
             if matches!(path.extension().and_then(|value| value.to_str()), Some("json" | "pending" | "backup")) {
-                fs::remove_file(path)?;
+                let record = fs::read(&path).ok().and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok());
+                if record.as_ref().and_then(|r| r.get("endpoint")).and_then(Value::as_str).and_then(category_for_endpoint) == Some(category) {
+                    fs::remove_file(path)?;
+                }
             }
         }
     }
@@ -321,6 +338,7 @@ fn install_date(first_valid_date: &str) -> io::Result<String> {
 
 #[cfg(target_os = "mochios")]
 fn queue_basic(now_utc: u64, device: &str) -> io::Result<()> {
+    let Some(consent) = current_stamp(DataCategory::UsageDiagnostics) else { return Ok(()); };
     let last_active_date = date_from_unix(now_utc)
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "invalid UTC date"))?;
     if !Path::new(QUEUE_ROOT).is_dir() {
@@ -359,7 +377,7 @@ fn queue_basic(now_utc: u64, device: &str) -> io::Result<()> {
         "frequent_apps": null,
         "country_or_region": null,
     });
-    let record = json!({"endpoint":"/diagnostics", "body":body, "attempts":0, "next_attempt_utc":now_utc});
+    let record = json!({"endpoint":"/diagnostics", "consent":consent, "body":body, "attempts":0, "next_attempt_utc":now_utc});
     save_atomic(&path, &serde_json::to_vec(&record)?)
 }
 
@@ -370,11 +388,13 @@ pub fn record_staged_update(
     target: &os_update::VerifiedManifest,
     target_slot: mochios_boot_selection::Slot,
 ) -> io::Result<()> {
+    let Some(consent) = current_stamp(DataCategory::UpdateResults) else { return Ok(()); };
     if Version::parse(source_version).is_none() || source_build == 0 {
         return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid source release"));
     }
     fs::create_dir_all(UPDATE_ROOT)?;
     let pending = json!({
+        "consent": consent,
         "source": {
             "version": source_version,
             "build_number": source_build,
@@ -400,6 +420,7 @@ pub fn record_failed_update(
     target: &os_update::VerifiedManifest,
     error_code: &str,
 ) -> io::Result<()> {
+    let Some(consent) = current_stamp(DataCategory::UpdateResults) else { return Ok(()); };
     if Version::parse(source_version).is_none() || source_build == 0 || error_code.is_empty()
         || error_code.len() > 64
         || !error_code.bytes().all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
@@ -408,6 +429,7 @@ pub fn record_failed_update(
     }
     fs::create_dir_all(UPDATE_ROOT)?;
     let pending = json!({
+        "consent": consent,
         "source": {
             "version": source_version,
             "build_number": source_build,
@@ -426,9 +448,14 @@ pub fn record_failed_update(
 
 #[cfg(target_os = "mochios")]
 pub fn record_boot_outcome(running: mochios_boot_selection::Slot, confirmed: bool) -> io::Result<()> {
+    if current_stamp(DataCategory::UpdateResults).is_none() { return purge_reportable_update_result(); }
     recover_atomic(Path::new(PENDING_UPDATE_PATH))?;
     let Ok(bytes) = fs::read(PENDING_UPDATE_PATH) else { return Ok(()) };
     let mut pending: Value = serde_json::from_slice(&bytes)?;
+    if pending.get("consent") != current_stamp(DataCategory::UpdateResults).as_ref() || pending.get("consent").is_none() {
+        fs::remove_file(PENDING_UPDATE_PATH)?;
+        return Ok(());
+    }
     if pending.get("outcome").is_some() { return Ok(()); }
     let running = match running { mochios_boot_selection::Slot::A => "A", mochios_boot_selection::Slot::B => "B" };
     let target = pending.get("target_slot").and_then(Value::as_str)
@@ -443,9 +470,14 @@ pub fn record_boot_outcome(running: mochios_boot_selection::Slot, confirmed: boo
 
 #[cfg(target_os = "mochios")]
 fn queue_update_result(now_utc: u64, device: &str) -> io::Result<()> {
+    let Some(consent) = current_stamp(DataCategory::UpdateResults) else { return Ok(()); };
     recover_atomic(Path::new(PENDING_UPDATE_PATH))?;
     let Ok(bytes) = fs::read(PENDING_UPDATE_PATH) else { return Ok(()) };
     let mut pending: Value = serde_json::from_slice(&bytes)?;
+    if pending.get("consent") != current_stamp(DataCategory::UpdateResults).as_ref() || pending.get("consent").is_none() {
+        fs::remove_file(PENDING_UPDATE_PATH)?;
+        return Ok(());
+    }
     if pending.get("outcome").is_none() { return Ok(()); }
     let occurred_on = date_from_unix(now_utc)
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "invalid UTC date"))?;
@@ -466,7 +498,7 @@ fn queue_update_result(now_utc: u64, device: &str) -> io::Result<()> {
     fs::create_dir_all(QUEUE_ROOT)?;
     let path = Path::new(QUEUE_ROOT).join(format!("update-{event_id}.json"));
     if !path.exists() {
-        let record = json!({"endpoint":"/update-results", "body":body, "attempts":0, "next_attempt_utc":now_utc});
+        let record = json!({"endpoint":"/update-results", "consent":consent, "body":body, "attempts":0, "next_attempt_utc":now_utc});
         save_atomic(&path, &serde_json::to_vec(&record)?)?;
     }
     fs::remove_file(PENDING_UPDATE_PATH)
@@ -477,13 +509,12 @@ pub struct Agent {
     next_poll_ms: u64,
     next_consent_check_ms: u64,
     request_id: u64,
-    previously_allowed: bool,
 }
 
 #[cfg(target_os = "mochios")]
 impl Agent {
     pub const fn new(start_ms: u64) -> Self {
-        Self { next_poll_ms: start_ms, next_consent_check_ms: start_ms, request_id: 0, previously_allowed: false }
+        Self { next_poll_ms: start_ms, next_consent_check_ms: start_ms, request_id: 0 }
     }
     pub const fn next_due_ms(&self) -> u64 {
         if self.next_poll_ms < self.next_consent_check_ms {
@@ -504,30 +535,33 @@ impl Agent {
         now_ms: u64,
         now_utc: u64,
     ) -> Option<os_update::VerifiedManifest> {
-        let allowed = fs::read_to_string(CONFIG_PATH)
-            .map(|contents| consent_enabled(&contents))
-            .unwrap_or(false);
-        if allowed && !self.previously_allowed {
-            self.next_poll_ms = now_ms;
+        let allowed = [
+            current_stamp(DataCategory::UsageDiagnostics).is_some(),
+            current_stamp(DataCategory::UpdateResults).is_some(),
+        ];
+        for (index, category) in [DataCategory::UsageDiagnostics, DataCategory::UpdateResults].into_iter().enumerate() {
+            if !allowed[index] {
+                if let Err(error) = purge_queue(category) {
+                    mochi_user_platform::logln!("update.service: optional report purge failed kind={:?}", error.kind());
+                }
+            }
         }
-        self.previously_allowed = allowed;
-        if !allowed {
-            if let Err(error) = purge_queue() {
-                mochi_user_platform::logln!("update.service: diagnostics queue purge failed kind={:?}", error.kind());
-            }
-            if let Err(error) = purge_reportable_update_result() {
-                mochi_user_platform::logln!("update.service: pending update result purge failed kind={:?}", error.kind());
-            }
+        if !allowed[1] {
+            let _ = purge_reportable_update_result();
         }
         self.next_consent_check_ms = now_ms.saturating_add(CONSENT_CHECK_MS);
-        if allowed {
+        if allowed.iter().any(|value| *value) {
             match device_id() {
                 Ok(device) => {
-                    if let Err(error) = queue_basic(now_utc, &device) {
-                        mochi_user_platform::logln!("update.service: daily diagnostics not queued kind={:?}", error.kind());
+                    if allowed[0] {
+                        if let Err(error) = queue_basic(now_utc, &device) {
+                            mochi_user_platform::logln!("update.service: daily diagnostics not queued kind={:?}", error.kind());
+                        }
                     }
-                    if let Err(error) = queue_update_result(now_utc, &device) {
-                        mochi_user_platform::logln!("update.service: update result not queued kind={:?}", error.kind());
+                    if allowed[1] {
+                        if let Err(error) = queue_update_result(now_utc, &device) {
+                            mochi_user_platform::logln!("update.service: update result not queued kind={:?}", error.kind());
+                        }
                     }
                 }
                 Err(error) => {
@@ -536,7 +570,7 @@ impl Agent {
             }
         }
         let offer = if now_ms >= self.next_poll_ms { self.poll(transport, now_ms) } else { None };
-        if allowed { self.flush(transport, now_utc); }
+        if allowed.iter().any(|value| *value) { self.flush(transport, now_utc); }
         offer
     }
 
@@ -605,18 +639,18 @@ impl Agent {
                 let _ = fs::remove_file(path);
                 continue;
             }
-            if !fs::read_to_string(CONFIG_PATH)
-                .map(|contents| consent_enabled(&contents))
-                .unwrap_or(false)
-            {
-                let _ = purge_queue();
-                return;
-            }
             let Ok(bytes) = fs::read(&path) else { continue; };
             let Ok(mut record) = serde_json::from_slice::<Value>(&bytes) else { continue; };
             let Some(endpoint) = record.get("endpoint").and_then(Value::as_str) else { continue; };
             // Crash reports need a separate, per-crash confirmation path.
             if !matches!(endpoint, "/diagnostics" | "/update-results") { continue; }
+            let consent = ConsentStore::system().load().unwrap_or_default();
+            if !queue_authorized(&record, &consent) {
+                // No legacy grant or pre-withdrawal queue entry is upgraded
+                // into permission to send after a later consent decision.
+                let _ = fs::remove_file(&path);
+                continue;
+            }
             let endpoint = endpoint.to_owned();
             let next_attempt = record.get("next_attempt_utc").and_then(Value::as_u64).unwrap_or(0);
             if next_attempt > now_utc { continue; }
@@ -681,13 +715,59 @@ fn log_response(endpoint: &str, response: &Response) {
 mod tests {
     use super::*;
 
-    #[test]
-    fn requires_explicit_consent_even_when_enabled_by_default() {
-        assert!(!consent_enabled("diagnostics_enabled=true\n"));
-        assert!(consent_enabled("diagnostics_enabled=true\ndiagnostics_consent=true\n"));
-        assert!(!consent_enabled("diagnostics_enabled=false\ndiagnostics_consent=true\n"));
-        assert!(!consent_enabled("diagnostics_enabled=true\ndiagnostics_consent=true\ndiagnostics_consent=false\n"));
+    fn consent() -> ConsentRecord {
+        use mochios_device_consent::DocumentReceipt;
+        let mut consent = ConsentRecord::default();
+        consent.terms = Some(DocumentReceipt::new("legal-v1", b"abcdef", 1));
+        consent.privacy = Some(DocumentReceipt::new("legal-v1", b"abcdef", 2));
+        consent.open_source_licenses = Some(DocumentReceipt::new("legal-v1", b"abcdef", 3));
+        for category in DataCategory::ALL {
+            consent.set_permission(category, false, category.policy_version(), 4);
+        }
+        consent
     }
+
+    #[test]
+    fn report_endpoints_obey_only_their_own_explicit_permission() {
+        let endpoints = [(DataCategory::UsageDiagnostics, "/diagnostics"), (DataCategory::UpdateResults, "/update-results")];
+        for mask in 0..8 {
+            let mut granted = consent();
+            for category in DataCategory::ALL {
+                granted.set_permission(category, true, category.policy_version(), 5);
+            }
+            let stamps = DataCategory::ALL.map(|c| consent_stamp(&granted, c).unwrap());
+            let mut current = granted;
+            for category in DataCategory::ALL {
+                // Preserve receipt identity when permission is kept.
+                if mask & (1 << category.index()) == 0 {
+                    current.set_permission(category, false, category.policy_version(), 6);
+                }
+            }
+            for (category, endpoint) in endpoints {
+                let report = json!({"endpoint": endpoint, "consent": stamps[category.index()]});
+                assert_eq!(queue_authorized(&report, &current), mask & (1 << category.index()) != 0);
+            }
+        }
+        assert_eq!(category_for_endpoint("/updates/check"), None);
+    }
+
+    #[test]
+    fn old_grants_queues_and_pre_withdrawal_reports_cannot_authorize_uploads() {
+        let category = DataCategory::UsageDiagnostics;
+        let mut current = consent();
+        current.set_permission(category, true, category.policy_version(), 5);
+        let report = json!({"endpoint":"/diagnostics", "consent":consent_stamp(&current, category).unwrap()});
+        assert!(queue_authorized(&report, &current));
+        current.set_permission(category, false, category.policy_version(), 5);
+        assert!(!queue_authorized(&report, &current));
+        current.set_permission(category, true, category.policy_version(), 5);
+        assert!(!queue_authorized(&report, &current));
+        assert!(!queue_authorized(&json!({"endpoint":"/diagnostics"}), &current));
+        assert!(!queue_authorized(&report, &ConsentRecord::default()));
+        current.set_permission(category, true, "old-policy", 6);
+        assert!(consent_stamp(&current, category).is_none());
+    }
+
 
     #[test]
     fn validates_real_calendar_dates() {
