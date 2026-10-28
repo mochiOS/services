@@ -5,6 +5,9 @@ mod libc_udp {
 #[cfg(all(target_os = "mochios", mochios_tcp_provider_274))]
 #[path = "native_tcp_provider.rs"]
 mod tcp_provider;
+#[cfg(all(target_os = "mochios", mochios_dns_handles_281))]
+#[path = "native_resolver_provider.rs"]
+mod resolver_provider;
 #[cfg(all(target_os = "mochios", mochios_llvm_runtime_probe_215))]
 #[path = "native_llvm_runtime.rs"]
 mod llvm_runtime;
@@ -51,6 +54,12 @@ pub fn run(posix: u32, network: u32) {
         });
     }
     p::io::stdout(b"inet-socket: starting native factory/Provider checks\n").unwrap();
+    #[cfg(mochios_dns_handles_281)]
+    {
+        resolver_provider::run(network);
+        unsafe { alarm(0); }
+        return;
+    }
     #[cfg(mochios_tcp_provider_274)]
     {
         tcp_provider::run(network);

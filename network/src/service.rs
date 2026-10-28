@@ -26,6 +26,7 @@ pub(crate) fn run() -> ! {
     let ready = platform::service_ready::take_bootstrap_target();
     let mut authority = crate::datagram_authority::Server::new();
     let mut streams = crate::stream_provider::Server::new(authority.control_endpoint());
+    let mut dns_objects = crate::resolver_provider::Server::new(authority.control_endpoint());
     let now = platform::time::ticks().unwrap_or(0);
     let driver = match DriverClient::connect(now.saturating_add(START_TIMEOUT)) {
         Ok(driver) => driver,
@@ -34,7 +35,7 @@ pub(crate) fn run() -> ! {
                 "network.service: virtio-net driver unavailable errno={}",
                 errno
             );
-            unavailable(ready, errno, authority, streams)
+            unavailable(ready, errno, authority, streams, dns_objects)
         }
     };
     let xid = platform::service_ready::generate_token()
@@ -44,7 +45,7 @@ pub(crate) fn run() -> ! {
         Ok(stack) => stack,
         Err(errno) => {
             platform::logln!("network.service: interface query failed errno={}", errno);
-            unavailable(ready, errno, authority, streams)
+            unavailable(ready, errno, authority, streams, dns_objects)
         }
     };
     let info = stack.info();
@@ -92,6 +93,7 @@ pub(crate) fn run() -> ! {
         streams.pump(now, &mut stack.tcp);
         stack.pump_dns(now);
         dns_replies.pump(&mut stack, crate::reply::send);
+        dns_objects.pump(&mut stack, now);
         let mut handles = platform::ipc::IpcObjectHandles::default();
         match platform::ipc::try_wait_object_handles(&mut request, &mut handles) {
             Ok(message) => {
@@ -100,6 +102,7 @@ pub(crate) fn run() -> ! {
                 if let Some(bytes) = request.get(..length)
                     && !streams.dispatch(sender, bytes, &handles, now, &mut stack.tcp)
                     && !authority.dispatch_datagram(sender, bytes, &handles, &mut stack, now)
+                    && !dns_objects.dispatch(sender, bytes, &handles, &mut stack, now)
                     && !authority.dispatch(sender, bytes, &handles)
                     && handles.count == 0
                     && matches!(
@@ -483,10 +486,12 @@ fn unavailable(
     errno: u64,
     mut authority: crate::datagram_authority::Server,
     mut streams: crate::stream_provider::Server,
+    mut dns_objects: crate::resolver_provider::Server<crate::resolver::Query>,
 ) -> ! {
     let status = crate::status::failure_status(errno);
     notify_ready(ready, status, &authority);
     let mut backend = crate::datagram::Loopback::new();
+    let mut dns_backend = crate::resolver_backend::Unavailable;
     let mut stream_backend = crate::stream::Transport::new();
     let mut request = [0u8; IPC_BUFFER_LEN];
     let mut response = [0u8; IPC_BUFFER_LEN];
@@ -494,6 +499,7 @@ fn unavailable(
         let now = platform::time::ticks().unwrap_or(0);
         streams.pump(now, &mut stream_backend);
         authority.pump_datagrams(&mut backend, 0);
+        dns_objects.pump(&mut dns_backend, now);
         let mut handles = platform::ipc::IpcObjectHandles::default();
         match platform::ipc::try_wait_object_handles(&mut request, &mut handles) {
             Ok(message) => {
@@ -502,6 +508,7 @@ fn unavailable(
                 if let Some(bytes) = request.get(..length)
                     && !streams.dispatch(sender, bytes, &handles, now, &mut stream_backend)
                     && !authority.dispatch_datagram(sender, bytes, &handles, &mut backend, 0)
+                    && !dns_objects.dispatch(sender, bytes, &handles, &mut dns_backend, now)
                     && !authority.dispatch(sender, bytes, &handles)
                     && handles.count == 0
                     && matches!(

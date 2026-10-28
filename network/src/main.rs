@@ -7,6 +7,8 @@ mod http;
 mod reply;
 mod resolver;
 mod resolver_rpc;
+mod resolver_provider;
+mod resolver_backend;
 mod service;
 mod stack;
 mod stream;

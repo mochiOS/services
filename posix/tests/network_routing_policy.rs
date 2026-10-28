@@ -45,6 +45,8 @@ mod stream;
 mod resolver;
 #[path = "../../network/src/resolver_rpc.rs"]
 mod resolver_rpc;
+#[path = "../../network/src/resolver_backend.rs"]
+mod resolver_backend;
 #[path = "../../network/src/datagram.rs"]
 mod datagram;
 #[path = "../../network/src/status.rs"]

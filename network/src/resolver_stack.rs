@@ -225,3 +225,25 @@ impl crate::resolver_rpc::Backend for NetworkStack {
         self.take_dns(id)
     }
 }
+
+impl crate::resolver_backend::Backend for NetworkStack {
+    type Query = crate::resolver::Query;
+    fn start(
+        &mut self,
+        name: DnsRecordName,
+        kind: DnsRecordType,
+        now: u64,
+        timeout: u64,
+    ) -> Result<Self::Query, i32> {
+        self.start_dns(name, kind, now, timeout)
+    }
+    fn take(
+        &mut self,
+        id: Self::Query,
+    ) -> Result<Option<Result<crate::resolver::Answer, crate::resolver::Failure>>, i32> {
+        self.take_dns(id)
+    }
+    fn cancel(&mut self, id: Self::Query, now: u64) -> Result<(), i32> {
+        self.cancel_dns(id, now)
+    }
+}
