@@ -26,6 +26,7 @@ pub(crate) fn run() -> ! {
     platform::logln!("network.service: start");
     let ready = platform::service_ready::take_bootstrap_target();
     let mut authority = crate::datagram_authority::Server::new();
+    let mut streams = crate::stream_provider::Server::new(authority.control_endpoint());
     let now = platform::time::ticks().unwrap_or(0);
     let driver = match DriverClient::connect(now.saturating_add(START_TIMEOUT)) {
         Ok(driver) => driver,
@@ -34,7 +35,7 @@ pub(crate) fn run() -> ! {
                 "network.service: virtio-net driver unavailable errno={}",
                 errno
             );
-            unavailable(ready, errno, authority)
+            unavailable(ready, errno, authority, streams)
         }
     };
     let xid = platform::service_ready::generate_token()
@@ -44,7 +45,7 @@ pub(crate) fn run() -> ! {
         Ok(stack) => stack,
         Err(errno) => {
             platform::logln!("network.service: interface query failed errno={}", errno);
-            unavailable(ready, errno, authority)
+            unavailable(ready, errno, authority, streams)
         }
     };
     let info = stack.info();
@@ -88,12 +89,14 @@ pub(crate) fn run() -> ! {
             }
         }
         authority.pump_datagrams(&mut stack, now);
+        streams.pump(now);
         let mut handles = platform::ipc::IpcObjectHandles::default();
         match platform::ipc::try_wait_object_handles(&mut request, &mut handles) {
             Ok(message) => {
                 let length = (message & 0xffff_ffff) as usize;
                 let sender = message >> 32;
                 if let Some(bytes) = request.get(..length)
+                    && !streams.dispatch(sender, bytes, &handles, now)
                     && !authority.dispatch_datagram(sender, bytes, &handles, &mut stack, now)
                     && !authority.dispatch(sender, bytes, &handles)
                     && handles.count == 0
@@ -480,6 +483,7 @@ fn unavailable(
     ready: Option<platform::service_ready::Target>,
     errno: u64,
     mut authority: crate::datagram_authority::Server,
+    mut streams: crate::stream_provider::Server,
 ) -> ! {
     let status = crate::status::failure_status(errno);
     notify_ready(ready, status, &authority);
@@ -487,6 +491,8 @@ fn unavailable(
     let mut request = [0u8; IPC_BUFFER_LEN];
     let mut response = [0u8; IPC_BUFFER_LEN];
     loop {
+        let now = platform::time::ticks().unwrap_or(0);
+        streams.pump(now);
         authority.pump_datagrams(&mut backend, 0);
         let mut handles = platform::ipc::IpcObjectHandles::default();
         match platform::ipc::try_wait_object_handles(&mut request, &mut handles) {
@@ -494,6 +500,7 @@ fn unavailable(
                 let length = (message & 0xffff_ffff) as usize;
                 let sender = message >> 32;
                 if let Some(bytes) = request.get(..length)
+                    && !streams.dispatch(sender, bytes, &handles, now)
                     && !authority.dispatch_datagram(sender, bytes, &handles, &mut backend, 0)
                     && !authority.dispatch(sender, bytes, &handles)
                     && handles.count == 0

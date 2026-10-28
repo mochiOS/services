@@ -8,6 +8,7 @@ mod reply;
 mod service;
 mod stack;
 mod stream;
+mod stream_provider;
 mod status;
 mod tls;
 
