@@ -8,6 +8,7 @@ PHDRS {
     rodata PT_LOAD FLAGS(4);
     data PT_LOAD FLAGS(6);
     dynamic PT_DYNAMIC FLAGS(6);
+    tls PT_TLS FLAGS(4);
     stack PT_GNU_STACK FLAGS(6);
 }
 SECTIONS {
@@ -46,8 +47,8 @@ SECTIONS {
     } :data
     .got : { *(.got .got.* .igot.*) } :data
     .dynamic : { *(.dynamic) } :data :dynamic
-    .tdata : ALIGN(16) { *(.tdata .tdata.*) } :data
-    .tbss : ALIGN(16) { *(.tbss .tbss.*) } :data
+    .tdata : ALIGN(16) { *(.tdata .tdata.*) } :data :tls
+    .tbss : ALIGN(16) { *(.tbss .tbss.*) } :data :tls
     .bss : ALIGN(4K) { *(COMMON) *(.bss .bss.*) } :data
     HIDDEN(__mochios_data_end = .);
     _end = .;

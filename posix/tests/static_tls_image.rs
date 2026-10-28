@@ -140,3 +140,55 @@ fn faultable_reads_and_mapping_extents_are_bounded() {
         Err(Error::Invalid)
     );
 }
+
+#[test]
+fn dtv_lookup_is_bounded_and_rejects_missing_modules_and_corrupt_metadata() {
+    use mochios_posix_client::static_tls::{dtv, modules::Plan};
+    let root = Template {
+        source: 0,
+        file_size: 0,
+        memory_size: 73,
+        alignment: 64,
+        residue: 3,
+    };
+    let templates = [Some(root), None, Some(root)];
+    let plan = Plan::new(&templates, 4096).unwrap();
+    let base = 0x1000;
+    let mut bytes = vec![0; plan.layout().mapping_size];
+    let tp = plan
+        .initialize_zeroed::<i32>(
+            base,
+            bytes.len(),
+            |_, _| panic!("zero template"),
+            |address, source| {
+                bytes[address - base..address - base + source.len()].copy_from_slice(source);
+                Ok(())
+            },
+        )
+        .unwrap();
+    let modules: Vec<_> = plan.modules().collect();
+    assert_eq!(
+        dtv::address(&bytes, base, tp, 3, 7),
+        Some(tp - modules[1].distance + 7)
+    );
+    for (module, offset) in [(0, 0), (2, 0), (4, 0), (1, 74), (1, usize::MAX)] {
+        assert_eq!(dtv::address(&bytes, base, tp, module, offset), None);
+    }
+    let tcb = tp - base;
+    for (offset, value) in [
+        (tcb, 0),
+        (tcb + 8, u64::MAX),
+        (tcb + 16, u64::MAX),
+        (tcb + 24, (base - 1) as u64),
+        (tcb + 32, u64::MAX),
+    ] {
+        let mut corrupt = bytes.clone();
+        put(&mut corrupt, offset, value);
+        assert_eq!(dtv::address(&corrupt, base, tp, 1, 0), None);
+    }
+    assert_eq!(dtv::address(&bytes[..tcb + 15], base, tp, 1, 0), None);
+    assert_eq!(
+        dtv::address(&bytes, usize::MAX - bytes.len() + 1, tp, 1, 0),
+        None
+    );
+}

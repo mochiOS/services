@@ -1519,6 +1519,33 @@ fn exec_serializes_tls_templates_with_child_addresses_and_the_original_object_in
 }
 
 #[test]
+fn dependency_tls_requires_a_declared_module_runtime_before_image_replacement() {
+    for marked in [false, true] {
+        let root_flags = if marked {
+            vec!["-DMOCHIOS_TLS_RUNTIME", "-Wl,-rpath,/libraries"]
+        } else {
+            vec!["-Wl,-rpath,/libraries"]
+        };
+        let (root, library) = dependency_fixture(&root_flags, &["-DMOCHIOS_TLS_TEMPLATE"]);
+        assert!(
+            mochios_posix_client::pie::Pie::parse_object(&library)
+                .unwrap()
+                .tls_template(0)
+                .unwrap()
+                .is_some()
+        );
+        assert_eq!(
+            search_exec(&root, &[(b"/libraries/libscope.so", &library)], &[], 0, 0),
+            Err(ENOEXEC)
+        );
+        STATE.with_borrow(|state| {
+            assert_eq!(state.entered, usize::from(marked));
+            assert!(!state.closed.contains(&19));
+        });
+    }
+}
+
+#[test]
 fn fixed_executable_preparation_preserves_entry_bias_and_private_source_headers() {
     let script =
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/support/native_dynamic.ld");

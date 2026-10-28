@@ -9,3 +9,6 @@ int shared_function(int number) { return number + shared_value + root_override +
 __attribute__((constructor)) static void scope_initialize(void) { ++shared_value; }
 __attribute__((destructor)) static void scope_finalize(void) { --shared_value; }
 #endif
+#ifdef MOCHIOS_TLS_TEMPLATE
+__thread int dependency_tls_initial = 23;
+#endif

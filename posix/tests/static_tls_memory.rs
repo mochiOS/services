@@ -28,6 +28,9 @@ struct ThreadControl {
     tls_mapping_size: AtomicUsize,
     thread_local_base: AtomicU64,
 }
+fn current_thread_control() -> Option<(u32, &'static ThreadControl)> {
+    None
+}
 fn map_kernel_errno(error: i64) -> i32 {
     error as i32
 }
@@ -217,8 +220,12 @@ fn every_copy_failure_unmaps_unpublished_memory() {
         count: 2,
         bias: Ok(0),
     }));
-    // Three header reads, six chunk copies and the self-pointer write.
-    for fail in 0..10 {
+    let probe = ThreadControl::default();
+    COPIES.set(0);
+    runtime::allocate(&probe).unwrap();
+    let copies = COPIES.get();
+    destroy(&probe);
+    for fail in 0..copies {
         COPIES.set(0);
         COPY_FAIL.set(fail);
         let control = ThreadControl::default();
@@ -315,6 +322,36 @@ fn multiple_modules_get_private_initialized_and_zeroed_storage_per_thread() {
         assert_eq!(unsafe { *(tp as *const usize) }, tp);
         for module in plan.modules() {
             let start = tp - module.distance;
+            assert_eq!(
+                runtime::resolve(
+                    thread,
+                    runtime::TlsIndex {
+                        module: module.index + 1,
+                        offset: 0
+                    }
+                ),
+                Some(start)
+            );
+            assert_eq!(
+                runtime::resolve(
+                    thread,
+                    runtime::TlsIndex {
+                        module: module.index + 1,
+                        offset: module.template.memory_size
+                    }
+                ),
+                Some(start + module.template.memory_size)
+            );
+            assert_eq!(
+                runtime::resolve(
+                    thread,
+                    runtime::TlsIndex {
+                        module: module.index + 1,
+                        offset: module.template.memory_size + 1
+                    }
+                ),
+                None
+            );
             assert_eq!(start % module.template.alignment, module.template.residue);
             let bytes = unsafe {
                 std::slice::from_raw_parts(start as *const u8, module.template.memory_size)
@@ -327,6 +364,12 @@ fn multiple_modules_get_private_initialized_and_zeroed_storage_per_thread() {
             };
             assert_eq!(&bytes[..original.len()], original);
             assert!(bytes[original.len()..].iter().all(|&b| b == 0));
+        }
+        for module in [0, 2, 5] {
+            assert_eq!(
+                runtime::resolve(thread, runtime::TlsIndex { module, offset: 0 }),
+                None
+            );
         }
     }
     let library = plan.modules().find(|module| module.index == 2).unwrap();
@@ -351,8 +394,12 @@ fn failure_in_any_module_or_tcb_rolls_back_before_publication() {
         residue: 3,
     };
     let templates = [Some(template), None, Some(template)];
-    // Two modules, each with three read/write chunks, then one TCB write.
-    for fail in 0..13 {
+    let probe = ThreadControl::default();
+    COPIES.set(0);
+    runtime::allocate_templates(&probe, &templates).unwrap();
+    let copies = COPIES.get();
+    destroy(&probe);
+    for fail in 0..copies {
         COPY_FAIL.set(fail);
         COPIES.set(0);
         let control = ThreadControl::default();

@@ -813,7 +813,7 @@ fn link_scope_skips_nonexported_symbols_and_bounds_corrupt_hash_cycles() {
 }
 
 #[test]
-fn link_scope_rejects_dependency_tls_until_a_module_layout_is_available() {
+fn link_scope_preserves_dependency_tls_templates_for_the_runtime_module_layout() {
     use mochios_posix_client::pie::link_scope::{Object, Scope};
     let root = with_needed(symbol_image(1, false, false), &[b"dep"]);
     let root = Pie::parse_object(&root).unwrap();
@@ -831,10 +831,69 @@ fn link_scope_rejects_dependency_tls_until_a_module_layout_is_available() {
             bias: 0x30000000,
         },
     ];
-    assert!(matches!(
-        Scope::new(&objects, &mut [0; 2]),
-        Err(Error::Unsupported)
-    ));
+    let mut scratch = [0; 2];
+    let scope = Scope::new(&objects, &mut scratch).unwrap();
+    let template = dep.tls_template(objects[1].bias).unwrap().unwrap();
+    assert_eq!(template.source, 0x30001080);
+    assert!(template.memory_size > template.file_size);
+    assert_eq!(scope.order(), [0, 1]);
+}
+
+#[test]
+fn tls_relocations_validate_symbol_kind_bounds_local_module_and_missing_weak_definitions() {
+    use mochios_posix_client::pie::link_scope::{Object, Scope};
+    for kind in [16u32, 17, 18] {
+        let mut bytes = symbol_image(kind, false, false);
+        w16(&mut bytes, 56, 4);
+        segment(&mut bytes, 3, 7, 4, 0x1200, 0x1200, 16, 64);
+        w64(&mut bytes, 64 + 3 * 56 + 48, 16);
+        bytes[0x111c] = 0x16;
+        w64(&mut bytes, 0x1120, 8);
+        w64(&mut bytes, 0x1128, 4);
+        for local_module in [false, true] {
+            let mut bytes = bytes.clone();
+            if local_module {
+                w64(&mut bytes, 0x10a8, kind as u64);
+            }
+            let image = Pie::parse_object(&bytes).unwrap();
+            let objects = [Object {
+                name: b"root",
+                image: &image,
+                bias: 0x20000000,
+            }];
+            let mut scratch = [0];
+            let scope = Scope::new(&objects, &mut scratch).unwrap();
+            let mut output = vec![0; image.output_length().unwrap()];
+            scope.write(0, &mut output).unwrap();
+            let offset = if local_module { 0u64 } else { 8 };
+            let expected = match kind {
+                16 => 1,
+                17 => offset + 0x55,
+                18 => (offset + 0x55).wrapping_sub(64),
+                _ => unreachable!(),
+            };
+            assert_eq!(loaded_word(&output, 0x20001300), expected);
+        }
+        let mut invalid = bytes.clone();
+        w64(&mut invalid, 0x1120, 61);
+        assert!(matches!(Pie::parse_object(&invalid), Err(Error::Invalid)));
+        let mut invalid = bytes.clone();
+        invalid[0x111c] = 0x11;
+        assert!(matches!(Pie::parse_object(&invalid), Err(Error::Invalid)));
+        let mut undefined = bytes;
+        undefined[0x111c] = 0x26;
+        w16(&mut undefined, 0x111e, 0);
+        let image = Pie::parse_object(&undefined).unwrap();
+        let objects = [Object {
+            name: b"root",
+            image: &image,
+            bias: 0x20000000,
+        }];
+        let mut scratch = [0];
+        let scope = Scope::new(&objects, &mut scratch).unwrap();
+        let mut output = vec![0; image.output_length().unwrap()];
+        assert_eq!(scope.write(0, &mut output), Err(Error::Unsupported));
+    }
 }
 
 #[test]
