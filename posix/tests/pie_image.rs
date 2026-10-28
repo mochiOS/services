@@ -908,7 +908,7 @@ fn combined_scope_preserves_member_phdr_views_permissions_and_sparse_bss() {
 }
 
 #[test]
-fn combined_scope_requires_executable_root_and_room_for_global_metadata() {
+fn combined_scope_validates_entry_and_can_place_global_metadata_after_members() {
     use mochios_posix_client::pie::link_scope::{Object, Scope};
     let mut bytes = symbol_image(1, false, false);
     for (entry, bias) in [(0x1300, 0x20000000), (0x180, 0x401000)] {
@@ -921,9 +921,109 @@ fn combined_scope_requires_executable_root_and_room_for_global_metadata() {
         }];
         let mut order = [0];
         let scope = Scope::new(&objects, &mut order).unwrap();
-        assert_eq!(scope.bundle_length(), Err(Error::Invalid));
-        assert_eq!(scope.write_bundle(&mut [0; 8192]), Err(Error::Invalid));
+        if entry == 0x1300 {
+            assert_eq!(scope.bundle_length(), Err(Error::Invalid));
+            assert_eq!(scope.write_bundle(&mut [0; 8192]), Err(Error::Invalid));
+        } else {
+            let mut output = vec![0; scope.bundle_length().unwrap()];
+            scope.write_bundle(&mut output).unwrap();
+            assert_eq!(r64(&output, 64 + 16), 0x405000);
+        }
     }
+}
+
+fn fixed_image(copy_headers: bool) -> Vec<u8> {
+    let mut bytes = image();
+    w16(&mut bytes, 16, 2);
+    w64(&mut bytes, 24, 0x400180);
+    w64(&mut bytes, 64 + 16, 0x400000);
+    w64(&mut bytes, 64 + 56 + 16, 0x401000);
+    w64(&mut bytes, 64 + 112 + 16, 0x401000);
+    w64(&mut bytes, 0x1008, 0x401040);
+    w64(&mut bytes, 0x1040, 0x401200);
+    w64(&mut bytes, 0x1050, 0x400180);
+    if copy_headers {
+        bytes.resize(0x2200, 0);
+        w64(&mut bytes, 64 + 8, 0x2000);
+        let code = bytes[..0x200].to_vec();
+        bytes[0x2000..0x2200].copy_from_slice(&code);
+    }
+    bytes
+}
+
+#[test]
+fn fixed_roots_keep_addresses_and_expose_exact_source_headers_even_without_file_prefix() {
+    use mochios_posix_client::pie::link_scope::{Object, Scope};
+    for copy_headers in [false, true] {
+        let bytes = fixed_image(copy_headers);
+        assert!(matches!(Pie::parse(&bytes), Err(Error::Invalid)));
+        let image = Pie::parse_object(&bytes).unwrap();
+        assert!(image.is_fixed());
+        assert_eq!(image.placement(0x20000000).unwrap(), (0, 0x405000));
+        assert!(image.executable(4096).is_err());
+        let objects = [Object {
+            name: b"root",
+            image: &image,
+            bias: 0,
+        }];
+        let mut order = [0];
+        let scope = Scope::new(&objects, &mut order).unwrap();
+        let mut output = vec![0; scope.bundle_length().unwrap()];
+        scope.write_bundle(&mut output).unwrap();
+        assert_eq!(r64(&output, 24), 0x400180);
+        assert_eq!(loaded_word(&output, 0x401200), 0x400180);
+        let executable = image.executable(0).unwrap();
+        assert_eq!(executable.entry, 0x400180);
+        assert_eq!(executable.load_bias, 0);
+        assert_eq!(executable.program_header_count, 3);
+        assert_eq!(
+            executable.program_headers,
+            if copy_headers { 0x404120 } else { 0x400040 }
+        );
+        for offset in (0..3 * 56).step_by(8) {
+            assert_eq!(
+                loaded_word(&output, executable.program_headers + offset as u64),
+                r64(&bytes, 64 + offset)
+            );
+        }
+        assert_eq!(r64(&output, 64 + 16), 0x405000);
+        assert!(image.write(4096, &mut output).is_err());
+        let invalid = [Object {
+            name: b"root",
+            image: &image,
+            bias: 4096,
+        }];
+        assert!(Scope::new(&invalid, &mut order).is_err());
+    }
+}
+
+#[test]
+fn fixed_images_cannot_be_relocated_or_loaded_as_dependencies() {
+    use mochios_posix_client::pie::link_scope::{Object, Scope};
+    let root = with_needed(symbol_image(1, false, false), &[b"fixed"]);
+    let dependency = fixed_image(false);
+    let root = Pie::parse_object(&root).unwrap();
+    let dependency = Pie::parse_object(&dependency).unwrap();
+    let objects = [
+        Object {
+            name: b"root",
+            image: &root,
+            bias: 0x20000000,
+        },
+        Object {
+            name: b"fixed",
+            image: &dependency,
+            bias: 0,
+        },
+    ];
+    assert!(matches!(
+        Scope::new(&objects, &mut [0; 2]),
+        Err(Error::Invalid)
+    ));
+    let mut below = fixed_image(false);
+    w64(&mut below, 64 + 16, 0x200000);
+    let below = Pie::parse_object(&below).unwrap();
+    assert!(below.placement(0).is_err());
 }
 
 #[test]

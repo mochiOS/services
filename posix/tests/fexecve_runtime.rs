@@ -1430,3 +1430,139 @@ fn exec_embeds_resolved_lifecycle_plan_only_for_a_declared_runtime() {
         );
     });
 }
+
+#[test]
+fn fixed_executable_preparation_preserves_entry_bias_and_private_source_headers() {
+    let script =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/support/native_dynamic.ld");
+    let link = format!("-Wl,-T,{}", script.display());
+    let (root, library) = dependency_fixture(
+        &[
+            "-DMOCHIOS_LIFECYCLE_RUNTIME",
+            "-Wl,-no-pie,--no-dynamic-linker,--export-dynamic,-rpath,/libraries",
+            &link,
+        ],
+        &["-DMOCHIOS_LIFECYCLE_CALLBACKS"],
+    );
+    assert_eq!(u16::from_le_bytes(root[16..18].try_into().unwrap()), 2);
+    assert_eq!(
+        search_exec(&root, &[(b"/libraries/libscope.so", &library)], &[], 0, 0),
+        Err(ENOEXEC)
+    );
+    STATE.with_borrow(|state| {
+        assert_eq!(state.entered, 1);
+        assert!(!state.prepared.is_empty());
+        let image = mnu_abi::process_image::decode(&state.startup).unwrap();
+        let words: Vec<_> = image
+            .stack()
+            .chunks_exact(8)
+            .map(|word| u64::from_le_bytes(word.try_into().unwrap()))
+            .collect();
+        let auxiliary = |key| {
+            words[4..]
+                .chunks_exact(2)
+                .take_while(|pair| pair[0] != 0)
+                .find(|pair| pair[0] == key)
+                .unwrap()[1]
+        };
+        assert_eq!(
+            auxiliary(9),
+            u64::from_le_bytes(root[24..32].try_into().unwrap())
+        );
+        assert_eq!(
+            auxiliary(mochios_posix_client::process_image::AT_IMAGE_LOAD_BIAS),
+            0
+        );
+        let phdr = auxiliary(3);
+        let count = u16::from_le_bytes(state.prepared[56..58].try_into().unwrap()) as usize;
+        let source_offset = u64::from_le_bytes(root[32..40].try_into().unwrap()) as usize;
+        let source_length = u16::from_le_bytes(root[56..58].try_into().unwrap()) as usize * 56;
+        let header = state.prepared[64..64 + count * 56]
+            .chunks_exact(56)
+            .find(|header| {
+                let base = u64::from_le_bytes(header[16..24].try_into().unwrap());
+                let length = u64::from_le_bytes(header[32..40].try_into().unwrap());
+                header[0] == 1 && phdr >= base && phdr + source_length as u64 <= base + length
+            })
+            .unwrap();
+        assert_eq!(u32::from_le_bytes(header[4..8].try_into().unwrap()), 4);
+        let base = u64::from_le_bytes(header[16..24].try_into().unwrap());
+        let offset = (u64::from_le_bytes(header[8..16].try_into().unwrap()) + phdr - base) as usize;
+        assert_eq!(
+            &state.prepared[offset..offset + source_length],
+            &root[source_offset..source_offset + source_length]
+        );
+    });
+    for (offset, value) in [(32, u64::MAX), (48, 0), (48, 56u64 << 32)] {
+        let mut bad = root.clone();
+        bad[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
+        assert!(search_exec(&bad, &[], &[], 0, 0).is_err());
+        STATE.with_borrow(|state| assert_eq!(state.entered, 0));
+    }
+}
+
+#[test]
+fn static_fixed_image_keeps_the_original_native_exec_path() {
+    struct Temporary(std::path::PathBuf);
+    impl Drop for Temporary {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+    let temporary = Temporary(std::env::temp_dir().join(format!(
+            "mochios-static-exec-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        )));
+    std::fs::create_dir(&temporary.0).unwrap();
+    let output = temporary.0.join("root");
+    let result = std::process::Command::new("x86_64-elf-gcc")
+        .args([
+            "-O2",
+            "-fno-pic",
+            "-ffreestanding",
+            "-fno-stack-protector",
+            "-nostdlib",
+            "-static",
+            "-Wl,-no-pie,-e,_start,-z,noexecstack",
+        ])
+        .arg(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/elf_symbol_fixture.c"))
+        .arg("-o")
+        .arg(&output)
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let bytes = std::fs::read(output).unwrap();
+    assert_eq!(u16::from_le_bytes(bytes[16..18].try_into().unwrap()), 2);
+    for stride in [56usize, 64] {
+        let mut source = bytes.clone();
+        if stride != 56 {
+            let offset = u64::from_le_bytes(bytes[32..40].try_into().unwrap()) as usize;
+            let count = u16::from_le_bytes(bytes[56..58].try_into().unwrap()) as usize;
+            let expanded = source.len();
+            for entry in bytes[offset..offset + count * 56].chunks_exact(56) {
+                source.extend_from_slice(entry);
+                source.extend_from_slice(&[0xa5; 8]);
+            }
+            source[32..40].copy_from_slice(&(expanded as u64).to_le_bytes());
+            source[54..56].copy_from_slice(&(stride as u16).to_le_bytes());
+        }
+        assert_eq!(search_exec(&source, &[], &[], 0, 0), Err(ENOEXEC));
+        STATE.with_borrow(|state| {
+            assert_eq!(state.entered, 1);
+            assert!(state.prepared.is_empty() && state.library_paths.is_empty());
+            assert!(
+                !state.closed.contains(&19)
+                    && !state.closed.contains(&28)
+                    && !state.closed.contains(&29)
+            );
+        });
+    }
+}

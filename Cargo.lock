@@ -1651,6 +1651,9 @@ dependencies = [
  "mochios-posix-client",
  "mochios-posix-protocol",
  "mochios-workspace-protocol",
+ "serde",
+ "serde_json",
+ "sha2",
  "zeroize",
 ]
 

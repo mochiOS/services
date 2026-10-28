@@ -86,6 +86,10 @@ void lifecycle_init(void) { lifecycle_record(INIT); }
 void lifecycle_fini(void) { lifecycle_record(FINI); }
 __attribute__((constructor(101))) static void initialize_first(void) {
   lifecycle_record(FIRST);
+#ifdef LIFECYCLE_CRT
+  extern void lifecycle_checkpoint(char);
+  lifecycle_checkpoint(FIRST);
+#endif
 }
 __attribute__((constructor(202))) static void initialize_second(void) {
   lifecycle_record(SECOND);
