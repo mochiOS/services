@@ -7,12 +7,13 @@ use mochios_net_device_protocol::{InterfaceInfo, StackStatistics};
 use mochios_network_stack::{
     ARP_LEN, ARP_REPLY, ARP_REQUEST, ArpCache, ArpEntry, ArpPacket, BROADCAST_MAC,
     DHCP_CLIENT_PORT, DHCP_SERVER_PORT, DNS_MAX_MESSAGE_LEN, DNS_PORT, DhcpClient, DhcpMessageType,
-    DhcpState, DnsCache, DnsError, DnsErrorKind, DnsName, DnsResponseCode, DnsRetry,
+    DhcpState, DnsCache, DnsError, DnsErrorKind, DnsName, DnsRecordName, DnsRecordType,
+    DnsRecordValue, DnsResponseCode, DnsRetry,
     DnsRetryAction, ETHERTYPE_ARP, ETHERTYPE_IPV4, EchoPacket, EthernetHeader, Ipv4Config,
     Ipv4Header, PacketError, TCP_PROTOCOL, TcpConnection, TcpConnectionError,
     TcpReceiveResult, TcpSegment, TcpState, TcpTransmit, TcpTuple, UdpDatagram, UdpEndpoint, UdpSocketId,
     UdpSocketTable,
-    decode_dns_response, decode_reply, encode_dns_query, encode_request, next_hop,
+    decode_dns_records, decode_reply, encode_dns_query, encode_request, next_hop,
     parse_ipv4_literal,
 };
 
@@ -697,6 +698,7 @@ impl NetworkStack {
             .port;
         let mut query = [0u8; DNS_MAX_MESSAGE_LEN];
         let query_length = encode_dns_query(transaction_id, name, &mut query).map_err(dns_errno)?;
+        let question_name = DnsRecordName::from(name);
         let mut retry = DnsRetry::new(started, timeout, DNS_RETRY_DELAY, DNS_RETRY_LIMIT);
         loop {
             let now = platform::time::ticks().map_err(|error| error.raw().unsigned_abs())?;
@@ -739,26 +741,36 @@ impl NetworkStack {
                 {
                     continue;
                 }
-                match decode_dns_response(&packet.payload, transaction_id, name) {
-                    Ok(answer) => {
+                match decode_dns_records(
+                    &packet.payload,
+                    transaction_id,
+                    &question_name,
+                    DnsRecordType::A,
+                ) {
+                    Ok(records) => {
+                        let address = match records.values().first() {
+                            Some(DnsRecordValue::Ipv4(address)) => *address,
+                            _ => return Err(dns_errno(DnsError::UnsupportedRecord)),
+                        };
                         platform::logln!(
                             "network.service: DNS response received name={}",
                             name.as_str()
                         );
                         self.dns_cache
-                            .insert(name, answer.address, answer.ttl_seconds, now)
+                            .insert_records(&records, now)
                             .map_err(dns_errno)?;
                         platform::logln!(
                             "network.service: DNS resolved name={} address={}.{}.{}.{}",
                             name.as_str(),
-                            answer.address[0],
-                            answer.address[1],
-                            answer.address[2],
-                            answer.address[3]
+                            address[0],
+                            address[1],
+                            address[2],
+                            address[3]
                         );
-                        return Ok(answer.address);
+                        return Ok(address);
                     }
                     Err(DnsError::TransactionMismatch)
+                    | Err(DnsError::QuestionMismatch)
                     | Err(DnsError::Response(DnsResponseCode::ServerFailure)) => continue,
                     Err(error) => {
                         self.stats.dns_failures = self.stats.dns_failures.saturating_add(1);
@@ -1143,10 +1155,13 @@ fn dns_errno(error: DnsError) -> u64 {
     match error {
         DnsError::Response(DnsResponseCode::NameError) => mochi_user_syscall::ENOENT,
         DnsError::Response(DnsResponseCode::ServerFailure)
+        | DnsError::TruncatedResponse
         | DnsError::Timeout
         | DnsError::RetryLimit => mochi_user_syscall::EAGAIN,
         DnsError::CacheCapacity => mochi_user_syscall::ENOMEM,
-        DnsError::UnsupportedRecord => mochios_net_device_protocol::STATUS_UNSUPPORTED_RECORD as i64 as u64,
+        DnsError::UnsupportedRecord => {
+            mochios_net_device_protocol::STATUS_UNSUPPORTED_RECORD as i64 as u64
+        }
         _ => mochi_user_syscall::EINVAL,
     }
 }

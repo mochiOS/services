@@ -1726,7 +1726,6 @@ dependencies = [
 [[package]]
 name = "mochios-http-client"
 version = "0.1.0"
-source = "git+https://github.com/mochiOS/syscalls#38b10ca1d8b95d8ad638e24a2f83adae6aa17034"
 
 [[package]]
 name = "mochios-keychain-protocol"

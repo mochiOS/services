@@ -75,6 +75,9 @@ mod driver {
             panic!("configuration failure must not transmit")
         }
         pub(crate) fn receive(&mut self) -> Result<Option<Vec<u8>>, u64> {
+            if crate::MODE.with(|mode| mode.get()) == 7 {
+                return Ok(None);
+            }
             panic!("configuration failure must not poll devices")
         }
         pub(crate) fn statistics(&mut self) -> Result<DeviceStatistics, u64> {
@@ -506,5 +509,6 @@ mod production {
         assert!(stack.udp.unbind_endpoint(socket));
     }
     include!("support/routed_tcp_cases.rs");
+    include!("support/dns_routing_cases.rs");
 
 }
