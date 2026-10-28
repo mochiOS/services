@@ -116,6 +116,9 @@ mod byte_path_protocol;
 #[path = "support/open_request.rs"]
 mod open_request;
 
+#[path = "support/read_scope.rs"]
+mod read_scope;
+
 #[path = "support/path_query.rs"]
 mod path_query;
 
@@ -1457,6 +1460,7 @@ struct RecordingFilesystem {
     root_credentials: Option<(u32, u32, Vec<u32>)>,
     root_error: Option<i32>,
     root_base: Option<u32>,
+    open_rights: Option<u64>,
     admission_calls: Vec<(u16, Option<AttachedObject<u32>>)>,
     admission_response: Option<Result<OpenedObject<u32>, i32>>,
     fifo_pending: Option<(OpenedObject<u32>, OpenedObject<u32>)>,
@@ -1769,7 +1773,7 @@ impl FilesystemBackend<u32> for RecordingFilesystem {
         self.directory = paths.base;
         Ok(OpenedObject {
             handle: 200,
-            rights: 0x81,
+            rights: self.open_rights.unwrap_or(0x81),
         })
     }
 

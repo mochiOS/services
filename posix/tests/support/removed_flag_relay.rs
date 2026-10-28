@@ -9,6 +9,7 @@ fn request_recognition_agrees_with_all_exported_operations_and_excludes_response
     let source = include_str!("../../../../user/crates/posix-protocol/src/lib.rs");
     let assigned: std::collections::BTreeSet<u16> = source
         .lines()
+        .chain(include_str!("../../../../user/crates/posix-protocol/src/read_scope.rs").lines())
         .filter_map(|line| {
             let line = line.strip_prefix("pub const OP_")?;
             let (name, value) = line.split_once(": u16 = ")?;

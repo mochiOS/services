@@ -246,6 +246,7 @@ fn main() {
     let mut clock_failure_reported = false;
     let mut request_bytes = vec![0u8; protocol::MAX_MESSAGE_LEN];
     let mut response_bytes = vec![0u8; protocol::MAX_MESSAGE_LEN];
+    let mut read_scopes = posix_service::read_scope::Registry::default();
     loop {
         let mut service = service_state.lock().unwrap();
         let mut clock_failed = false;
@@ -445,6 +446,41 @@ fn main() {
         };
         let sender = message >> 32;
         let length = (message & 0xffff_ffff) as usize;
+        if let Some(bytes) = request_bytes.get(..length)
+            && bytes.starts_with(&mnu_abi::provider::MAGIC.to_le_bytes())
+        {
+            // Only native final-reference delivery can retire a scope. A
+            // regular IPC sender cannot forge a release by guessing its ID.
+            let result = read_scopes.release_native(
+                bytes, received_handles.delivery_flags, received_handles.count as usize,
+                &mut filesystem,
+            );
+            for attachment in received_handles.handles.iter().take(received_handles.count as usize) {
+                let _ = platform::handle::close(attachment.handle);
+            }
+            if let Ok((header, _)) = mnu_abi::provider::RequestHeader::decode(bytes) {
+                if !(received_handles.delivery_flags == mnu_abi::IPC_DELIVERY_NATIVE_OBJECT
+                    && header.opcode == mnu_abi::provider::OP_RELEASE)
+                {
+                    let response = mnu_abi::provider::ResponseHeader {
+                        opcode: header.opcode, object_id: header.object_id,
+                        status: result.err().unwrap_or(protocol::STATUS_EPERM) as i64,
+                        value: 0, data_length: 0,
+                    };
+                    if let Ok(length) = response.encode(&[], &mut response_bytes) {
+                        let _ = platform::ipc::reply(sender, &response_bytes[..length]);
+                    }
+                }
+            } else {
+                // Malformed ordinary calls still need a reply. Never leave
+                // a sender blocked simply because it supplied provider magic.
+                let response = invalid_response(0);
+                if let Ok(length) = protocol::encode(response.header, &[], &mut response_bytes) {
+                    let _ = platform::ipc::reply(sender, &response_bytes[..length]);
+                }
+            }
+            continue;
+        }
         let attached_count = (received_handles.count as usize).min(received_handles.handles.len());
         let attachments_valid = attached_count == received_handles.count as usize
             && received_handles
@@ -823,7 +859,16 @@ fn main() {
         let prepared_filesystem = if let (Some(peer), Some((header, payload)), true) =
             (peer, decoded, attachments_valid)
         {
-            if header.opcode == protocol::OP_OPEN_AT && request_image.is_some() {
+            if posix_service::read_scope::supports(header.opcode) && request_image.is_some() {
+                Some(read_scopes.execute(
+                    &service_state, peer, header, payload, &attachments, &mut filesystem,
+                    |id| platform::handle::create_provider_object(
+                        endpoint_handle, id, protocol::read_scope::TOKEN_RIGHTS,
+                    ).map_err(|error| protocol::status::normalize_failure(error.raw())),
+                    |handle| platform::handle::identify_provider_object(handle)
+                        .map_err(|error| protocol::status::normalize_failure(error.raw())),
+                ))
+            } else if header.opcode == protocol::OP_OPEN_AT && request_image.is_some() {
                 Some(posix_service::open_request::execute(
                     &service_state,
                     peer,

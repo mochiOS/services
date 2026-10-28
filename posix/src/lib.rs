@@ -53,6 +53,7 @@ pub mod filesystem_metadata;
 pub mod mutation_admission;
 mod open_flags;
 pub mod open_request;
+pub mod read_scope;
 mod path_request;
 pub mod path_query;
 pub mod path_mutation;
@@ -3955,6 +3956,9 @@ impl<H: Copy> PosixService<H> {
             | protocol::OP_UMASK_SET
             | protocol::OP_GROUPS_GET
             | protocol::OP_OPEN_AT
+            | protocol::read_scope::OP_CREATE
+            | protocol::read_scope::OP_INFO
+            | protocol::read_scope::OP_OPEN
             | protocol::OP_STAT_AT
             | protocol::OP_CANONICAL_PATH_AT
             | protocol::OP_PATH_LIMITS_AT
