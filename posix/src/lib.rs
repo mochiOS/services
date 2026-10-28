@@ -33,6 +33,7 @@ pub mod account_bootstrap;
 pub mod account_lookup;
 mod system_identity;
 pub mod inet_datagram;
+pub mod inet_stream;
 pub mod inet_socket;
 #[cfg(target_os = "mochios")]
 pub mod inet_datagram_native;
