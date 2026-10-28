@@ -14,6 +14,9 @@ mod scoped_launch;
 #[cfg(all(target_os = "mochios", mochios_scoped_application_263))]
 #[path = "native_scoped_application.rs"]
 mod scoped_application;
+#[cfg(all(target_os = "mochios", mochios_shared_package_264))]
+#[path = "native_shared_package.rs"]
+mod shared_package;
 // Executed only by a diagnostic manager after authenticated endpoint handoff.
 // The diagnostic manifest alone adds net.connect; normal manager gets none.
 #[cfg(target_os = "mochios")]
@@ -39,6 +42,12 @@ pub fn run(posix: u32, network: u32) {
         });
     }
     p::io::stdout(b"inet-socket: starting native factory/Provider checks\n").unwrap();
+    #[cfg(mochios_shared_package_264)]
+    {
+        shared_package::run(posix);
+        unsafe { alarm(0); }
+        return;
+    }
     #[cfg(mochios_scoped_application_263)]
     {
         scoped_application::run(posix);

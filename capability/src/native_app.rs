@@ -117,6 +117,7 @@ pub(crate) fn launch(
     scope: ObjectHandleAttachment<u32>,
     verified: VerifiedManifest,
     capabilities: &[String],
+    load_library: impl FnMut(&str) -> Result<VerifiedManifest, Error>,
 ) -> Result<u64, Error> {
     let mut random = [0; 16];
     if platform::syscall::call2(
@@ -147,7 +148,7 @@ pub(crate) fn launch(
             .binary(path)
             .is_some_and(|binary| binary.file.is_some());
     let catalog = if bound_root {
-        Catalog::new(verified, path)?
+        Catalog::resolve(verified, path, load_library)?
     } else {
         Catalog::for_static(verified, path, &crate::persistent_grant::read_file(path)?)?
     };

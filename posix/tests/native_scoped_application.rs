@@ -19,7 +19,13 @@ unsafe extern "C" {
 const BASE: &str = "/tmp/scoped-application-263";
 const APP: &str = "/system/applications/ScopeDynamic.app/entry.elf";
 
-fn launch(service: u32, posix: u32, scope: Object<u32>, path: &str, case: u8) -> (i64, u64) {
+pub(super) fn launch(
+    service: u32,
+    posix: u32,
+    scope: Object<u32>,
+    path: &str,
+    case: u8,
+) -> (i64, u64) {
     let parent = p::process::current_execution_identity().unwrap().process_id;
     let mut request = vec![0; 24];
     request[..4].copy_from_slice(&0x4150_5053u32.to_le_bytes());

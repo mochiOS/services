@@ -1,5 +1,7 @@
 use super::*;
 use mochios_posix_client::image_preparation::Source;
+#[path = "library_package_dependencies.rs"]
+mod external;
 
 const APP: &str = "/applications/Test.app/entry.elf";
 const LIB: &str = "/applications/Test.app/lib/library.so";

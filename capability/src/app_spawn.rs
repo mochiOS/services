@@ -237,6 +237,12 @@ pub(crate) fn spawn_application_from_manifest(
         scope,
         verified,
         &caps,
+        |package_id| {
+            let record = index.by_package.get(package_id).ok_or_else(|| {
+                mochi_user_syscall::SysError::from_raw(mochi_user_syscall::ENOENT as i64)
+            })?;
+            verified_manifest(&record.manifest_path, crate::persistent_grant::read_file)
+        },
     )
 }
 

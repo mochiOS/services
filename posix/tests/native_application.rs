@@ -12,7 +12,13 @@ mod production;
 // These tests exercise startup encoding only. The actual application launch
 // boundary, including package policy, is covered by the native IPC probe.
 mod resolver {
-    pub(crate) struct ApplicationIdentity;
+    #[derive(Clone)]
+    pub(crate) struct ApplicationIdentity {
+        pub package_id: String,
+        pub developer_id: String,
+        pub subject_key_id: [u8; 32],
+        pub provenance: mochios_signature_protocol::InstallProvenance,
+    }
     pub(crate) struct VerifiedManifest {
         pub manifest: mochi_user_platform::package::PackageManifest,
         pub identity: ApplicationIdentity,
