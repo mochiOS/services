@@ -450,7 +450,7 @@ fn native_timeout_is_not_reaped_by_legacy_ticks_and_invalid_failures_stay_negati
     assert_eq!(stack.tcp.status(client), Err(-9));
     assert_eq!(
         crate::status::failure_status(1u64 << 63),
-        -(mochi_user_syscall::EIO as i32)
+        -5
     );
 }
 
