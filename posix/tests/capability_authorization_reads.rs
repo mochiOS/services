@@ -179,3 +179,19 @@ fn modified_manifest_and_missing_provenance_still_deny_authorization() {
     );
     assert!(!decision.is_allowed());
 }
+
+#[test]
+fn capability_allowance_and_manifest_policy_are_one_authenticated_snapshot() {
+    let original = fixture();
+    let snapshot = resolver::verified_manifest(MANIFEST, read_file).unwrap();
+    FILES.with_borrow_mut(|files| {
+        files.error = Some(syscall::SysError::from_raw(syscall::EIO as i64))
+    });
+    let decision = snapshot.decide_capabilities(BINARY).unwrap();
+    assert!(decision.is_allowed());
+    assert_eq!(
+        decision.requested,
+        original.binary_requires(BINARY).unwrap()
+    );
+    FILES.with_borrow(|files| assert_eq!(files.reads, [RECORD, MANIFEST]));
+}

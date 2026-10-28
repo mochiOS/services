@@ -326,6 +326,166 @@ fn capture_and_publication_failures_release_every_partial_reference() {
 }
 
 #[test]
+fn executable_open_checks_captured_identity_without_adding_object_authority() {
+    let (state, peer, mut fs, mut scopes) = setup();
+    let id = create(&state, peer, &mut fs, &mut scopes);
+    identity(&state, peer, protocol::OP_SET_EFFECTIVE_UID, 0);
+    let options = protocol::OPEN_READ | protocol::OPEN_NONBLOCK | protocol::OPEN_EXECUTE;
+    let reply = invoke(
+        &state,
+        peer,
+        &mut fs,
+        &mut scopes,
+        id,
+        wire::OP_OPEN,
+        &path(protocol::OpenBase::ProcessRoot, options),
+    );
+    assert_eq!(reply.response.header.status, 0);
+    assert_eq!(reply.handles[0].rights, wire::FILE_RIGHTS);
+    let request = fs.request.as_ref().unwrap();
+    assert_eq!(request.options, options);
+    assert_eq!((request.effective_uid, request.effective_gid), (501, 20));
+    assert_eq!(request.supplementary_groups, [20, 42]);
+    assert_eq!(fs.retained.last().unwrap().rights, wire::FILE_RIGHTS);
+}
+
+#[test]
+fn source_metadata_reports_the_captured_owner_and_rejects_subject_selectors() {
+    let (state, peer, mut fs, mut scopes) = setup();
+    let id = create(&state, peer, &mut fs, &mut scopes);
+    identity(&state, peer, protocol::OP_SET_EFFECTIVE_UID, 0);
+    let receiver = PeerIdentity {
+        process_id: 999,
+        effective_uid: 0,
+        effective_gid: 0,
+    };
+    let reply = invoke(
+        &state,
+        receiver,
+        &mut fs,
+        &mut scopes,
+        id,
+        wire::OP_SOURCE_INFO,
+        &[],
+    );
+    assert_eq!(reply.response.header.status, 0);
+    assert!(reply.handles.is_empty());
+    let info = wire::decode_source_info(&reply.response.payload).unwrap();
+    assert_eq!(info.process_id, peer.process_id);
+    assert_eq!(
+        (info.session.effective_uid, info.session.effective_gid),
+        (501, 20)
+    );
+    let forged = receiver.process_id.to_le_bytes();
+    let reply = invoke(
+        &state,
+        receiver,
+        &mut fs,
+        &mut scopes,
+        id,
+        wire::OP_SOURCE_INFO,
+        &forged,
+    );
+    assert_eq!(reply.response.header.status, STATUS_EINVAL);
+    assert!(reply.handles.is_empty() && fs.request.is_none());
+}
+
+struct SourceReply {
+    fault: u8,
+    closed: RefCell<Vec<u32>>,
+}
+impl Transport for SourceReply {
+    type Error = ();
+    fn call(&self, _: &[u8], _: &mut [u8]) -> Result<usize, ()> {
+        panic!("scope attachment required")
+    }
+}
+impl ObjectTransport for SourceReply {
+    type Handle = u32;
+    fn close_received_handle(&self, handle: u32) {
+        self.closed.borrow_mut().push(handle);
+    }
+    fn call_with_handles(
+        &self,
+        request: &[u8],
+        response: &mut [u8],
+        objects: &mut ObjectHandles<u32>,
+    ) -> Result<usize, ()> {
+        let (header, payload) = protocol::decode(request).unwrap();
+        assert_eq!(header.opcode, wire::OP_SOURCE_INFO);
+        assert!(payload.is_empty());
+        assert_eq!(objects.len(), 1);
+        assert_eq!(
+            objects.get(0).unwrap(),
+            ObjectHandleAttachment {
+                handle: 900,
+                rights: wire::ATTACH_RIGHTS
+            }
+        );
+        objects.clear();
+        if self.fault == 1 {
+            objects
+                .push(ObjectHandleAttachment {
+                    handle: 77,
+                    rights: wire::FILE_RIGHTS,
+                })
+                .unwrap();
+        }
+        let mut bytes = [0; wire::SOURCE_INFO_LEN];
+        wire::encode_source_info(
+            wire::SourceInfo {
+                process_id: 259,
+                session: protocol::SessionInfo {
+                    effective_uid: 501,
+                    ..Default::default()
+                },
+            },
+            &mut bytes,
+        )
+        .unwrap();
+        if self.fault == 2 {
+            bytes[..8].fill(0);
+        }
+        protocol::encode(
+            protocol::Header {
+                opcode: protocol::OP_STATUS,
+                request_id: header.request_id,
+                payload_len: bytes.len() as u32,
+                flags: if self.fault == 3 { 1 } else { 0 },
+                ..Default::default()
+            },
+            &bytes,
+            response,
+        )
+        .map_err(|_| ())
+    }
+}
+
+#[test]
+fn client_accepts_only_scalar_authenticated_source_metadata_and_cleans_excess_handles() {
+    for fault in 0..4 {
+        let client = Client::new(SourceReply {
+            fault,
+            closed: RefCell::new(Vec::new()),
+        });
+        let result = client.read_scope_source_info(ObjectHandleAttachment {
+            handle: 900,
+            rights: wire::TOKEN_RIGHTS,
+        });
+        if fault == 0 {
+            let info = result.unwrap();
+            assert_eq!((info.process_id, info.session.effective_uid), (259, 501));
+        } else {
+            assert!(result.is_err());
+        }
+        assert_eq!(
+            *client.transport().closed.borrow(),
+            if fault == 1 { vec![77] } else { vec![] }
+        );
+    }
+}
+
+#[test]
 fn scope_open_rejects_mutation_directory_injection_and_missing_nonblock_before_fs() {
     let (state, peer, mut fs, mut scopes) = setup();
     let id = create(&state, peer, &mut fs, &mut scopes);
@@ -333,7 +493,7 @@ fn scope_open_rejects_mutation_directory_injection_and_missing_nonblock_before_f
         protocol::OPEN_READ,
         protocol::OPEN_WRITE,
         protocol::OPEN_READ | protocol::OPEN_NONBLOCK | protocol::OPEN_CREATE,
-        protocol::OPEN_READ | protocol::OPEN_NONBLOCK | protocol::OPEN_EXECUTE,
+        protocol::OPEN_EXECUTE | protocol::OPEN_NONBLOCK,
         protocol::OPEN_READ | protocol::OPEN_NONBLOCK | protocol::OPEN_DIRECTORY,
     ] {
         let response = invoke(

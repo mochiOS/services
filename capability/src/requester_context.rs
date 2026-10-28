@@ -45,6 +45,21 @@ impl Default for RequesterContext {
     }
 }
 
+/// `captured` comes from the authenticated scope endpoint, not request bytes.
+/// Check its source against the native IPC owner before using its credentials
+/// for prompts or grants. A later child registration rechecks live state.
+pub(crate) fn scope_session(
+    requester: &RequesterContext,
+    captured: mochios_posix_protocol::read_scope::SourceInfo,
+) -> Result<SessionInfo, platform::syscall::SysError> {
+    if captured.process_id == 0 || captured.process_id != requester.process_id {
+        return Err(platform::syscall::SysError::from_raw(
+            mochios_posix_protocol::STATUS_EPERM as i64,
+        ));
+    }
+    Ok(captured.session)
+}
+
 /// Authenticate the process object before requesting its POSIX credentials.
 /// The native record carries no POSIX credential fields.
 pub(crate) fn read(

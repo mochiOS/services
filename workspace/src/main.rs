@@ -2189,8 +2189,8 @@ fn launch_application(application: &InstalledApplication) -> Result<u64, u64> {
 }
 
 fn launch_executable(executable: &str, arguments: &[String]) -> Result<u64, u64> {
-    let service = platform::process::find_by_name(CAPABILITY_SERVICE_NAME)
-        .map_err(error::native_errno)?;
+    let service =
+        platform::process::find_by_name(CAPABILITY_SERVICE_NAME).map_err(error::native_errno)?;
     if service == 0 {
         return Err(error::status_errno(mochi_user_syscall::ENOENT as i64));
     }
@@ -2220,16 +2220,28 @@ fn launch_executable(executable: &str, arguments: &[String]) -> Result<u64, u64>
         request[cursor..cursor + item.len()].copy_from_slice(item.as_bytes());
         cursor += item.len() + 1;
     }
-    let mut reply = [0u8; 16];
-    let mut handles = platform::ipc::IpcObjectHandles::default();
-    handles.count = 1;
-    handles.handles[0].handle = posix_endpoint;
-    handles.handles[0].rights = posix_rights;
     let destination = u32::try_from(service).map_err(|_| {
         error::status_errno(mochi_user_syscall::NativeError::LimitExceeded.into_raw() as i64)
     })?;
-    let message = platform::ipc::call_object_handles(destination, &request, &mut reply, &mut handles)
-        .map_err(error::native_errno)?;
+    let client = mochios_posix_client::Client::new(
+        mochios_posix_client::SyscallEndpointTransport::new(posix_endpoint),
+    );
+    let scope = client.create_read_scope().map_err(|error| match error {
+        mochios_posix_client::ClientError::Transport(error) => error::native_errno(error),
+        mochios_posix_client::ClientError::Remote(status) => error::status_errno(status as i64),
+        _ => error::status_errno(mochi_user_syscall::EIO as i64),
+    })?;
+    let mut reply = [0u8; 16];
+    let mut handles = platform::ipc::IpcObjectHandles::default();
+    handles.count = 2;
+    handles.handles[0].handle = posix_endpoint;
+    handles.handles[0].rights = posix_rights;
+    handles.handles[1].handle = scope.handle;
+    handles.handles[1].rights = mochios_posix_protocol::read_scope::ATTACH_RIGHTS;
+    let message =
+        platform::ipc::call_object_handles(destination, &request, &mut reply, &mut handles);
+    let _ = platform::handle::close(scope.handle);
+    let message = message.map_err(error::native_errno)?;
     if handles.count != 0 || (message & 0xffff_ffff) as usize != reply.len() {
         for attachment in handles.handles.iter().take(handles.count as usize) {
             let _ = platform::handle::close(attachment.handle);

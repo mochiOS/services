@@ -1,11 +1,40 @@
 extern crate alloc;
 #[allow(dead_code)]
+#[path = "../../capability/src/app_image.rs"]
+mod app_image;
+#[allow(dead_code)]
+#[path = "../../capability/src/image_catalog.rs"]
+mod image_catalog;
+#[allow(dead_code)]
 #[path = "../../capability/src/native_app.rs"]
 mod production;
+
+// These tests exercise startup encoding only. The actual application launch
+// boundary, including package policy, is covered by the native IPC probe.
+mod resolver {
+    pub(crate) struct ApplicationIdentity;
+    pub(crate) struct VerifiedManifest {
+        pub manifest: mochi_user_platform::package::PackageManifest,
+        pub identity: ApplicationIdentity,
+    }
+    pub(crate) fn authorize_spawn_image(
+        _: u64,
+        _: &str,
+        _: &ApplicationIdentity,
+        _: &[String],
+        _: mochi_user_platform::service::ExecutionClass,
+        _: &[u8],
+    ) -> Result<(), mochi_user_platform::syscall::SysError> {
+        panic!("metadata tests must not authorize native images")
+    }
+}
 
 mod persistent_grant {
     use mochi_user_platform as platform;
     use mochios_posix_client::{Client, ClientError, EndpointTransport};
+    pub fn read_file(_: &str) -> Result<Vec<u8>, platform::syscall::SysError> {
+        panic!("metadata tests must not read native files")
+    }
     pub fn with_client<T>(
         _: impl FnOnce(
             &Client<EndpointTransport>,
@@ -174,9 +203,10 @@ fn full_executable_identity_is_not_limited_by_the_display_label() {
 fn application_launch_uses_native_creation_and_registers_before_resume() {
     let source = include_str!("../../capability/src/native_app.rs");
     assert!(
-        source.find("register_launched_child(").unwrap() < source.find("resume_handle(").unwrap()
+        source.find("register_launched_child_in_scope(").unwrap()
+            < source.find("resume_handle(").unwrap()
     );
-    assert!(source.contains("create_stopped(image.0, &metadata)"));
+    assert!(source.contains("create_stopped(image, &metadata)"));
     assert!(source.contains("terminate_handle(process.0, 127)"));
     assert!(source.contains("process_id != expected_requester"));
     let spawn = include_str!("../../capability/src/app_spawn.rs");

@@ -99,6 +99,44 @@ pub mod process {
 mod production;
 
 #[test]
+fn scope_credentials_are_bound_to_the_native_sender_before_grant_policy() {
+    let requester = production::RequesterContext {
+        process_id: 31,
+        ..Default::default()
+    };
+    let scope = mochios_posix_protocol::read_scope::SourceInfo {
+        process_id: 31,
+        session: SessionInfo {
+            effective_uid: 501,
+            effective_gid: 20,
+            ..Default::default()
+        },
+    };
+    assert_eq!(
+        production::scope_session(&requester, scope).unwrap(),
+        scope.session
+    );
+    assert_eq!(
+        requester.effective_uid, 0,
+        "the broker must not substitute a current credential observation"
+    );
+    for process_id in [0, 32] {
+        assert_eq!(
+            production::scope_session(
+                &requester,
+                mochios_posix_protocol::read_scope::SourceInfo {
+                    process_id,
+                    ..scope
+                }
+            ),
+            Err(syscall::SysError::from_raw(
+                mochios_posix_protocol::STATUS_EPERM as i64
+            ))
+        );
+    }
+}
+
+#[test]
 fn credentials_never_fall_back_to_native_root_and_every_acquired_handle_is_closed() {
     let info = production::read(12, |object| {
         assert_eq!(

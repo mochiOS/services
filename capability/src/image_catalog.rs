@@ -82,6 +82,40 @@ fn image(
 }
 
 impl Catalog {
+    /// Existing static packages have no per-file table. Preserve their trusted
+    /// installed-path policy by pinning the broker's captured bytes. Never use
+    /// this rule for a dynamic root or for libraries chosen by the requester.
+    pub(crate) fn for_static(
+        verified: VerifiedManifest,
+        root_path: &str,
+        trusted: &[u8],
+    ) -> Result<Self, syscall::SysError> {
+        let manifest = &verified.manifest;
+        let binary = manifest.binary(root_path).ok_or_else(denied)?;
+        if binary.file.is_some() || !manifest.files.is_empty() {
+            return Self::new(verified, root_path);
+        }
+        if manifest.package_kind.as_deref() != Some("application")
+            || binary.kind.as_deref() != Some("application")
+            || !absolute(root_path)
+            || trusted.get(..7) != Some(&[0x7f, b'E', b'L', b'F', 2, 1, 1])
+            || trusted.get(16..18) != Some(&2u16.to_le_bytes())
+            || mochios_posix_client::image_preparation::needs_preparation_bytes(trusted)
+                .map_err(|_| denied())?
+        {
+            return Err(denied());
+        }
+        Ok(Self {
+            root: Image {
+                path: root_path.into(),
+                size: trusted.len() as u64,
+                digest: Sha256::digest(trusted).into(),
+            },
+            libraries: Vec::new(),
+            identity: verified.identity,
+        })
+    }
+
     pub(crate) fn new(
         verified: VerifiedManifest,
         root_path: &str,

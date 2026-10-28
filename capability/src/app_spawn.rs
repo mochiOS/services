@@ -8,9 +8,7 @@ use crate::dynamic_grant::{is_trusted_prompt_broker, prompt_shell_for_capability
 use crate::package_index::PackageIndex;
 use crate::persistent_grant::{append_persistent_grant, has_persistent_grant};
 use crate::policy::{AppPromptPolicy, needs_app_prompt};
-use crate::resolver::{
-    CapabilityDenyReason, application_identity, authorize_spawn, decide_binary_capabilities,
-};
+use crate::resolver::{CapabilityDenyReason, verified_manifest};
 
 pub(crate) const SPAWN_APP_OPCODE: u32 = 0x4150_5053;
 use mochios_posix_client::launch_arguments::ENVIRONMENT_PREFIX;
@@ -52,6 +50,7 @@ pub(crate) fn spawn_application_from_manifest(
     sender: u64,
     buf: &[u8],
     posix_endpoint: platform::handle::Handle,
+    scope: mochios_posix_client::ObjectHandleAttachment<u32>,
 ) -> Result<u64, mochi_user_syscall::SysError> {
     crate::persistent_grant::validate_posix_endpoint(posix_endpoint)?;
     if buf.len() <= core::mem::size_of::<SpawnAppRequestHeader>() || index.duplicate {
@@ -87,10 +86,11 @@ pub(crate) fn spawn_application_from_manifest(
         .by_binary
         .get(entry_path)
         .ok_or_else(|| mochi_user_syscall::SysError::from_raw(mochi_user_syscall::ENOENT as i64))?;
-    let manifest = crate::runtime_manifest::read_manifest(
+    let verified = verified_manifest(
         &manifest_record.manifest_path,
         crate::persistent_grant::read_file,
     )?;
+    let manifest = &verified.manifest;
     let binary = manifest
         .binary(entry_path)
         .ok_or_else(|| mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64))?;
@@ -100,22 +100,16 @@ pub(crate) fn spawn_application_from_manifest(
         ));
     }
 
-    let mut capability_decision = decide_binary_capabilities(
-        &manifest,
-        &manifest_record.manifest_path,
-        entry_path,
-        crate::persistent_grant::read_file,
-    )?;
+    let mut capability_decision = verified.decide_capabilities(entry_path)?;
     let requested_caps = capability_decision.requested.clone();
-    let identity = application_identity(
-        &manifest,
-        &manifest_record.manifest_path,
-        crate::persistent_grant::read_file,
-    )?;
+    let identity = &verified.identity;
     let requester_context = crate::persistent_grant::requester_context(sender)?;
+    let captured =
+        crate::persistent_grant::with_client(|client| client.read_scope_source_info(scope))?;
+    let scope_session = crate::requester_context::scope_session(&requester_context, captured)?;
     let mut grant_context = crate::requester_context::RequesterContext::default();
-    grant_context.effective_uid = requester_context.effective_uid;
-    grant_context.effective_gid = requester_context.effective_gid;
+    grant_context.effective_uid = scope_session.effective_uid;
+    grant_context.effective_gid = scope_session.effective_gid;
     grant_context.subject_key_id = identity.subject_key_id;
     grant_context.provenance = identity.provenance as u8;
     let package_id = identity.package_id.as_bytes();
@@ -211,14 +205,6 @@ pub(crate) fn spawn_application_from_manifest(
             entry_path
         );
     }
-    authorize_spawn(
-        0, // The native creator consumes its own separately authorized permit.
-        entry_path,
-        &identity,
-        &caps,
-        platform::service::ExecutionClass::Unprivileged,
-        crate::persistent_grant::read_file,
-    )?;
     let mut spawn_items = Vec::new();
     spawn_items.push(format!(
         "{}MOCHI_EXECUTABLE_PATH={}",
@@ -248,6 +234,9 @@ pub(crate) fn spawn_application_from_manifest(
         posix_endpoint,
         sender,
         requester_context.process_id,
+        scope,
+        verified,
+        &caps,
     )
 }
 

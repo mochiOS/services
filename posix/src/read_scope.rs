@@ -166,7 +166,10 @@ impl<H> Default for Registry<H> {
 }
 
 pub fn supports(opcode: u16) -> bool {
-    matches!(opcode, wire::OP_CREATE | wire::OP_INFO | wire::OP_OPEN)
+    matches!(
+        opcode,
+        wire::OP_CREATE | wire::OP_INFO | wire::OP_OPEN | wire::OP_SOURCE_INFO
+    )
 }
 
 impl<H: Copy> Registry<H> {
@@ -317,8 +320,10 @@ impl<H: Copy> Registry<H> {
                     }],
                 });
             }
-            if !matches!(header.opcode, wire::OP_INFO | wire::OP_OPEN)
-                || handles.len() != 1
+            if !matches!(
+                header.opcode,
+                wire::OP_INFO | wire::OP_OPEN | wire::OP_SOURCE_INFO
+            ) || handles.len() != 1
                 || handles[0].rights != wire::ATTACH_RIGHTS
             {
                 return Err(STATUS_EINVAL);
@@ -327,13 +332,25 @@ impl<H: Copy> Registry<H> {
             let scope = &self.entries.iter().find(|(key, _)| *key == id).ok_or(-9)?.1;
             let mut response = status_response(header.request_id, 0);
             let mut opened = Vec::new();
-            if header.opcode == wire::OP_INFO {
+            if matches!(header.opcode, wire::OP_INFO | wire::OP_SOURCE_INFO) {
                 if !payload.is_empty() {
                     return Err(STATUS_EINVAL);
                 }
-                response.payload.resize(protocol::SESSION_INFO_LEN, 0);
-                protocol::encode_session_info(scope.info(), &mut response.payload)
+                if header.opcode == wire::OP_INFO {
+                    response.payload.resize(protocol::SESSION_INFO_LEN, 0);
+                    protocol::encode_session_info(scope.info(), &mut response.payload)
+                        .map_err(|_| STATUS_EINVAL)?;
+                } else {
+                    response.payload.resize(wire::SOURCE_INFO_LEN, 0);
+                    wire::encode_source_info(
+                        wire::SourceInfo {
+                            process_id: scope.credentials.session.process_id,
+                            session: scope.info(),
+                        },
+                        &mut response.payload,
+                    )
                     .map_err(|_| STATUS_EINVAL)?;
+                }
                 response.header.payload_len = response.payload.len() as u32;
             } else {
                 opened.push(scope.open(payload, filesystem)?);

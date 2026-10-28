@@ -278,3 +278,42 @@ fn bundle_traversal_and_path_aliases_do_not_bind_code_records() {
         assert!(approved.validate(Source::Root, ROOT).is_ok());
     }
 }
+
+#[test]
+fn static_installed_path_policy_cannot_approve_a_dynamic_or_unbound_modern_package() {
+    let original = manifest();
+    let legacy = original
+        .split("[[file]]")
+        .next()
+        .unwrap()
+        .replace("file = \"root\"", "")
+        .replace("file = \"library\"", "");
+    let mut bytes = vec![0; 120];
+    bytes[..7].copy_from_slice(&[0x7f, b'E', b'L', b'F', 2, 1, 1]);
+    bytes[16..18].copy_from_slice(&2u16.to_le_bytes());
+    bytes[32..40].copy_from_slice(&64u64.to_le_bytes());
+    bytes[54..56].copy_from_slice(&56u16.to_le_bytes());
+    bytes[56..58].copy_from_slice(&1u16.to_le_bytes());
+    for dynamic in [false, true] {
+        install(&legacy);
+        let snapshot = resolver::verified_manifest(MANIFEST, read_file).unwrap();
+        bytes[64..68].copy_from_slice(&(if dynamic { 2u32 } else { 1u32 }).to_le_bytes());
+        let policy = image_catalog::Catalog::for_static(snapshot, APP, &bytes);
+        if dynamic {
+            assert!(policy.is_err());
+        } else {
+            let policy = policy.unwrap();
+            assert!(policy.validate(Source::Root, &bytes).is_ok());
+            bytes[100] ^= 1;
+            assert!(policy.validate(Source::Root, &bytes).is_err());
+            assert!(
+                policy
+                    .validate(dependency(LIB.as_bytes()), LIBRARY)
+                    .is_err()
+            );
+        }
+    }
+    install(&original.replace("file = \"root\"", ""));
+    let snapshot = resolver::verified_manifest(MANIFEST, read_file).unwrap();
+    assert!(image_catalog::Catalog::for_static(snapshot, APP, &bytes).is_err());
+}

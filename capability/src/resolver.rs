@@ -62,6 +62,7 @@ pub(crate) struct ApplicationIdentity {
 pub(crate) struct VerifiedManifest {
     pub(crate) manifest: platform::package::PackageManifest,
     pub(crate) identity: ApplicationIdentity,
+    certificate_allowed: Vec<String>,
 }
 
 pub(crate) fn verified_manifest(
@@ -84,8 +85,13 @@ pub(crate) fn verified_manifest(
         return Err(denied());
     }
     let identity = record.application_identity();
+    let mut certificate_allowed = Vec::new();
+    for capability in record.verification.allowed_capabilities() {
+        certificate_allowed.push(capability.map_err(|_| denied())?.into());
+    }
     Ok(VerifiedManifest {
         manifest,
+        certificate_allowed,
         identity: ApplicationIdentity {
             package_id: identity.package_id.into(),
             developer_id: identity.developer_id.into(),
@@ -93,6 +99,50 @@ pub(crate) fn verified_manifest(
             provenance: identity.provenance,
         },
     })
+}
+
+impl VerifiedManifest {
+    /// Capability policy and code integrity use this same authenticated
+    /// snapshot, even if a package update occurs while a prompt is displayed.
+    pub(crate) fn decide_capabilities(
+        &self,
+        path: &str,
+    ) -> Result<EffectiveCapabilityDecision, mochi_user_syscall::SysError> {
+        let requested = self
+            .manifest
+            .binary_requires(path)
+            .ok_or_else(|| {
+                mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64)
+            })?
+            .to_vec();
+        let system_allowed: Vec<_> = requested
+            .iter()
+            .filter(|capability| crate::policy::is_known_capability(capability))
+            .cloned()
+            .collect();
+        let deny_reason = if system_allowed.len() != requested.len() {
+            Some(CapabilityDenyReason::UnknownCapability)
+        } else if requested
+            .iter()
+            .any(|capability| !self.certificate_allowed.contains(capability))
+        {
+            Some(CapabilityDenyReason::CertificateAllowance)
+        } else {
+            None
+        };
+        let decision = EffectiveCapabilityDecision {
+            requested,
+            system_allowed,
+            certificate_allowed: self.certificate_allowed.clone(),
+            user_allowed: Vec::new(),
+            caller_allowed: Vec::new(),
+            effective: Vec::new(),
+            denied: Vec::new(),
+            deny_reason,
+        };
+        let ceiling = decision.requested.clone();
+        Ok(decision.apply_runtime_constraints(&ceiling, &ceiling))
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

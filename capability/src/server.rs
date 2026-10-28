@@ -182,11 +182,14 @@ pub(crate) fn serve_capability_requests(mut state: CapabilityServiceState) -> ! 
             let required = platform::handle::HANDLE_RIGHT_SEND
                 | platform::handle::HANDLE_RIGHT_DUPLICATE
                 | platform::handle::HANDLE_RIGHT_TRANSFER;
-            let valid = attached.count == 1
+            let valid = attached.count == 2
                 && attached.is_user_delivery()
                 && attached.handles[0].handle != 0
                 && attached.handles[0].reserved == 0
-                && attached.handles[0].rights == required;
+                && attached.handles[0].rights == required
+                && attached.handles[1].handle != 0
+                && attached.handles[1].reserved == 0
+                && attached.handles[1].rights == mochios_posix_protocol::read_scope::ATTACH_RIGHTS;
             let result = if valid {
                 spawn_application_from_manifest(
                     &state.package_index,
@@ -194,6 +197,10 @@ pub(crate) fn serve_capability_requests(mut state: CapabilityServiceState) -> ! 
                     sender,
                     slice,
                     attached.handles[0].handle,
+                    mochios_posix_client::ObjectHandleAttachment {
+                        handle: attached.handles[1].handle,
+                        rights: attached.handles[1].rights,
+                    },
                 )
             } else {
                 Err(mochi_user_syscall::SysError::from_raw(
