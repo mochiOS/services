@@ -26,9 +26,15 @@ extern int *tls_local_address(void);
 extern int *tls_initial_address(void);
 extern int *tls_root_address(void);
 extern char *tls_zero_address(void);
+#ifdef TLS_DESCRIPTOR
+extern int *tls_missing_address(void);
+#endif
 static int constructor_ok;
 static atomic_int ready;
 static int fresh(void) {
+#ifdef TLS_DESCRIPTOR
+  CHECK(tls_missing_address() == NULL);
+#endif
   CHECK(tls_root == 11 && tls_interpose == 17);
   CHECK(*tls_general_address() == 23 && *tls_local_address() == 41);
   CHECK(tls_interpose_address() == &tls_interpose);

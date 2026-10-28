@@ -8,6 +8,10 @@ int *tls_general_address(void) { return &tls_library; }
 int *tls_interpose_address(void) { return &tls_interpose; }
 int *tls_local_address(void) { return &tls_local; }
 char *tls_zero_address(void) { return tls_zero; }
+#ifdef TLS_DESCRIPTOR
+extern __thread int tls_missing __attribute__((weak));
+int *tls_missing_address(void) { return &tls_missing; }
+#endif
 #elif defined(TLS_INITIAL)
 extern __thread int tls_library;
 extern __thread int tls_root;
@@ -19,6 +23,8 @@ __thread int tls_interpose = 17;
 extern int *tls_general_address(void);
 extern int *tls_initial_address(void);
 void *__tls_get_addr(void *index) { return index; }
+unsigned long __mochios_tlsdesc_static(void) { return 0; }
+unsigned long __mochios_tlsdesc_weak(void) { return 0; }
 void _start(void) {
   tls_root = *tls_general_address() + *tls_initial_address();
 }

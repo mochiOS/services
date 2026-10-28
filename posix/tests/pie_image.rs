@@ -897,6 +897,44 @@ fn tls_relocations_validate_symbol_kind_bounds_local_module_and_missing_weak_def
 }
 
 #[test]
+fn tls_descriptor_reserves_both_words_and_rejects_partial_or_overlapping_writes() {
+    let mut bytes = symbol_image(36, false, false);
+    w16(&mut bytes, 56, 4);
+    segment(&mut bytes, 3, 7, 4, 0x1200, 0x1200, 16, 64);
+    w64(&mut bytes, 64 + 3 * 56 + 48, 16);
+    bytes[0x111c] = 0x16;
+    w64(&mut bytes, 0x1120, 8);
+    w64(&mut bytes, 0x1128, 4);
+    w64(&mut bytes, 0x10a0, 0x3ff0);
+    let image = Pie::parse_object(&bytes).unwrap();
+    assert!(image.requires_tls_scope().unwrap());
+    assert!(image.output_length().unwrap() >= 0x5000);
+    let mut partial = bytes.clone();
+    w64(&mut partial, 0x10a0, 0x3ff8);
+    assert!(matches!(Pie::parse_object(&partial), Err(Error::Invalid)));
+    let mut overflow = bytes.clone();
+    w64(&mut overflow, 0x10a0, u64::MAX - 7);
+    assert!(matches!(Pie::parse_object(&overflow), Err(Error::Overflow)));
+    // Relocate HASH before adding a second RELA record at its previous bytes.
+    let hash = bytes[0x10c0..0x10d4].to_vec();
+    bytes[0x1180..0x1194].copy_from_slice(&hash);
+    w64(&mut bytes, 0x1008, 0x1180);
+    w64(&mut bytes, 0x1068, 48);
+    w64(&mut bytes, 0x10a0, 0x1300);
+    w64(&mut bytes, 0x10c0, 8);
+    w64(&mut bytes, 0x10c8, 0);
+    for target in [0x12fc, 0x1300, 0x1308] {
+        w64(&mut bytes, 0x10b8, target);
+        assert!(
+            matches!(Pie::parse_object(&bytes), Err(Error::Invalid)),
+            "target={target:x}"
+        );
+    }
+    w64(&mut bytes, 0x10b8, 0x1310);
+    assert!(Pie::parse_object(&bytes).is_ok());
+}
+
+#[test]
 fn combined_scope_preserves_member_phdr_views_permissions_and_sparse_bss() {
     use mochios_posix_client::pie::link_scope::{Object, Scope};
     let root = with_needed(symbol_image(1, false, false), &[b"dep"]);

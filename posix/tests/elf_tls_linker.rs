@@ -32,23 +32,25 @@ fn loaded(bytes: &[u8], address: u64) -> u64 {
 }
 #[test]
 fn gd_ld_ie_tls_relocations_match_linker_symbols_with_preemption_and_without_sections() {
-    let temporary = Temporary(
-        std::env::temp_dir().join(format!(
+    let temporary = Temporary(std::env::temp_dir().join(format!(
             "mochios-tls-scope-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
                 .as_nanos()
-        )),
-    );
+        )));
     std::fs::create_dir(&temporary.0).unwrap();
     let binaries = [
         temporary.0.join("root"),
         temporary.0.join("libtls-gd.so"),
         temporary.0.join("libtls-ie.so"),
     ];
-    for hash in ["sysv", "gnu", "both"] {
+    for (dialect, hash) in ["gnu", "gnu2"].into_iter().flat_map(|dialect| {
+        ["sysv", "gnu", "both"]
+            .into_iter()
+            .map(move |hash| (dialect, hash))
+    }) {
         for index in [1usize, 2, 0] {
             let mut command = Command::new("x86_64-elf-gcc");
             command
@@ -57,11 +59,15 @@ fn gd_ld_ie_tls_relocations_match_linker_symbols_with_preemption_and_without_sec
                     "-ffreestanding",
                     "-fno-stack-protector",
                     "-nostdlib",
-                "-Wl,-shared",
+                    "-Wl,-shared",
                     "-Wl,-z,noexecstack",
                 ])
                 .arg(format!("-Wl,--hash-style={hash}"))
+                .arg(format!("-mtls-dialect={dialect}"))
                 .arg(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/elf_tls_fixture.c"));
+            if dialect == "gnu2" {
+                command.arg("-DTLS_DESCRIPTOR");
+            }
             match index {
                 1 => {
                     command.args([
@@ -168,7 +174,10 @@ fn gd_ld_ie_tls_relocations_match_linker_symbols_with_preemption_and_without_sec
                     }
                     let kind = fields[2];
                     let target = u64::from_str_radix(fields[0], 16).unwrap() + objects[origin].bias;
-                    let (owner, symbol) = if fields.len() >= 7 {
+                    let missing = fields.len() >= 7 && fields[4] == "tls_missing";
+                    let (owner, symbol) = if missing {
+                        (0, 0)
+                    } else if fields.len() >= 7 {
                         let name = fields[4];
                         let owner = symbols
                             .iter()
@@ -183,6 +192,20 @@ fn gd_ld_ie_tls_relocations_match_linker_symbols_with_preemption_and_without_sec
                         addend = addend.wrapping_neg();
                     }
                     let expected = match kind {
+                        "R_X86_64_TLSDESC" => {
+                            let thunk = if missing {
+                                "__mochios_tlsdesc_weak"
+                            } else {
+                                "__mochios_tlsdesc_static"
+                            };
+                            let argument = if missing {
+                                addend
+                            } else {
+                                symbol.wrapping_add(addend).wrapping_sub(distances[&owner])
+                            };
+                            assert_eq!(loaded(&output, target + 8), argument);
+                            symbols[0][thunk] + objects[0].bias
+                        }
                         "R_X86_64_DTPMOD64" => (owner + 1) as u64,
                         "R_X86_64_DTPOFF64" => symbol.wrapping_add(addend),
                         "R_X86_64_TPOFF64" => {
@@ -199,11 +222,47 @@ fn gd_ld_ie_tls_relocations_match_linker_symbols_with_preemption_and_without_sec
                     );
                 }
             }
-            assert!(
-                kinds.contains("R_X86_64_DTPMOD64")
-                    && kinds.contains("R_X86_64_DTPOFF64")
-                    && kinds.contains("R_X86_64_TPOFF64")
-            );
+            assert!(kinds.contains("R_X86_64_TPOFF64"));
+            if dialect == "gnu2" {
+                assert!(kinds.contains("R_X86_64_TLSDESC"));
+                let mut unmarked = sources[0].clone();
+                for name in [
+                    b"__mochios_tlsdesc_static".as_slice(),
+                    b"__mochios_tlsdesc_weak",
+                ] {
+                    for offset in 0..=unmarked.len() - name.len() {
+                        if &unmarked[offset..offset + name.len()] == name {
+                            unmarked[offset] = b'X';
+                        }
+                    }
+                }
+                let root = Pie::parse_object(&unmarked).unwrap();
+                let unmarked_objects = [
+                    Object {
+                        name: names[0],
+                        image: &root,
+                        bias: objects[0].bias,
+                    },
+                    Object {
+                        name: names[1],
+                        image: &images[1],
+                        bias: objects[1].bias,
+                    },
+                    Object {
+                        name: names[2],
+                        image: &images[2],
+                        bias: objects[2].bias,
+                    },
+                ];
+                let mut scratch = [0; 3];
+                let missing_runtime = Scope::new(&unmarked_objects, &mut scratch).unwrap();
+                assert_eq!(
+                    missing_runtime.write_bundle(&mut output),
+                    Err(mochios_posix_client::pie::Error::Unsupported)
+                );
+            } else {
+                assert!(kinds.contains("R_X86_64_DTPMOD64") && kinds.contains("R_X86_64_DTPOFF64"));
+            }
         }
     }
 }
