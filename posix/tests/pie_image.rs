@@ -951,26 +951,23 @@ fn combined_scope_rejects_program_header_count_that_needs_extended_numbering() {
 
 #[test]
 fn direct_scope_requires_supported_startup_and_conservative_placement() {
-    for (tag, value, supported) in [
-        (12, 1, false),
-        (13, 1, false),
-        (25, 1, false),
-        (27, 8, false),
-        (29, 0, true),
-        (15, 0, true),
-        (32, 1, false),
-        (33, 8, false),
-        (12, 0, true),
+    for (tags, supported) in [
+        (&[(12, 0x180)][..], false),
+        (&[(13, 0x180)][..], false),
+        (&[(25, 0x1500), (27, 8)][..], false),
+        (&[(26, 0x1500), (28, 8)][..], false),
+        (&[(32, 0x1500), (33, 8)][..], false),
+        (&[(29, 0)][..], true),
+        (&[(15, 0)][..], true),
+        (&[(12, 0)][..], true),
+        (&[(25, 0), (27, 0)][..], true),
     ] {
-        let mut bytes = symbol_image(1, false, false);
-        w64(&mut bytes, 0x1080, tag);
-        w64(&mut bytes, 0x1088, value);
-        w64(&mut bytes, 64 + 2 * 56 + 32, 160);
+        let bytes = with_lifecycle(symbol_image(1, false, false), tags);
         let image = Pie::parse_object(&bytes).unwrap();
         assert_eq!(
             image.validate_direct_scope_startup().is_ok(),
             supported,
-            "tag={tag}"
+            "tags={tags:?}"
         );
     }
     let bytes = tls_image();
@@ -979,6 +976,240 @@ fn direct_scope_requires_supported_startup_and_conservative_placement() {
     assert_eq!(bias % image.alignment(), 0);
     assert!(bias >= 0x20001001 && end > bias);
     assert!(image.placement(u64::MAX).is_err());
+}
+
+fn with_lifecycle(mut bytes: Vec<u8>, tags: &[(u64, u64)]) -> Vec<u8> {
+    let offset = r64(&bytes, 64 + 2 * 56 + 8) as usize;
+    let length = r64(&bytes, 64 + 2 * 56 + 32) as usize;
+    let original: Vec<_> = bytes[offset..offset + length]
+        .chunks_exact(16)
+        .take_while(|entry| r64(entry, 0) != 0)
+        .flatten()
+        .copied()
+        .collect();
+    bytes.resize(0x2000, 0);
+    segment(&mut bytes, 1, 1, 6, 0x1000, 0x1000, 0x1000, 0x3000);
+    bytes[0x1800..0x1800 + original.len()].copy_from_slice(&original);
+    for (index, &(tag, value)) in tags.iter().enumerate() {
+        let at = 0x1800 + original.len() + index * 16;
+        w64(&mut bytes, at, tag);
+        w64(&mut bytes, at + 8, value);
+    }
+    let length = (original.len() + (tags.len() + 1) * 16) as u64;
+    segment(&mut bytes, 2, 2, 6, 0x1800, 0x1800, length, length);
+    bytes
+}
+
+#[test]
+fn lifecycle_metadata_rejects_duplicates_incomplete_pairs_and_invalid_load_ranges() {
+    for tags in [
+        vec![(12, 0), (12, 0)],
+        vec![(13, 0), (13, 0)],
+        vec![(12, 0x200)],
+        vec![(13, 0x1500)],
+        vec![(12, u64::MAX)],
+        vec![(25, 0x1500)],
+        vec![(27, 8)],
+        vec![(26, 0x1500)],
+        vec![(28, 8)],
+        vec![(32, 0x1500)],
+        vec![(33, 8)],
+        vec![(25, 0x1501), (27, 8)],
+        vec![(25, 0x1500), (27, 7)],
+        vec![(25, 0x3ff8), (27, 16)],
+        vec![(25, 0x8000), (27, 8)],
+        vec![(25, u64::MAX - 7), (27, 8)],
+    ] {
+        let bytes = with_lifecycle(image(), &tags);
+        assert!(Pie::parse_object(&bytes).is_err(), "{tags:?}");
+    }
+    for (address, size) in [(25, 27), (26, 28), (32, 33)] {
+        for duplicate in [address, size] {
+            let bytes = with_lifecycle(image(), &[(address, 0), (size, 0), (duplicate, 0)]);
+            assert!(matches!(Pie::parse_object(&bytes), Err(Error::Invalid)));
+        }
+        let mut unreadable = with_lifecycle(image(), &[(address, 0x1500), (size, 8)]);
+        w32(&mut unreadable, 64 + 56 + 4, 2);
+        assert!(matches!(
+            Pie::parse_object(&unreadable),
+            Err(Error::Invalid)
+        ));
+    }
+    // A table may be in zero-fill memory; its elements are examined only after
+    // relocations have materialized their pointers in the prepared image.
+    let bytes = with_lifecycle(image(), &[(25, 0x3000), (27, 8)]);
+    assert!(Pie::parse_object(&bytes).is_ok());
+}
+
+#[test]
+fn lifecycle_uses_dependency_postorder_instead_of_reversing_symbol_search() {
+    use mochios_posix_client::pie::link_scope::{Object, Scope};
+    for cycle in [false, true] {
+        let bytes = [
+            with_needed(symbol_image(1, false, false), &[b"first", b"second"]),
+            with_needed(symbol_image(1, false, false), &[b"first", b"leaf"]),
+            with_needed(
+                symbol_image(1, false, false),
+                if cycle { &[b"first"] } else { &[] },
+            ),
+            with_needed(symbol_image(1, false, false), &[b"leaf"]),
+        ];
+        let images: Vec<_> = bytes
+            .iter()
+            .map(|bytes| Pie::parse_object(bytes).unwrap())
+            .collect();
+        let objects: Vec<_> = [b"root".as_slice(), b"second", b"leaf", b"first"]
+            .into_iter()
+            .zip(&images)
+            .enumerate()
+            .map(|(index, (name, image))| Object {
+                name,
+                image,
+                bias: 0x20000000 + index as u64 * 0x1000000,
+            })
+            .collect();
+        let mut search = [0; 4];
+        let scope = Scope::new(&objects, &mut search).unwrap();
+        assert_eq!(scope.order(), [0, 3, 1, 2]);
+        assert!(matches!(
+            scope.lifecycle(&mut [0; 15]),
+            Err(Error::BufferTooSmall)
+        ));
+        let mut scratch = [usize::MAX; 16];
+        let plan = scope.lifecycle(&mut scratch).unwrap();
+        assert_eq!(plan.order(), [2, 3, 1, 0]);
+        let mut steps = Vec::new();
+        plan.initializers(|step| steps.push(step)).unwrap();
+        plan.finalizers(|step| steps.push(step)).unwrap();
+        assert!(steps.is_empty());
+        for object in &objects {
+            assert!(plan.is_callable(object.bias + 0x180));
+            assert!(!plan.is_callable(object.bias + 0x1300));
+            assert!(!plan.is_callable(object.bias + 0x200));
+        }
+        assert!(!plan.is_callable(0) && !plan.is_callable(u64::MAX));
+    }
+}
+
+#[test]
+fn lifecycle_plans_root_preinit_init_before_arrays_and_reverse_fini_before_function() {
+    use mochios_posix_client::pie::link_scope::{Object, Scope, Step};
+    let tags = [
+        (12, 0x180),
+        (13, 0x190),
+        (25, 0x1500),
+        (27, 16),
+        (26, 0x1510),
+        (28, 24),
+    ];
+    let mut root_tags = tags.to_vec();
+    root_tags.extend([(32, 0x1528), (33, 8)]);
+    let bytes = [
+        with_lifecycle(
+            with_needed(symbol_image(1, false, false), &[b"dep"]),
+            &root_tags,
+        ),
+        with_lifecycle(symbol_image(1, false, false), &tags),
+    ];
+    let images: Vec<_> = bytes
+        .iter()
+        .map(|bytes| Pie::parse_object(bytes).unwrap())
+        .collect();
+    let objects = [
+        Object {
+            name: b"root",
+            image: &images[0],
+            bias: 0x20000000,
+        },
+        Object {
+            name: b"dep",
+            image: &images[1],
+            bias: 0x30000000,
+        },
+    ];
+    let mut search = [0; 2];
+    let scope = Scope::new(&objects, &mut search).unwrap();
+    let mut scratch = [0; 8];
+    let plan = scope.lifecycle(&mut scratch).unwrap();
+    let mut steps = Vec::new();
+    plan.initializers(|step| steps.push(step)).unwrap();
+    assert_eq!(
+        steps,
+        [
+            Step::Array {
+                object: 0,
+                address: 0x20001528,
+                count: 1,
+                reverse: false
+            },
+            Step::Function {
+                object: 1,
+                address: 0x30000180
+            },
+            Step::Array {
+                object: 1,
+                address: 0x30001500,
+                count: 2,
+                reverse: false
+            },
+            Step::Function {
+                object: 0,
+                address: 0x20000180
+            },
+            Step::Array {
+                object: 0,
+                address: 0x20001500,
+                count: 2,
+                reverse: false
+            },
+        ]
+    );
+    steps.clear();
+    plan.finalizers(|step| steps.push(step)).unwrap();
+    assert_eq!(
+        steps,
+        [
+            Step::Array {
+                object: 0,
+                address: 0x20001510,
+                count: 3,
+                reverse: true
+            },
+            Step::Function {
+                object: 0,
+                address: 0x20000190
+            },
+            Step::Array {
+                object: 1,
+                address: 0x30001510,
+                count: 3,
+                reverse: true
+            },
+            Step::Function {
+                object: 1,
+                address: 0x30000190
+            },
+        ]
+    );
+    let invalid_dependency = with_lifecycle(symbol_image(1, false, false), &root_tags);
+    let dependency = Pie::parse_object(&invalid_dependency).unwrap();
+    let invalid_objects = [
+        Object {
+            name: b"root",
+            image: &images[0],
+            bias: 0x20000000,
+        },
+        Object {
+            name: b"dep",
+            image: &dependency,
+            bias: 0x30000000,
+        },
+    ];
+    let scope = Scope::new(&invalid_objects, &mut search).unwrap();
+    assert!(matches!(
+        scope.lifecycle(&mut scratch),
+        Err(Error::Unsupported)
+    ));
 }
 
 #[test]

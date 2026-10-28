@@ -3,6 +3,12 @@
 #[path = "elf_image_native.rs"]
 mod native_image;
 
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[path = "support/pie_mappings.rs"]
+mod host_mappings;
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+use host_mappings::Mappings;
+
 use mochios_posix_client::pie::Pie;
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -27,6 +33,24 @@ fn loaded(bytes: &[u8], address: u64) -> u64 {
         }
     }
     panic!("not loaded: {address:x}");
+}
+
+fn symbols(binary: &std::path::Path) -> BTreeMap<String, u64> {
+    let nm = Command::new("x86_64-elf-nm").arg(binary).output().unwrap();
+    assert!(nm.status.success());
+    String::from_utf8(nm.stdout)
+        .unwrap()
+        .lines()
+        .filter_map(|line| {
+            let fields: Vec<_> = line.split_whitespace().collect();
+            (fields.len() == 3).then(|| {
+                (
+                    fields[2].to_owned(),
+                    u64::from_str_radix(fields[0], 16).unwrap(),
+                )
+            })
+        })
+        .collect()
 }
 
 #[test]
@@ -145,76 +169,6 @@ fn real_dynamic_bindings_match_linker_symbols_for_both_hash_formats_without_sect
 #[test]
 fn scoped_real_library_bindings_execute_with_root_preemption_and_eager_plt() {
     use mochios_posix_client::pie::link_scope::{Object, Scope};
-    struct Mappings(Vec<(*mut libc::c_void, usize)>);
-    impl Drop for Mappings {
-        fn drop(&mut self) {
-            for &(pointer, length) in self.0.iter().rev() {
-                assert_eq!(unsafe { libc::munmap(pointer, length) }, 0);
-            }
-        }
-    }
-    impl Mappings {
-        fn install(&mut self, image: &[u8]) {
-            let count = u16::from_le_bytes(image[56..58].try_into().unwrap()) as usize;
-            for header in image[64..64 + count * 56].chunks_exact(56) {
-                if header[0] != 1 || word(header, 40) == 0 {
-                    continue;
-                }
-                let address = word(header, 16) as usize;
-                let base = address & !4095;
-                let length = (address - base + word(header, 40) as usize + 4095) & !4095;
-                let pointer = unsafe {
-                    libc::mmap(
-                        base as *mut _,
-                        length,
-                        libc::PROT_READ | libc::PROT_WRITE,
-                        libc::MAP_PRIVATE | libc::MAP_ANONYMOUS | libc::MAP_FIXED_NOREPLACE,
-                        -1,
-                        0,
-                    )
-                };
-                assert_ne!(
-                    pointer,
-                    libc::MAP_FAILED,
-                    "{}",
-                    std::io::Error::last_os_error()
-                );
-                self.0.push((pointer, length));
-                assert_eq!(pointer as usize, base);
-                let offset = word(header, 8) as usize;
-                let file = word(header, 32) as usize;
-                unsafe {
-                    std::ptr::copy_nonoverlapping(
-                        image[offset..offset + file].as_ptr(),
-                        address as *mut u8,
-                        file,
-                    );
-                }
-                let flags = u32::from_le_bytes(header[4..8].try_into().unwrap());
-                let protection = if flags & 4 != 0 { libc::PROT_READ } else { 0 }
-                    | if flags & 2 != 0 { libc::PROT_WRITE } else { 0 }
-                    | if flags & 1 != 0 { libc::PROT_EXEC } else { 0 };
-                assert_eq!(unsafe { libc::mprotect(pointer, length, protection) }, 0);
-            }
-        }
-    }
-    fn symbols(binary: &std::path::Path) -> BTreeMap<String, u64> {
-        let nm = Command::new("x86_64-elf-nm").arg(binary).output().unwrap();
-        assert!(nm.status.success());
-        String::from_utf8(nm.stdout)
-            .unwrap()
-            .lines()
-            .filter_map(|line| {
-                let fields: Vec<_> = line.split_whitespace().collect();
-                (fields.len() == 3).then(|| {
-                    (
-                        fields[2].to_owned(),
-                        u64::from_str_radix(fields[0], 16).unwrap(),
-                    )
-                })
-            })
-            .collect()
-    }
     let temporary = Temporary(std::env::temp_dir().join(
         format!("mochios-scope-{}-{}", std::process::id(),
         std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()),
@@ -334,7 +288,7 @@ fn scoped_real_library_bindings_execute_with_root_preemption_and_eager_plt() {
         let bundle_path = temporary.0.join("bundle.elf");
         std::fs::write(&bundle_path, &bundle).unwrap();
         native_image::assert_captured_image(&bundle_path);
-        let mut mappings = Mappings(Vec::new());
+        let mut mappings = Mappings::default();
         mappings.install(&bundle);
         // Execute only these locally compiled, syscall-free fixture functions.
         // Host mappings test relocation/code behavior, not mochiOS ProcessCreate.
@@ -352,5 +306,152 @@ fn scoped_real_library_bindings_execute_with_root_preemption_and_eager_plt() {
             120
         );
         assert_eq!(shared(2), 170);
+    }
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[test]
+fn real_library_lifecycle_obeys_dependencies_legacy_functions_and_relocated_arrays() {
+    use mochios_posix_client::pie::link_scope::{Object, Scope, Step};
+    let temporary = Temporary(std::env::temp_dir().join(format!(
+        "mochios-lifecycle-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+    )));
+    std::fs::create_dir(&temporary.0).unwrap();
+    let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/elf_lifecycle_fixture.c");
+    for hash in ["sysv", "gnu", "both"] {
+        for (role, output, dependencies) in [
+            ("LEAF", "libleaf.so", &[][..]),
+            ("FIRST", "libfirst.so", &["libleaf.so"][..]),
+            ("SECOND", "libsecond.so", &["libfirst.so", "libleaf.so"][..]),
+            ("ROOT", "root", &["libfirst.so", "libsecond.so", "libleaf.so"][..]),
+        ] {
+            let mut command = Command::new("x86_64-elf-gcc");
+            command.args(["-O2", "-fPIC", "-ffreestanding", "-fno-stack-protector", "-nostdlib"])
+                .arg(format!("-DLIFECYCLE_{role}"))
+                .arg(format!("-Wl,--hash-style={hash},-z,pack-relative-relocs,-z,noexecstack,-init,lifecycle_init,-fini,lifecycle_fini"))
+                .arg(format!("-L{}", temporary.0.display()))
+                .arg(&fixture);
+            if role == "ROOT" {
+                command.arg("-Wl,-pie,--no-dynamic-linker,--export-dynamic,-e,_start");
+            } else {
+                command.arg(format!("-Wl,-shared,-soname,{output}"));
+            }
+            for dependency in dependencies {
+                command.arg(format!("-l:{dependency}"));
+            }
+            let output = command
+                .arg("-o")
+                .arg(temporary.0.join(output))
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "role={role} {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        let root_symbols = symbols(&temporary.0.join("root"));
+        let names = ["root", "libsecond.so", "libleaf.so", "libfirst.so"];
+        for strip_sections in [false, true] {
+            let bytes: Vec<_> = names
+                .iter()
+                .map(|name| {
+                    let mut bytes = std::fs::read(temporary.0.join(name)).unwrap();
+                    if strip_sections {
+                        bytes[40..48].fill(0);
+                        bytes[58..64].fill(0);
+                    }
+                    bytes
+                })
+                .collect();
+            let images: Vec<_> = bytes
+                .iter()
+                .map(|bytes| Pie::parse_object(bytes).unwrap())
+                .collect();
+            assert!(
+                images
+                    .iter()
+                    .all(|image| image.validate_direct_scope_startup().is_err())
+            );
+            let objects: Vec<_> = names
+                .iter()
+                .zip(&images)
+                .enumerate()
+                .map(|(index, (name, image))| Object {
+                    name: name.as_bytes(),
+                    image,
+                    bias: 0x50000000 + index as u64 * 0x1000000,
+                })
+                .collect();
+            let mut search = [0; 4];
+            let scope = Scope::new(&objects, &mut search).unwrap();
+            assert_eq!(scope.order(), [0, 3, 1, 2]);
+            let mut scratch = [0; 16];
+            let plan = scope.lifecycle(&mut scratch).unwrap();
+            assert_eq!(plan.order(), [2, 3, 1, 0]);
+            let mut bundle = vec![0; scope.bundle_length().unwrap()];
+            scope.write_bundle(&mut bundle).unwrap();
+            let mut mappings = Mappings::default();
+            mappings.install(&bundle);
+            let invoke = |step| {
+                let call = |address| {
+                    assert!(plan.is_callable(address), "invalid callback {address:x}");
+                    // SAFETY: only these locally compiled, syscall-free fixture
+                    // functions are invoked, with all scope members installed.
+                    let callback: extern "C" fn() =
+                        unsafe { std::mem::transmute(address as usize) };
+                    callback();
+                };
+                match step {
+                    Step::Function { address, .. } => call(address),
+                    Step::Array {
+                        address,
+                        count,
+                        reverse,
+                        ..
+                    } => {
+                        for index in 0..count {
+                            let index = if reverse { count - index - 1 } else { index };
+                            // Read the relocated output, including symbol-based
+                            // cross-object pointers and packed RELR fixups.
+                            call(loaded(&bundle, address + index * 8));
+                        }
+                    }
+                }
+            };
+            plan.initializers(invoke).unwrap();
+            let events = || {
+                // SAFETY: these are exported data objects in the mapped root.
+                let length = unsafe {
+                    std::ptr::read_volatile(
+                        (objects[0].bias + root_symbols["lifecycle_length"]) as *const u64,
+                    )
+                };
+                assert!(length <= 64);
+                unsafe {
+                    std::slice::from_raw_parts(
+                        (objects[0].bias + root_symbols["lifecycle_events"]) as *const u8,
+                        length as usize,
+                    )
+                }
+            };
+            assert_eq!(
+                events(),
+                b"Pl12f34s56r7X8",
+                "hash={hash} stripped={strip_sections}"
+            );
+            invoke(Step::Function {
+                object: 0,
+                address: objects[0].bias + root_symbols["_start"],
+            });
+            plan.finalizers(invoke).unwrap();
+            assert_eq!(
+                events(),
+                b"Pl12f34s56r7X8MJIRHGSDCFBAL",
+                "hash={hash} stripped={strip_sections}"
+            );
+        }
     }
 }
