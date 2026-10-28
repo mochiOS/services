@@ -3,6 +3,8 @@ use super::{
     w64, word,
 };
 use std::process::Command;
+#[path = "empty_gnu_hash.rs"]
+mod empty_gnu_hash;
 
 struct Fixture {
     temporary: Temporary,
