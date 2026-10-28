@@ -50,6 +50,98 @@ fn application_metadata_inherits_only_the_locally_owned_attached_endpoint() {
 }
 
 #[test]
+fn application_metadata_accepts_local_prepared_data_and_keeps_remote_items_unprivileged() {
+    use mochios_posix_client::process_image::{
+        AT_LIFECYCLE_IMAGE, AT_TLS_IMAGE, Executable, Identity, Process,
+    };
+    let process = Process {
+        image: Some(Executable {
+            entry: 0x20000180,
+            program_headers: 0x20000040,
+            program_header_size: 56,
+            program_header_count: 5,
+            interpreter_base: 0,
+            load_bias: 0x20000000,
+        }),
+        identity: Identity {
+            real_uid: 501,
+            effective_uid: 0,
+            real_gid: 20,
+            effective_gid: 20,
+        },
+        lifecycle: b"life\0",
+        tls: b"tls\0",
+    };
+    let bytes = production::metadata_for_process(
+        "/app",
+        &[
+            "__MNU_EXEC_ENV=LD_PRELOAD=/unsafe".into(),
+            "__MNU_EXEC_ENV=KEEP=1".into(),
+        ],
+        73,
+        [9; 16],
+        process,
+    )
+    .unwrap();
+    let request = mnu_abi::process_create::decode(&bytes).unwrap();
+    assert_eq!(request.identity, "/app");
+    let handles: Vec<_> = request.handles().collect();
+    assert_eq!(handles.len(), 1);
+    assert_eq!(
+        (handles[0].source, handles[0].key),
+        (73, mochios_posix_protocol::CONTROL_HANDLE_KEY)
+    );
+    let mnu_abi::process_create::InitialState::Image(startup) = request.startup else {
+        panic!("image")
+    };
+    let stack = startup.stack();
+    let word = |index: usize| {
+        u64::from_le_bytes(stack[index * 8..index * 8 + 8].try_into().unwrap()) as usize
+    };
+    assert_eq!(word(0), 1);
+    let environment = &stack[word(3)..];
+    assert!(environment.starts_with(b"KEEP=1\0"));
+    assert_eq!(word(4), 0);
+    let auxiliary: Vec<_> = stack[5 * 8..]
+        .chunks_exact(16)
+        .take_while(|pair| u64::from_le_bytes(pair[..8].try_into().unwrap()) != 0)
+        .map(|pair| {
+            (
+                u64::from_le_bytes(pair[..8].try_into().unwrap()),
+                u64::from_le_bytes(pair[8..].try_into().unwrap()),
+            )
+        })
+        .collect();
+    for (key, value) in [
+        (3, 0x20000040),
+        (9, 0x20000180),
+        (11, 501),
+        (12, 0),
+        (23, 1),
+    ] {
+        assert!(auxiliary.contains(&(key, value)));
+    }
+    for (key, payload) in [
+        (AT_LIFECYCLE_IMAGE, b"life\0".as_slice()),
+        (AT_TLS_IMAGE, b"tls\0"),
+    ] {
+        let offset = auxiliary.iter().find(|pair| pair.0 == key).unwrap().1 as usize;
+        assert_eq!(offset % 8, 0);
+        assert_eq!(&stack[offset..offset + payload.len()], payload);
+    }
+    assert!(
+        production::metadata_for_process(
+            "/app",
+            &["__MNU_EXEC_INHERIT_HANDLE=1:99:1".into()],
+            73,
+            [9; 16],
+            process
+        )
+        .is_err()
+    );
+}
+
+#[test]
 fn remote_arguments_cannot_select_local_handles_or_security_identity() {
     for argument in [
         "__MNU_EXEC_INHERIT_HANDLE=1:73:1",

@@ -503,3 +503,88 @@ fn tls_and_lifecycle_payloads_are_separate_aligned_and_share_the_total_stack_lim
         Err(EncodeError::ImageTooLarge)
     );
 }
+
+#[test]
+fn common_encoder_filters_secure_loader_environment_before_sizing_and_preserves_order() {
+    use mochios_posix_client::process_image::{
+        Identity, Process, encode_initial_stack_for_process,
+    };
+    let huge = vec![b'x'; process_image::MAX_STACK_BYTES];
+    let mut excluded = b"LD_LIBRARY_PATH=".to_vec();
+    excluded.extend_from_slice(&huge);
+    let environment: &[&[u8]] = &[
+        &excluded,
+        b"KEEP=first",
+        b"LD_PRELOAD=one",
+        b"LD_AUDIT=two",
+        b"LD_LIBRARY_PATH_SUFFIX=retained",
+        b"KEEP=second",
+        b"raw=\xff",
+    ];
+    let mut output = [0; process_image::MAX_IMAGE_BYTES];
+    let process = Process {
+        identity: Identity {
+            real_uid: 501,
+            effective_uid: 0,
+            real_gid: 20,
+            effective_gid: 20,
+        },
+        ..Process::default()
+    };
+    let length = encode_initial_stack_for_process(
+        &[b"program"],
+        environment,
+        b"program",
+        [0; 16],
+        &[],
+        process,
+        &mut output,
+    )
+    .unwrap();
+    let decoded = process_image::decode(&output[..length]).unwrap();
+    let stack = decoded.stack();
+    let mut values = Vec::new();
+    for index in 3.. {
+        let offset =
+            u64::from_le_bytes(stack[index * 8..index * 8 + 8].try_into().unwrap()) as usize;
+        if offset == 0 {
+            break;
+        }
+        let text = &stack[offset..];
+        values.push(&text[..text.iter().position(|&byte| byte == 0).unwrap()]);
+    }
+    assert_eq!(
+        values,
+        [
+            b"KEEP=first".as_slice(),
+            b"LD_LIBRARY_PATH_SUFFIX=retained",
+            b"KEEP=second",
+            b"raw=\xff"
+        ]
+    );
+    assert!(!stack.windows(huge.len()).any(|window| window == huge));
+    assert_eq!(
+        encode_initial_stack_for_process(
+            &[b"program"],
+            environment,
+            b"program",
+            [0; 16],
+            &[],
+            Process::default(),
+            &mut output
+        ),
+        Err(EncodeError::ImageTooLarge)
+    );
+    assert_eq!(
+        encode_initial_stack_for_process(
+            &[b"program"],
+            &[b"LD_PRELOAD=bad\0value"],
+            b"program",
+            [0; 16],
+            &[],
+            process,
+            &mut output
+        ),
+        Err(EncodeError::InvalidText)
+    );
+}

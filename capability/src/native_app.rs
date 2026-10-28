@@ -1,7 +1,7 @@
 use alloc::{string::String, vec, vec::Vec};
 use mochi_user_platform as platform;
-use mochios_posix_client::{ObjectHandleAttachment, OpenAtBase};
 use mochios_posix_client::launch_arguments::ENVIRONMENT_PREFIX;
+use mochios_posix_client::{ObjectHandleAttachment, OpenAtBase};
 
 type Error = platform::syscall::SysError;
 fn invalid() -> Error {
@@ -16,6 +16,24 @@ pub(crate) fn metadata(
     items: &[String],
     endpoint: u32,
     random: [u8; 16],
+) -> Result<Vec<u8>, Error> {
+    metadata_for_process(
+        path,
+        items,
+        endpoint,
+        random,
+        mochios_posix_client::process_image::Process::default(),
+    )
+}
+
+/// The prepared process data is local loader output. Remote launcher items
+/// retain their existing argv/environment-only contract and cannot set it.
+pub(crate) fn metadata_for_process(
+    path: &str,
+    items: &[String],
+    endpoint: u32,
+    random: [u8; 16],
+    process: mochios_posix_client::process_image::Process<'_>,
 ) -> Result<Vec<u8>, Error> {
     use mnu_abi::process_create::{self, HandleGrant};
     let mut arguments = vec![path.as_bytes()];
@@ -37,11 +55,13 @@ pub(crate) fn metadata(
         }
     }
     let mut startup = vec![0; process_create::MAX_REQUEST_BYTES];
-    let length = mochios_posix_client::process_image::encode_initial_stack(
+    let length = mochios_posix_client::process_image::encode_initial_stack_for_process(
         &arguments,
         &environment,
         path.as_bytes(),
         random,
+        &[],
+        process,
         &mut startup,
     )
     .map_err(|_| invalid())?;

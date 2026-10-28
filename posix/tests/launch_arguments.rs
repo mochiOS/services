@@ -94,6 +94,106 @@ fn service_launcher_uses_the_shared_client_encoder_without_a_private_copy() {
 }
 
 #[test]
+fn native_launch_carries_prepared_process_metadata_without_changing_handle_grants() {
+    use mochios_posix_client::{
+        launch_arguments::encode_native_launch_for_process,
+        process_image::{
+            AT_IMAGE_LOAD_BIAS, AT_LIFECYCLE_IMAGE, AT_TLS_IMAGE, Executable, Identity, Process,
+        },
+    };
+    let rights = mnu_abi::HANDLE_RIGHT_SEND | mnu_abi::HANDLE_RIGHT_TRANSFER;
+    let items = [
+        "argument".into(),
+        format!("{ENVIRONMENT_PREFIX}LD_LIBRARY_PATH=/unsafe"),
+        format!("{ENVIRONMENT_PREFIX}KEEP=1"),
+        format!("{INHERITED_HANDLE_PREFIX}7:19:{rights}"),
+        format!("{INHERITED_VALUE_PREFIX}8:99"),
+    ];
+    let bytes = encode_native_launch_for_process(
+        "/image",
+        "example.service",
+        &items,
+        [17; 16],
+        Process {
+            image: Some(Executable {
+                entry: 0x20000180,
+                program_headers: 0x20000040,
+                program_header_size: 56,
+                program_header_count: 5,
+                interpreter_base: 0,
+                load_bias: 0x20000000,
+            }),
+            identity: Identity {
+                real_uid: 501,
+                effective_uid: 0,
+                real_gid: 20,
+                effective_gid: 20,
+            },
+            lifecycle: b"life\0\xff",
+            tls: b"tls\0\xfe",
+        },
+    )
+    .unwrap();
+    let request = mnu_abi::process_create::decode(&bytes).unwrap();
+    let handles: Vec<_> = request.handles().collect();
+    assert_eq!(handles.len(), 1);
+    assert_eq!(
+        (handles[0].key, handles[0].source, handles[0].rights),
+        (7, 19, rights)
+    );
+    let values: Vec<_> = request.values().collect();
+    assert_eq!(values.len(), 1);
+    assert_eq!((values[0].key, values[0].value), (8, 99));
+    assert_eq!(
+        (request.identity, request.label),
+        ("/image", "example.service")
+    );
+    let mnu_abi::process_create::InitialState::Image(startup) = request.startup else {
+        panic!("image")
+    };
+    let stack = startup.stack();
+    assert_eq!(stack_word(stack, 0), 2);
+    assert_eq!(stack_text(stack, stack_word(stack, 1)), b"example.service");
+    assert_eq!(stack_text(stack, stack_word(stack, 2)), b"argument");
+    assert_eq!(stack_text(stack, stack_word(stack, 4)), b"KEEP=1");
+    assert_eq!(stack_word(stack, 5), 0);
+    let auxiliary: Vec<_> = stack[6 * 8..]
+        .chunks_exact(16)
+        .take_while(|pair| u64::from_le_bytes(pair[..8].try_into().unwrap()) != 0)
+        .map(|pair| {
+            (
+                u64::from_le_bytes(pair[..8].try_into().unwrap()),
+                u64::from_le_bytes(pair[8..].try_into().unwrap()),
+            )
+        })
+        .collect();
+    for (key, value) in [
+        (3, 0x20000040),
+        (9, 0x20000180),
+        (11, 501),
+        (12, 0),
+        (23, 1),
+        (AT_IMAGE_LOAD_BIAS, 0x20000000),
+    ] {
+        assert_eq!(
+            auxiliary
+                .iter()
+                .filter(|pair| pair.0 == key)
+                .collect::<Vec<_>>(),
+            [&(key, value)]
+        );
+    }
+    for (key, payload) in [
+        (AT_LIFECYCLE_IMAGE, b"life\0\xff".as_slice()),
+        (AT_TLS_IMAGE, b"tls\0\xfe"),
+    ] {
+        let offset = auxiliary.iter().find(|pair| pair.0 == key).unwrap().1 as usize;
+        assert_eq!(offset % 8, 0);
+        assert_eq!(&stack[offset..offset + payload.len()], payload);
+    }
+}
+
+#[test]
 fn native_launch_rejects_invalid_or_duplicate_handle_grants() {
     for value in [
         "",
