@@ -4,6 +4,10 @@
 mod native_image;
 
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[path = "support/versioned_symbols.rs"]
+mod versioned;
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 #[path = "support/pie_mappings.rs"]
 mod host_mappings;
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]

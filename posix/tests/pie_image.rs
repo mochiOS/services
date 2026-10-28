@@ -514,9 +514,9 @@ fn symbols_reject_invalid_indices_names_extents_and_unsupported_resolution_rules
             assert_eq!(relocated_symbol(&bytes), Err(Error::Unsupported));
         }
         let mut bytes = symbol_image(1, gnu, false);
-        w64(&mut bytes, 0x1080, 0x6ffffff0); // DT_VERSYM cannot be ignored.
+        w64(&mut bytes, 0x1080, 0x6ffffff0); // Invalid DT_VERSYM cannot be ignored.
         w64(&mut bytes, 64 + 2 * 56 + 32, 160);
-        assert_eq!(relocated_symbol(&bytes), Err(Error::Unsupported));
+        assert_eq!(relocated_symbol(&bytes), Err(Error::Invalid));
     }
 }
 

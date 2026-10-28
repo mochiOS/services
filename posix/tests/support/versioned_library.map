@@ -1,0 +1,2 @@
+API_1 { global: api_call; api_data; api_tls; };
+API_2 { global: api_call; api_data; api_tls; local: *; } API_1;
