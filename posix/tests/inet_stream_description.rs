@@ -93,6 +93,9 @@ impl Backend for Adapter {
     fn listen(&mut self, h: Self::Handle, b: usize) -> Result<(), i32> {
         self.tcp.borrow_mut().listen(h, b)
     }
+    fn cancel_connect(&mut self, h: Self::Handle) -> Result<bool, i32> {
+        self.tcp.borrow_mut().cancel_connect(h)
+    }
     fn accept(&mut self, h: Self::Handle) -> Result<(Self, Self::Handle), i32> {
         let accepted = self.tcp.borrow_mut().accept(h)?;
         Ok((self.clone(), accepted))
@@ -378,4 +381,305 @@ fn unspecified_local_address_cannot_publish_established_connection() {
     assert_eq!(client.connect_result(attempt), Err(-5));
     a.zero_local.set(false);
     assert_eq!(client.connect_result(attempt), Err(-5));
+}
+
+struct Lease(Rc<Cell<usize>>);
+impl Drop for Lease {
+    fn drop(&mut self) {
+        self.0.set(self.0.get() + 1);
+    }
+}
+type Registry = posix_service::inet_stream_socket::Registry<Adapter, Lease>;
+fn request(
+    r: &mut Registry,
+    id: u64,
+    opcode: u16,
+    basis: u64,
+    payload: &[u8],
+    length: u32,
+    native: bool,
+) -> (i64, u64, Vec<u8>) {
+    use mnu_abi::provider;
+    let mut bytes = vec![0; provider::REQUEST_HEADER_LEN + payload.len()];
+    provider::RequestHeader {
+        opcode,
+        object_id: id,
+        argument: 0,
+        basis,
+        length,
+        data_length: payload.len() as u32,
+    }
+    .encode(payload, &mut bytes)
+    .unwrap();
+    let mut response = vec![0; provider::RESPONSE_HEADER_LEN + provider::MAX_DATA_LEN];
+    let n = r
+        .dispatch(
+            &bytes,
+            if native {
+                mnu_abi::IPC_DELIVERY_NATIVE_OBJECT
+            } else {
+                0
+            },
+            0,
+            &mut response,
+        )
+        .unwrap()
+        .unwrap();
+    let (h, data) = provider::ResponseHeader::decode(&response[..n]).unwrap();
+    (h.status, h.value, data.into())
+}
+fn control(
+    r: &mut Registry,
+    id: u64,
+    tag: u64,
+    payload: &[u8],
+    length: u32,
+) -> (i64, u64, Vec<u8>) {
+    request(
+        r,
+        id,
+        mnu_abi::provider::OP_CONTROL,
+        tag,
+        payload,
+        length,
+        true,
+    )
+}
+fn job(r: &mut Registry, id: u64, tag: u64) -> i64 {
+    control(r, id, tag, &[], 0).0
+}
+
+#[test]
+fn cancelling_pending_open_retains_failure_but_established_wins_deadline() {
+    let a = Adapter::new();
+    let mut pending = fresh(&a);
+    pending.connect(address(9000)).unwrap();
+    let attempt = pending.attempt();
+    assert_eq!(pending.cancel_connect(attempt, -110), Err(-110));
+    a.drive();
+    assert_eq!(pending.connect_result(attempt), Err(-110));
+    assert_eq!(pending.take_error(), Ok(110));
+    assert_eq!(pending.take_error(), Ok(0));
+    let (_listener, mut client, mut accepted) = pair(&a);
+    assert_eq!(
+        client.cancel_connect(client.attempt(), -110),
+        Ok(Progress::Connected)
+    );
+    client.send(b"live").unwrap();
+    a.drive();
+    assert_eq!(accepted.receive(false, &mut [0; 4]), Ok(4));
+}
+
+#[test]
+fn registry_connect_completion_survives_so_error_consumption_and_releases_source_once() {
+    use posix_service::inet_stream_socket::Started;
+    let a = Adapter::new();
+    let mut r = Registry::new();
+    let dropped = Rc::new(Cell::new(0));
+    let id = r.insert(fresh(&a), (501, 20)).unwrap();
+    let Started::Waiting(j) = r
+        .connect(id, address(9000), Lease(dropped.clone()))
+        .unwrap()
+    else {
+        panic!()
+    };
+    assert_eq!(dropped.get(), 0);
+    assert_eq!(job(&mut r, j, wire::CONTROL_CONNECT_RESULT), -11);
+    a.drive();
+    assert_eq!(
+        control(&mut r, id, wire::CONTROL_TAKE_ERROR, &[], 4).2,
+        111u32.to_le_bytes()
+    );
+    assert_eq!(
+        control(&mut r, id, wire::CONTROL_TAKE_ERROR, &[], 4).2,
+        0u32.to_le_bytes()
+    );
+    assert_eq!(job(&mut r, j, wire::CONTROL_CONNECT_RESULT), -111);
+    assert_eq!(job(&mut r, j, wire::CONTROL_CONNECT_EXPIRE), -111);
+    r.release_job(j).unwrap();
+    assert_eq!(dropped.get(), 1);
+    assert_eq!(r.release_job(j), Err(-9));
+    assert_eq!(dropped.get(), 1);
+}
+
+#[test]
+fn registry_expiration_cancellation_and_nonblocking_ownership_are_distinct() {
+    use posix_service::inet_stream_socket::Started;
+    let a = Adapter::new();
+    let mut r = Registry::new();
+    let dropped = Rc::new(Cell::new(0));
+    let id = r.insert(fresh(&a), (0, 0)).unwrap();
+    let Started::Waiting(j) = r
+        .connect(id, address(9000), Lease(dropped.clone()))
+        .unwrap()
+    else {
+        panic!()
+    };
+    assert_eq!(job(&mut r, j, wire::CONTROL_CONNECT_EXPIRE), -110);
+    assert_eq!(job(&mut r, j, wire::CONTROL_CONNECT_RESULT), -110);
+    r.release_job(j).unwrap();
+    assert_eq!(dropped.get(), 1);
+    let id = r.insert(fresh(&a), (501, 20)).unwrap();
+    let Started::Waiting(j) = r
+        .connect(id, address(9000), Lease(dropped.clone()))
+        .unwrap()
+    else {
+        panic!()
+    };
+    r.release_job(j).unwrap();
+    assert_eq!(dropped.get(), 2);
+    assert_eq!(
+        control(&mut r, id, wire::CONTROL_TAKE_ERROR, &[], 4).2,
+        125u32.to_le_bytes()
+    );
+    let mut s = fresh(&a);
+    s.set_options(wire::NONBLOCKING).unwrap();
+    let id = r.insert(s, (501, 20)).unwrap();
+    assert_eq!(
+        r.connect(id, address(9000), Lease(dropped.clone())),
+        Ok(Started::InProgress)
+    );
+    assert_eq!(dropped.get(), 3);
+    a.drive();
+    assert_eq!(
+        control(&mut r, id, wire::CONTROL_TAKE_ERROR, &[], 4).2,
+        111u32.to_le_bytes()
+    );
+}
+
+#[test]
+fn registry_accept_reserves_before_consumption_and_listener_close_keeps_stream_live() {
+    use mnu_abi::provider;
+    use posix_service::inet_stream_socket::Started;
+    let a = Adapter::new();
+    let mut r = Registry::new();
+    let dropped = Rc::new(Cell::new(0));
+    let mut listener = fresh(&a);
+    listener.bind(address(8000)).unwrap();
+    listener.listen(2).unwrap();
+    let l = r.insert(listener, (501, 20)).unwrap();
+    let c = r.insert(fresh(&a), (501, 20)).unwrap();
+    let Started::Waiting(j) = r.connect(c, address(8000), Lease(dropped.clone())).unwrap() else {
+        panic!()
+    };
+    a.drive();
+    assert_eq!(
+        r.accept(l, wire::Accept { options: 0 }, (502, 21), |_| Err::<(), _>(
+            -12
+        )),
+        Err(-12)
+    );
+    let (s, ()) = r
+        .accept(l, wire::Accept { options: 0 }, (502, 21), |_| Ok(()))
+        .unwrap();
+    assert_eq!(job(&mut r, j, wire::CONTROL_CONNECT_EXPIRE), 0);
+    r.release_job(j).unwrap();
+    r.remove(l).unwrap();
+    assert_eq!(
+        request(&mut r, c, provider::OP_WRITE, 0, b"hello", 5, true).0,
+        0
+    );
+    a.drive();
+    assert_eq!(
+        request(&mut r, s, provider::OP_READ_AT, 0, &[], 5, true).2,
+        b"hello"
+    );
+    assert_eq!(
+        request(&mut r, s, provider::OP_READ, 0, &[], 5, true).2,
+        b"hello"
+    );
+    let stat = control(
+        &mut r,
+        s,
+        wire::CONTROL_STAT,
+        &[],
+        mochios_posix_protocol::FILE_STATUS_LEN as u32,
+    );
+    assert_eq!(stat.0, 0);
+    let stat = mochios_posix_protocol::decode_file_status(&stat.2).unwrap();
+    assert_eq!((stat.uid, stat.gid, stat.mode), (502, 21, 0o140600));
+    assert_eq!((stat.device, stat.inode), (0x5443, s & ((1 << 59) - 1)));
+    assert!(u32::try_from(stat.inode).is_ok());
+    assert_eq!(
+        control(
+            &mut r,
+            c,
+            wire::CONTROL_SHUTDOWN,
+            &wire::SHUTDOWN_WRITE.to_le_bytes(),
+            0
+        )
+        .0,
+        0
+    );
+    a.drive();
+    assert_eq!(request(&mut r, s, provider::OP_READ, 0, &[], 5, true).1, 0);
+    assert_eq!(
+        request(&mut r, s, provider::OP_WRITE, 0, b"reverse", 7, true).0,
+        0
+    );
+    a.drive();
+    assert_eq!(
+        request(&mut r, c, provider::OP_READ, 0, &[], 7, true).2,
+        b"reverse"
+    );
+}
+
+#[test]
+fn registry_rejects_forged_provider_requests_and_clears_forwarded_readiness() {
+    use mnu_abi::provider;
+    use posix_service::inet_stream_socket::Started;
+    let a = Adapter::new();
+    let mut r = Registry::new();
+    let dropped = Rc::new(Cell::new(0));
+    let mut listener = fresh(&a);
+    listener.bind(address(8000)).unwrap();
+    listener.listen(1).unwrap();
+    let l = r.insert(listener, (501, 20)).unwrap();
+    let c = r.insert(fresh(&a), (501, 20)).unwrap();
+    let Started::Waiting(j) = r.connect(c, address(8000), Lease(dropped)).unwrap() else {
+        panic!()
+    };
+    a.drive();
+    let (s, ()) = r
+        .accept(l, wire::Accept { options: 0 }, (501, 20), |_| Ok(()))
+        .unwrap();
+    assert_eq!(
+        request(&mut r, c, provider::OP_WRITE, 0, b"x", 1, false).0,
+        -13
+    );
+    assert_eq!(
+        request(&mut r, s, provider::OP_READ, 0, &[], 1, true).0,
+        -11
+    );
+    let mut signals = Vec::new();
+    r.pump(|id, set| {
+        signals.push((id, set));
+        Ok(())
+    });
+    assert!(signals.contains(&(j, mnu_abi::HANDLE_SIGNAL_READABLE)));
+    assert_eq!(
+        request(&mut r, c, provider::OP_WRITE, 0, b"x", 1, true).0,
+        0
+    );
+    a.drive();
+    r.pump(|id, set| {
+        signals.push((id, set));
+        Ok(())
+    });
+    assert_eq!(
+        signals.iter().rfind(|r| r.0 == s).unwrap().1 & mnu_abi::HANDLE_SIGNAL_READABLE,
+        mnu_abi::HANDLE_SIGNAL_READABLE
+    );
+    request(&mut r, s, provider::OP_READ, 0, &[], 1, true);
+    r.pump(|id, set| {
+        signals.push((id, set));
+        Ok(())
+    });
+    assert_eq!(
+        signals.iter().rfind(|r| r.0 == s).unwrap().1 & mnu_abi::HANDLE_SIGNAL_READABLE,
+        0
+    );
+    let mut watches = Vec::new();
+    r.watches(|h, i| watches.push((h, i)));
+    assert!(!watches.is_empty());
 }

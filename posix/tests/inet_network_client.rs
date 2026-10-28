@@ -33,7 +33,8 @@ impl ObjectTransport for Mock {
         let mut s = self.0.borrow_mut();
         s.calls += 1;
         let mode = s.mode;
-        let factory = request == a::ACQUIRE;
+        let stream = request.starts_with(b"NTCP");
+        let factory = stream || request == a::ACQUIRE;
         let rights = if factory {
             mnu_abi::HANDLE_RIGHT_CONTROL
                 | mnu_abi::HANDLE_RIGHT_DUPLICATE
@@ -59,7 +60,16 @@ impl ObjectTransport for Mock {
         if mode == 4 {
             return Err(());
         }
-        if factory {
+        if stream {
+            use mochios_net_device_protocol::stream as w;
+            let scopes = u32::from_le_bytes(request[8..12].try_into().unwrap());
+            assert_eq!(request, w::scoped(w::ACQUIRE, scopes).unwrap());
+            w::reply(w::ACQUIRE, if mode == 1 { -13 } else { 0 }, response).unwrap();
+            if mode == 5 {
+                response[12] = 1;
+            }
+            Ok(w::REPLY_LEN)
+        } else if factory {
             a::reply(if mode == 1 { -13 } else { 0 }, response).unwrap();
             if mode == 5 {
                 response[12] = 1;
@@ -127,4 +137,39 @@ fn getter_and_factory_failure_cleanup_are_owned_distinct_and_never_replayed() {
             }
         }
     }
+}
+
+#[test]
+fn tcp_acquisition_preserves_scope_subset_and_checks_reply_ownership() {
+    for scopes in [
+        network::CONNECT_SCOPE,
+        network::LISTEN_SCOPE,
+        network::CONNECT_SCOPE | network::LISTEN_SCOPE,
+    ] {
+        for mode in 0..=5 {
+            let state = Rc::new(RefCell::new(State { mode, calls: 0 }));
+            let transport = Mock(state.clone());
+            let mut closed = Vec::new();
+            let result = network::acquire_stream_factory(&transport, scopes, |h| closed.push(h));
+            assert_eq!(result.is_ok(), mode == 0);
+            assert_eq!(state.borrow().calls, 1);
+            assert_eq!(
+                closed,
+                if matches!(mode, 0 | 1) {
+                    vec![]
+                } else {
+                    vec![41]
+                }
+            );
+        }
+    }
+    let state = Rc::new(RefCell::new(State::default()));
+    let transport = Mock(state.clone());
+    for scopes in [0, 4, u32::MAX] {
+        assert_eq!(
+            network::acquire_stream_factory(&transport, scopes, |_| panic!()),
+            Err(ClientError::Remote(-22))
+        );
+    }
+    assert_eq!(state.borrow().calls, 0);
 }

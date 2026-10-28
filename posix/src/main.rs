@@ -25,6 +25,8 @@ mod shared_memory_provider;
 
 #[cfg(target_os = "mochios")]
 mod socket_native;
+#[cfg(target_os = "mochios")]
+mod socket_tcp_native;
 
 #[cfg(target_os = "mochios")]
 mod fifo_native;
@@ -823,11 +825,16 @@ fn main() {
                     protocol::socket::Create::decode(payload)
                         .map_err(|_| -22)
                         .and_then(|create| {
-                            let factory=if create.domain==protocol::socket::Domain::Ipv4
-                                && create.kind==protocol::socket::Kind::Datagram && header.opcode==protocol::OP_SOCKET_CREATE {
-                                if attachments.len()!=1 {return Err(-13);}
+                            let factory = if create.domain == protocol::socket::Domain::Ipv4
+                                && matches!(create.kind, protocol::socket::Kind::Datagram | protocol::socket::Kind::Stream)
+                                && header.opcode == protocol::OP_SOCKET_CREATE
+                            {
+                                if attachments.len() != 1 { return Err(-13); }
                                 Some(attachments[0])
-                            } else {if !attachments.is_empty(){return Err(-22);} None};
+                            } else {
+                                if !attachments.is_empty() { return Err(-22); }
+                                None
+                            };
                             socket_native::create(
                                 socket_endpoint,
                                 peer.process_id,

@@ -6,6 +6,7 @@ use std::{cell::RefCell, rc::Rc};
 #[derive(Default)]
 struct State {
     mode: u8,
+    stream: bool,
     calls: usize,
 }
 #[derive(Clone)]
@@ -29,7 +30,14 @@ impl ObjectTransport for Mock {
     ) -> Result<usize, ()> {
         let (header, payload) = p::decode(request).unwrap();
         assert_eq!((header.opcode, header.flags), (p::OP_SOCKET_CREATE, 0));
-        assert_eq!(w::Create::decode(payload).unwrap(), create());
+        assert_eq!(
+            w::Create::decode(payload).unwrap(),
+            if self.0.borrow().stream {
+                tcp_create()
+            } else {
+                create()
+            }
+        );
         assert_eq!(handles.len(), 1);
         assert_eq!(
             handles.get(0).unwrap(),
@@ -102,7 +110,11 @@ fn creation_transfers_factory_borrow_and_returns_one_socket_reference() {
 #[test]
 fn malformed_replies_and_transport_failure_close_only_distinct_owned_results() {
     for mode in 1..=6 {
-        let state = Rc::new(RefCell::new(State { mode, calls: 0 }));
+        let state = Rc::new(RefCell::new(State {
+            mode,
+            calls: 0,
+            ..Default::default()
+        }));
         let c = Client::new(Mock(state.clone()));
         let mut closed = vec![];
         assert!(
@@ -151,5 +163,59 @@ fn invalid_requests_do_not_contact_the_service_or_consume_the_factory() {
         ),
         Err(ClientError::Remote(-13))
     );
+    assert_eq!(state.borrow().calls, 0);
+}
+
+fn tcp_create() -> w::Create {
+    w::Create {
+        kind: w::Kind::Stream,
+        protocol: 6,
+        ..create()
+    }
+}
+#[test]
+fn tcp_factory_creation_and_failure_cleanup_use_the_same_explicit_authority_boundary() {
+    for mode in 0..=6 {
+        let state = Rc::new(RefCell::new(State {
+            mode,
+            stream: true,
+            ..Default::default()
+        }));
+        let c = Client::new(Mock(state.clone()));
+        let mut closed = Vec::new();
+        let result = c.open_inet_stream(tcp_create(), factory(), |h| closed.push(h));
+        assert_eq!(result.is_ok(), mode == 0);
+        assert_eq!(state.borrow().calls, 1);
+        assert_eq!(
+            closed,
+            if matches!(mode, 0 | 5) {
+                vec![]
+            } else {
+                vec![41]
+            }
+        );
+    }
+    let state = Rc::new(RefCell::new(State::default()));
+    let c = Client::new(Mock(state.clone()));
+    for request in [
+        create(),
+        w::Create {
+            domain: w::Domain::Unix,
+            ..tcp_create()
+        },
+        w::Create {
+            protocol: 17,
+            ..tcp_create()
+        },
+        w::Create {
+            options: 2,
+            ..tcp_create()
+        },
+    ] {
+        assert_eq!(
+            c.open_inet_stream(request, factory(), |_| panic!()),
+            Err(ClientError::Remote(-22))
+        );
+    }
     assert_eq!(state.borrow().calls, 0);
 }

@@ -391,6 +391,12 @@ impl Server {
                         data[..4].copy_from_slice(&self.backend.take_error(socket)?.to_le_bytes());
                         Ok((4, 4))
                     }
+                    wire::CANCEL_CONNECT if input.is_empty() && header.length == 4 => {
+                        data[..4].copy_from_slice(
+                            &u32::from(self.backend.cancel_connect(socket)?).to_le_bytes(),
+                        );
+                        Ok((4, 4))
+                    }
                     _ => Err(-95),
                 },
                 _ => Err(-95),

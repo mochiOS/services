@@ -412,6 +412,43 @@ impl Loopback {
     fn room(&mut self) -> bool {
         self.pending.len() < QUEUE_LIMIT && self.pending.try_reserve(1).is_ok()
     }
+    pub(crate) fn cancel_connect(&mut self, socket: Socket) -> Result<bool, i32> {
+        let i = self.index(socket)?;
+        if let Some(e) = self.rows[i].failure {
+            return Err(e);
+        }
+        let Binding::Connection { tcp, owner } = self.rows[i].binding else {
+            return Err(-107);
+        };
+        let c = self.table.get_mut(tcp, owner).map_err(error)?;
+        if self.rows[i].connected || matches!(c.state, TcpState::Established | TcpState::CloseWait) {
+            return Ok(true);
+        }
+        if c.state != TcpState::SynSent {
+            return Err(-103);
+        }
+        let packet = Packet {
+            tuple: c.tuple,
+            origin: None,
+            transmit: TcpTransmit {
+                sequence: c.send_next,
+                acknowledgment: 0,
+                flags: TCP_FLAG_RST,
+                window: 0,
+                options: TcpOptions::default(),
+                payload: Vec::new(),
+                retransmission: false,
+            },
+        };
+        c.abort();
+        self.rows[i].failure = Some(-103);
+        self.rows[i].pending_error = -103;
+        self.pending.retain(|p| p.origin != Some(tcp));
+        if self.room() {
+            self.pending.push_back(packet);
+        }
+        Ok(false)
+    }
     fn abort(&mut self, tcp: u64, owner: u64) {
         if let Ok(c) = self.table.get_mut(tcp, owner) {
             let packet = Packet {

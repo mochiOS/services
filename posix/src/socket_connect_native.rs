@@ -106,6 +106,8 @@ pub fn dispatch(
     inet: &mut posix_service::inet_socket::Registry<
         posix_service::inet_datagram_native::NetworkBackend,
     >,
+    tcp: &mut super::socket_tcp_native::Registry,
+    retained_source: &mut bool,
     sender: u64,
     bytes: &[u8],
     attachments: &platform::ipc::IpcObjectHandles,
@@ -130,6 +132,22 @@ pub fn dispatch(
         let process_id = u64::from_le_bytes(bytes[4..12].try_into().map_err(|_| -22)?);
         let client = platform::handle::identify_provider_object(source.handle)
             .map_err(|e| e.raw() as i32)?;
+        if posix_service::inet_stream_socket::is_stream(client) {
+            {
+                let state = state.lock().map_err(|_| -5)?;
+                state.registered_peer(process_id).ok_or(-1)?;
+            }
+            *retained_source = true;
+            super::socket_tcp_native::connect(
+                tcp,
+                endpoint,
+                sender,
+                client,
+                address,
+                super::socket_tcp_native::OwnedSource(source.handle),
+            )?;
+            return Ok(None);
+        }
         if posix_service::inet_socket::is_inet(client) {
             {
                 let state = state.lock().map_err(|_| -5)?;

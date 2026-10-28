@@ -96,10 +96,11 @@ pub fn run(posix: u32, network: u32) {
     #[cfg(mochios_llvm_runtime_probe_215)]
     {
         llvm_runtime::run();
-        unsafe {
-            alarm(0);
+        #[cfg(not(mochios_tcp_socket_276))]
+        {
+            unsafe { alarm(0); }
+            return;
         }
-        return;
     }
     let client = Client::new(SyscallEndpointTransport::new(posix));
     let inherited = Client::from_syscall_launch_context().expect("libc POSIX launch endpoint");

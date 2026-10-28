@@ -162,6 +162,7 @@ fn run(endpoint: u32, service_process: u64, service: Arc<Mutex<PosixService<u32>
     let mut inet = posix_service::inet_socket::Registry::<
         posix_service::inet_datagram_native::NetworkBackend,
     >::new();
+    let mut tcp = super::socket_tcp_native::Registry::new();
     let mut bindings = posix_service::socket_binding::Bindings::new();
     let mut jobs = posix_service::socket_connect::Connections::new();
     let mut receive_waits = posix_service::socket_receive_wait::ReceiveWaits::new();
@@ -218,6 +219,7 @@ fn run(endpoint: u32, service_process: u64, service: Arc<Mutex<PosixService<u32>
             platform::handle::signal_provider_object(id, set, all & !set)
                 .map_err(|error| mochios_posix_protocol::status::normalize_failure(error.raw()))
         });
+        super::socket_tcp_native::pump(&mut tcp);
         let mut watches = [mnu_abi::HandleWaitItem::default(); mnu_abi::HANDLE_WAIT_MANY_MAX_ITEMS];
         watches[0] = mnu_abi::HandleWaitItem {
             handle: endpoint,
@@ -227,6 +229,18 @@ fn run(endpoint: u32, service_process: u64, service: Arc<Mutex<PosixService<u32>
         let mut count = 1;
         let mut overflow = false;
         inet.watches(|handle, interests| {
+            if count < watches.len() {
+                watches[count] = mnu_abi::HandleWaitItem {
+                    handle,
+                    interests,
+                    ..Default::default()
+                };
+                count += 1;
+            } else {
+                overflow = true;
+            }
+        });
+        tcp.watches(|handle, interests| {
             if count < watches.len() {
                 watches[count] = mnu_abi::HandleWaitItem {
                     handle,
@@ -337,6 +351,8 @@ fn run(endpoint: u32, service_process: u64, service: Arc<Mutex<PosixService<u32>
                 &bindings,
                 &mut jobs,
                 &mut inet,
+                &mut tcp,
+                &mut retained_receive_source,
                 sender,
                 bytes,
                 &attachments,
@@ -349,6 +365,7 @@ fn run(endpoint: u32, service_process: u64, service: Arc<Mutex<PosixService<u32>
                 service_process,
                 &service,
                 &mut streams,
+                &mut tcp,
                 sender,
                 bytes,
                 &attachments,
@@ -371,7 +388,7 @@ fn run(endpoint: u32, service_process: u64, service: Arc<Mutex<PosixService<u32>
                 let process_id = u64::from_le_bytes(bytes[4..12].try_into().unwrap());
                 let create = wire::Create::decode(&bytes[12..]).map_err(|_| -22)?;
                 let inet_create = create.domain == wire::Domain::Ipv4
-                    && create.kind == wire::Kind::Datagram
+                    && matches!(create.kind, wire::Kind::Datagram | wire::Kind::Stream)
                     && !pair;
                 if (!inet_create && attachments.count != 0)
                     || (inet_create && attachments.count != 1)
@@ -386,22 +403,34 @@ fn run(endpoint: u32, service_process: u64, service: Arc<Mutex<PosixService<u32>
                     {
                         return Err(-13);
                     }
-                    let network = {
+                    let (network, credentials) = {
                         let state = service.lock().map_err(|_| -5)?;
-                        state.registered_peer(process_id).ok_or(-1)?;
-                        state.network_endpoint().ok_or(-6)?
+                        let peer = state.registered_peer(process_id).ok_or(-1)?;
+                        (
+                            state.network_endpoint().ok_or(-6)?,
+                            (peer.effective_uid, peer.effective_gid),
+                        )
                     };
                     consumed_attachments = 1;
-                    let backend = posix_service::inet_datagram_native::NetworkBackend::new(
-                        network,
-                        posix_service::OpenedObject {
-                            handle: source.handle,
-                            rights: source.rights,
-                        },
-                    )?;
-                    backend.validate()?;
-                    let socket = posix_service::inet_datagram::Datagram::new(backend, create)?;
-                    [inet.insert(socket)?, 0]
+                    let factory = posix_service::OpenedObject {
+                        handle: source.handle,
+                        rights: source.rights,
+                    };
+                    if create.kind == wire::Kind::Stream {
+                        let backend = posix_service::inet_stream_native::NetworkBackend::new(
+                            network, factory,
+                        )?;
+                        backend.validate()?;
+                        let socket = posix_service::inet_stream::Stream::new(backend, create)?;
+                        [tcp.insert(socket, credentials)?, 0]
+                    } else {
+                        let backend = posix_service::inet_datagram_native::NetworkBackend::new(
+                            network, factory,
+                        )?;
+                        backend.validate()?;
+                        let socket = posix_service::inet_datagram::Datagram::new(backend, create)?;
+                        [inet.insert(socket)?, 0]
+                    }
                 } else {
                     let state = service.lock().map_err(|_| -5)?;
                     let peer = state.registered_peer(process_id).ok_or(-1)?;
@@ -426,7 +455,9 @@ fn run(endpoint: u32, service_process: u64, service: Arc<Mutex<PosixService<u32>
                                 }
                             }
                             for id in ids.into_iter().take(count) {
-                                if posix_service::inet_socket::is_inet(id) {
+                                if posix_service::inet_stream_socket::is_stream(id) {
+                                    let _ = tcp.remove(id);
+                                } else if posix_service::inet_socket::is_inet(id) {
                                     let _ = inet.remove(id);
                                 } else {
                                     let _ = streams.release(id);
@@ -436,7 +467,9 @@ fn run(endpoint: u32, service_process: u64, service: Arc<Mutex<PosixService<u32>
                         }
                     }
                 }
-                if inet_create {
+                if posix_service::inet_stream_socket::is_stream(ids[0]) {
+                    super::socket_tcp_native::pump(&mut tcp);
+                } else if inet_create {
                     if let Err(error) = platform::handle::signal_provider_object(
                         ids[0],
                         mnu_abi::HANDLE_SIGNAL_WRITABLE,
@@ -473,7 +506,9 @@ fn run(endpoint: u32, service_process: u64, service: Arc<Mutex<PosixService<u32>
                     {
                         for handle in handles.into_iter().take(count) {
                             if let Ok(id) = platform::handle::identify_provider_object(handle) {
-                                if posix_service::inet_socket::is_inet(id) {
+                                if posix_service::inet_stream_socket::is_stream(id) {
+                                    let _ = tcp.remove(id);
+                                } else if posix_service::inet_socket::is_inet(id) {
                                     let _ = inet.remove(id);
                                 }
                             }
@@ -495,6 +530,33 @@ fn run(endpoint: u32, service_process: u64, service: Arc<Mutex<PosixService<u32>
                 .filter(|(header, _)| native && header.opcode == provider::OP_RELEASE)
                 .and_then(|(header, _)| streams.release_observers(header.object_id).ok());
             if let Some((header, payload)) = decoded {
+                if posix_service::inet_stream_socket::is_stream(header.object_id)
+                    || posix_service::inet_stream_socket::is_job(header.object_id)
+                {
+                    let result = tcp.dispatch(
+                        bytes,
+                        attachments.delivery_flags,
+                        attachments.count,
+                        &mut response,
+                    );
+                    // Publish drained levels before completing the native request.
+                    super::socket_tcp_native::pump(&mut tcp);
+                    match result {
+                        Ok(Some(n)) => {
+                            let _ = platform::ipc::reply(sender, &response[..n]);
+                        }
+                        Ok(None) | Err(-9) if native && header.opcode == provider::OP_RELEASE => (),
+                        Err(error) => platform::logln!(
+                            "posix.service: TCP Provider request rejected status={}",
+                            error
+                        ),
+                        _ => (),
+                    }
+                    for object in attachments.handles.iter().take(attachments.count as usize) {
+                        let _ = platform::handle::close(object.handle);
+                    }
+                    continue;
+                }
                 if posix_service::inet_socket::is_inet(header.object_id) {
                     match inet.dispatch(
                         bytes,

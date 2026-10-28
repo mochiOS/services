@@ -22,6 +22,9 @@ pub trait Backend: Sized {
     fn peer(&mut self, handle: Self::Handle) -> Result<Endpoint, i32>;
     fn bind(&mut self, handle: Self::Handle, local: Endpoint) -> Result<(), i32>;
     fn connect(&mut self, handle: Self::Handle, peer: Endpoint) -> Result<(), i32>;
+    /// True preserves a connection that already committed. False aborts only
+    /// an uncommitted open; an already determined failure is returned as Err.
+    fn cancel_connect(&mut self, handle: Self::Handle) -> Result<bool, i32>;
     fn listen(&mut self, handle: Self::Handle, backlog: usize) -> Result<(), i32>;
     fn accept(&mut self, handle: Self::Handle) -> Result<(Self, Self::Handle), i32>;
     fn observe(&mut self, handle: Self::Handle) -> Result<Observation, i32>;
@@ -238,6 +241,33 @@ impl<B: Backend> Stream<B> {
     /// must already hold the description's native reference.
     pub fn attempt(&self) -> u64 {
         self.attempt
+    }
+    pub fn cancel_connect(&mut self, attempt: u64, reason: i32) -> Result<ConnectProgress, i32> {
+        if !(-4095..=-1).contains(&reason) {
+            return Err(-22);
+        }
+        match self.connect_result(attempt)? {
+            ConnectProgress::Connected => Ok(ConnectProgress::Connected),
+            ConnectProgress::Pending => match self.backend.cancel_connect(self.handle) {
+                Ok(true) => match self.connect_result(attempt)? {
+                    ConnectProgress::Connected => Ok(ConnectProgress::Connected),
+                    ConnectProgress::Pending => {
+                        self.fail(-5);
+                        Err(-5)
+                    }
+                },
+                Ok(false) => {
+                    self.fail(reason);
+                    Err(reason)
+                }
+                Err(e) => {
+                    if matches!(e, -103 | -104 | -110 | -111) {
+                        self.fail(e);
+                    }
+                    Err(e)
+                }
+            },
+        }
     }
     pub fn connect_result(&mut self, attempt: u64) -> Result<ConnectProgress, i32> {
         if attempt == 0 || attempt != self.attempt {

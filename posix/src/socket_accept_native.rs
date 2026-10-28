@@ -99,6 +99,7 @@ pub fn dispatch(
     service_process: u64,
     state: &Arc<Mutex<PosixService<u32>>>,
     streams: &mut Streams,
+    tcp: &mut super::socket_tcp_native::Registry,
     sender: u64,
     bytes: &[u8],
     attachments: &platform::ipc::IpcObjectHandles,
@@ -129,16 +130,31 @@ pub fn dispatch(
         };
         let listener = platform::handle::identify_provider_object(attached.handle)
             .map_err(|e| e.raw() as i32)?;
-        let ticket = streams.begin_accept(listener)?;
-        Ok((listener, ticket, credentials, request.options))
+        Ok((listener, credentials, request))
     })();
-    let (listener, ticket, credentials, options) = match authorized {
+    let (listener, credentials, request) = match authorized {
         Ok(value) => value,
         Err(error) => {
             let _ = platform::ipc::reply(sender, &error.to_le_bytes());
             return None;
         }
     };
+    if posix_service::inet_stream_socket::is_stream(listener) {
+        if let Err(error) =
+            super::socket_tcp_native::accept(tcp, endpoint, sender, listener, request, credentials)
+        {
+            let _ = platform::ipc::reply(sender, &error.to_le_bytes());
+        }
+        return None;
+    }
+    let ticket = match streams.begin_accept(listener) {
+        Ok(ticket) => ticket,
+        Err(error) => {
+            let _ = platform::ipc::reply(sender, &error.to_le_bytes());
+            return None;
+        }
+    };
+    let options = request.options;
     let id = ticket.endpoint();
     let mut replied = false;
     let result: Result<[u64; 2], i32> = (|| {
