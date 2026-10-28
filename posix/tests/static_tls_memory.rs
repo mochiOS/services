@@ -284,3 +284,77 @@ fn copies_from_a_relocated_program_and_preserves_metadata_errors() {
     destroy(&control);
     assert!(MAPPINGS.with_borrow(|m| m.is_empty()));
 }
+
+#[test]
+fn multiple_modules_get_private_initialized_and_zeroed_storage_per_thread() {
+    let root = [17u8; 1200];
+    let library = [39u8; 513];
+    let template = |data: &[u8], memory_size, alignment, residue| static_tls::Template {
+        source: data.as_ptr() as usize,
+        file_size: data.len(),
+        memory_size,
+        alignment,
+        residue,
+    };
+    let templates = [
+        Some(template(&root, 1203, 16, 3)),
+        None,
+        Some(template(&library, 9000, 8192, 13)),
+        Some(template(&[], 4099, 64, 7)),
+    ];
+    let plan = static_tls::modules::Plan::new(&templates, PAGE_SIZE).unwrap();
+    let threads = [ThreadControl::default(), ThreadControl::default()];
+    for thread in &threads {
+        runtime::allocate_templates(thread, &templates).unwrap();
+        let tp = thread.thread_local_base.load(Ordering::Acquire) as usize;
+        assert_eq!(unsafe { *(tp as *const usize) }, tp);
+        for module in plan.modules() {
+            let start = tp - module.distance;
+            assert_eq!(start % module.template.alignment, module.template.residue);
+            let bytes = unsafe {
+                std::slice::from_raw_parts(start as *const u8, module.template.memory_size)
+            };
+            let original = match module.index {
+                0 => &root[..],
+                2 => &library[..],
+                3 => &[],
+                _ => panic!("no TLS segment"),
+            };
+            assert_eq!(&bytes[..original.len()], original);
+            assert!(bytes[original.len()..].iter().all(|&b| b == 0));
+        }
+    }
+    let library = plan.modules().find(|module| module.index == 2).unwrap();
+    let first = threads[0].thread_local_base.load(Ordering::Acquire) as usize - library.distance;
+    let second = threads[1].thread_local_base.load(Ordering::Acquire) as usize - library.distance;
+    unsafe { *(first as *mut u8) = 61 };
+    assert_eq!(unsafe { *(second as *const u8) }, 39);
+    for thread in &threads {
+        destroy(thread);
+    }
+    assert!(MAPPINGS.with_borrow(|m| m.is_empty()));
+}
+
+#[test]
+fn failure_in_any_module_or_tcb_rolls_back_before_publication() {
+    let data = [71u8; 1200];
+    let template = static_tls::Template {
+        source: data.as_ptr() as usize,
+        file_size: data.len(),
+        memory_size: 4097,
+        alignment: 64,
+        residue: 3,
+    };
+    let templates = [Some(template), None, Some(template)];
+    // Two modules, each with three read/write chunks, then one TCB write.
+    for fail in 0..13 {
+        COPY_FAIL.set(fail);
+        COPIES.set(0);
+        let control = ThreadControl::default();
+        assert_eq!(runtime::allocate_templates(&control, &templates), Err(14));
+        assert_eq!(control.thread_local_base.load(Ordering::Acquire), 0);
+        assert_eq!(control.tls_mapping_base.load(Ordering::Acquire), 0);
+        assert_eq!(control.tls_mapping_size.load(Ordering::Acquire), 0);
+        assert!(MAPPINGS.with_borrow(|m| m.is_empty()));
+    }
+}
