@@ -1432,6 +1432,93 @@ fn exec_embeds_resolved_lifecycle_plan_only_for_a_declared_runtime() {
 }
 
 #[test]
+fn exec_serializes_tls_templates_with_child_addresses_and_the_original_object_indexes() {
+    use mochios_posix_client::{
+        process_image::{AT_IMAGE_LOAD_BIAS, AT_TLS_IMAGE},
+        static_tls::image,
+    };
+    let (root, library) =
+        dependency_fixture(&["-DMOCHIOS_TLS_RUNTIME", "-Wl,-rpath,/libraries"], &[]);
+    let parsed = mochios_posix_client::pie::Pie::parse_object(&root).unwrap();
+    assert!(parsed.has_static_tls_runtime().unwrap());
+    assert_eq!(
+        search_exec(&root, &[(b"/libraries/libscope.so", &library)], &[], 0, 0),
+        Err(ENOEXEC)
+    );
+    STATE.with_borrow(|state| {
+        assert_eq!(state.entered, 1);
+        let decoded = mnu_abi::process_image::decode(&state.startup).unwrap();
+        let stack = decoded.stack();
+        let word =
+            |offset| u64::from_le_bytes(stack[offset..offset + 8].try_into().unwrap()) as usize;
+        let mut cursor = (word(0) + 2) * 8;
+        while word(cursor) != 0 {
+            cursor += 8;
+        }
+        cursor += 8;
+        let mut payload = None;
+        let mut bias = None;
+        while word(cursor) != 0 {
+            match word(cursor) as u64 {
+                AT_TLS_IMAGE => {
+                    assert!(payload.replace(word(cursor + 8)).is_none());
+                    assert!(
+                        decoded
+                            .relocations()
+                            .any(|relocation| relocation.offset as usize == cursor + 8
+                                && relocation.kind
+                                    == mnu_abi::process_image::RelocationKind::StackAddress)
+                    );
+                }
+                AT_IMAGE_LOAD_BIAS => {
+                    bias = Some(word(cursor + 8));
+                }
+                _ => {}
+            }
+            cursor += 16;
+        }
+        let offset = payload.expect("TLS metadata must reach the startup stack");
+        let mut templates = [None; 2];
+        let count = image::decode(
+            0x10000 + offset,
+            stack.len() - offset,
+            &mut templates,
+            |address, output| -> Result<(), i32> {
+                let offset = address - 0x10000;
+                output.copy_from_slice(&stack[offset..offset + output.len()]);
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(count, 2);
+        assert_eq!(
+            templates[0],
+            parsed.tls_template(bias.unwrap() as u64).unwrap()
+        );
+        assert_eq!(templates[1], None);
+        let template = templates[0].unwrap();
+        let count = u16::from_le_bytes(state.prepared[56..58].try_into().unwrap()) as usize;
+        let source = state.prepared[64..64 + count * 56]
+            .chunks_exact(56)
+            .find_map(|header| {
+                let word = |offset| {
+                    u64::from_le_bytes(header[offset..offset + 8].try_into().unwrap()) as usize
+                };
+                if header[0] != 1
+                    || template.source < word(16)
+                    || template.source + template.file_size > word(16) + word(32)
+                {
+                    return None;
+                }
+                Some(word(8) + template.source - word(16))
+            })
+            .expect("template bytes must name a child LOAD, never producer memory");
+        assert_eq!(&state.prepared[source..source + 4], &17u32.to_le_bytes());
+        assert!(!state.closed.contains(&19));
+    });
+}
+
+#[test]
 fn fixed_executable_preparation_preserves_entry_bias_and_private_source_headers() {
     let script =
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/support/native_dynamic.ld");

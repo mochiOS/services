@@ -294,6 +294,7 @@ fn process_entry_identity_is_literal_userspace_data_before_any_runtime_patch() {
                 image: None,
                 identity,
                 lifecycle: &[],
+                tls: &[],
             },
             &mut output,
         )
@@ -337,6 +338,7 @@ fn process_entry_identity_is_literal_userspace_data_before_any_runtime_patch() {
                     image: None,
                     identity,
                     lifecycle: &[],
+                    tls: &[],
                 },
                 &mut output
             ),
@@ -410,6 +412,90 @@ fn lifecycle_bytes_are_aligned_opaque_stack_data_with_one_generic_relocation() {
             &[],
             Process {
                 lifecycle: &oversized,
+                ..Process::default()
+            },
+            &mut output
+        ),
+        Err(EncodeError::ImageTooLarge)
+    );
+}
+
+#[test]
+fn tls_and_lifecycle_payloads_are_separate_aligned_and_share_the_total_stack_limit() {
+    use mochios_posix_client::process_image::{
+        AT_LIFECYCLE_IMAGE, AT_TLS_IMAGE, Process, encode_initial_stack_for_process,
+    };
+    let lifecycle = b"abc";
+    let tls = b"\0TLS\xff\0";
+    let mut output = [0; process_image::MAX_IMAGE_BYTES];
+    let length = encode_initial_stack_for_process(
+        &[b"program"],
+        &[],
+        b"program",
+        [0; 16],
+        &[],
+        Process {
+            lifecycle,
+            tls,
+            ..Process::default()
+        },
+        &mut output,
+    )
+    .unwrap();
+    let decoded = process_image::decode(&output[..length]).unwrap();
+    let stack = decoded.stack();
+    let mut offsets = Vec::new();
+    for (index, pair) in stack[4 * 8..].chunks_exact(16).enumerate() {
+        let key = u64::from_le_bytes(pair[..8].try_into().unwrap());
+        if key == 0 {
+            break;
+        }
+        if let Some(payload) = match key {
+            AT_LIFECYCLE_IMAGE => Some(&lifecycle[..]),
+            AT_TLS_IMAGE => Some(&tls[..]),
+            _ => None,
+        } {
+            let offset = u64::from_le_bytes(pair[8..].try_into().unwrap()) as usize;
+            assert_eq!(offset % 8, 0);
+            assert_eq!(&stack[offset..offset + payload.len()], payload);
+            assert_eq!(
+                decoded
+                    .relocations()
+                    .filter(
+                        |relocation| relocation.offset as usize == (4 + index * 2 + 1) * 8
+                            && relocation.kind == RelocationKind::StackAddress
+                    )
+                    .count(),
+                1
+            );
+            offsets.push((offset, payload.len()));
+        }
+    }
+    assert_eq!(offsets.len(), 2);
+    assert!(offsets[0].0 + offsets[0].1 <= offsets[1].0);
+    assert_eq!(
+        encode_initial_stack_for_process(
+            &[b"program"],
+            &[],
+            b"program",
+            [0; 16],
+            &[(AT_TLS_IMAGE, 0)],
+            Process::default(),
+            &mut output
+        ),
+        Err(EncodeError::InvalidText)
+    );
+    let payload = [0u8; process_image::MAX_STACK_BYTES / 2];
+    assert_eq!(
+        encode_initial_stack_for_process(
+            &[b"program"],
+            &[],
+            b"program",
+            [0; 16],
+            &[],
+            Process {
+                lifecycle: &payload,
+                tls: &payload,
                 ..Process::default()
             },
             &mut output

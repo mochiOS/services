@@ -8,6 +8,7 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 type c_int = i32;
 const ENOEXEC: i32 = 8;
 const ENOENT: i32 = 2;
+const E2BIG: i32 = 7;
 const EOVERFLOW: i32 = 75;
 const PAGE_SIZE: usize = 4096;
 const NATIVE_READ_WRITE: u64 = 3;
@@ -19,6 +20,7 @@ thread_local! {
     static COPIES: Cell<usize> = const { Cell::new(0) };
     static BASE_RESULT: Cell<Result<(),i32>> = const { Cell::new(Ok(())) };
     static INSTALLED_BASE: Cell<u64> = const { Cell::new(0) };
+    static TLS_AUX: Cell<Result<usize,i32>> = const { Cell::new(Err(ENOENT)) };
 }
 #[derive(Default)]
 struct ThreadControl {
@@ -47,6 +49,9 @@ mod auxiliary {
                 5 => self.count,
                 key if key == crate::process_image::AT_IMAGE_LOAD_BIAS as usize => {
                     return self.bias;
+                }
+                key if key == crate::process_image::AT_TLS_IMAGE as usize => {
+                    return super::TLS_AUX.get();
                 }
                 _ => panic!(),
             })
@@ -357,4 +362,49 @@ fn failure_in_any_module_or_tcb_rolls_back_before_publication() {
         assert_eq!(control.tls_mapping_size.load(Ordering::Acquire), 0);
         assert!(MAPPINGS.with_borrow(|m| m.is_empty()));
     }
+}
+
+#[test]
+fn crt_uses_serialized_modules_and_rejects_invalid_present_metadata_without_fallback() {
+    use static_tls::{image, modules::Plan};
+    let data = [43u8; 32];
+    let template = static_tls::Template {
+        source: data.as_ptr() as usize,
+        file_size: data.len(),
+        memory_size: 73,
+        alignment: 64,
+        residue: 3,
+    };
+    let templates = [None, Some(template), Some(template)];
+    let mut payload = vec![0; image::encoded_length(3).unwrap()];
+    image::encode(&templates, &mut payload).unwrap();
+    // These root PHDR values must not be consulted when a module image exists.
+    AUX.set(Some(auxiliary::Vector {
+        table: 1,
+        count: 0,
+        bias: Err(14),
+    }));
+    TLS_AUX.set(Ok(payload.as_ptr() as usize));
+    assert_eq!(runtime::__mochios_static_tls_v1(), 1);
+    let control = ThreadControl::default();
+    runtime::allocate(&control).unwrap();
+    let tp = control.thread_local_base.load(Ordering::Acquire) as usize;
+    for module in Plan::new(&templates, PAGE_SIZE).unwrap().modules() {
+        let bytes = unsafe { std::slice::from_raw_parts((tp - module.distance) as *const u8, 73) };
+        assert_eq!(&bytes[..32], &data);
+        assert!(bytes[32..].iter().all(|&byte| byte == 0));
+    }
+    destroy(&control);
+    payload[0] ^= 1;
+    assert_eq!(runtime::allocate(&ThreadControl::default()), Err(ENOEXEC));
+    assert!(MAPPINGS.with_borrow(|m| m.is_empty()));
+    payload[0] ^= 1;
+    COPIES.set(0);
+    COPY_FAIL.set(0);
+    assert_eq!(runtime::allocate(&ThreadControl::default()), Err(14));
+    assert!(MAPPINGS.with_borrow(|m| m.is_empty()));
+    COPY_FAIL.set(usize::MAX);
+    TLS_AUX.set(Err(13));
+    assert_eq!(runtime::allocate(&ThreadControl::default()), Err(13));
+    assert!(MAPPINGS.with_borrow(|m| m.is_empty()));
 }
