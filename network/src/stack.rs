@@ -781,7 +781,7 @@ impl NetworkStack {
             .allocate_handle(random.rotate_left(17))
             .map_err(tcp_errno)?;
         let local_mss = self.info.mtu.saturating_sub(40).max(1);
-        let connection = TcpConnection::connect(
+        let connection = TcpConnection::try_connect(
             handle,
             owner,
             TcpTuple {
@@ -796,7 +796,8 @@ impl NetworkStack {
             TCP_RECEIVE_BUFFER_LIMIT,
             TCP_RETRANSMIT_TIMEOUT,
             TCP_RETRY_LIMIT,
-        );
+        )
+        .map_err(tcp_errno)?;
         self.tcp.insert(connection).map_err(tcp_errno)?;
         self.stats.tcp_connections_attempted =
             self.stats.tcp_connections_attempted.saturating_add(1);

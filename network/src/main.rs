@@ -7,6 +7,7 @@ mod http;
 mod reply;
 mod service;
 mod stack;
+mod stream;
 mod status;
 mod tls;
 
