@@ -36,6 +36,7 @@ int lifecycle_second(void) { return lifecycle_first() + lifecycle_leaf(); }
 #define FINI 'R'
 #define UNDO_FIRST 'I'
 #define UNDO_SECOND 'J'
+unsigned long __mochios_lifecycle_v1(void) { return 1; }
 char lifecycle_events[64];
 unsigned long lifecycle_length;
 void lifecycle_record(char event) {
@@ -51,6 +52,32 @@ extern int lifecycle_first(void);
 extern int lifecycle_second(void);
 int lifecycle_result(void) { return lifecycle_first() + lifecycle_second(); }
 void _start(void) { lifecycle_record('M'); }
+#ifdef LIFECYCLE_NATIVE
+static int same(const char *expected) {
+  unsigned long length = 0;
+  for (; expected[length]; ++length)
+    if (expected[length] != lifecycle_events[length])
+      return 0;
+  return length == lifecycle_length;
+}
+int lifecycle_native_main(void) {
+  if (!same("Pl12f34s56r7X8"))
+    return 1;
+  lifecycle_record('M');
+  return 0;
+}
+int lifecycle_native_fini_ok(void) {
+  return same("Pl12f34s56r7X8MJIRHGSDCFBAL") ? 42 : 98;
+}
+__asm__(".pushsection .text.lifecycle_entry,\"ax\",@progbits\n"
+        ".global lifecycle_entry\n"
+        "lifecycle_entry:\n"
+        "mov %rsp, %rdi\n"
+        "and $-16, %rsp\n"
+        "call lifecycle_test_start\n"
+        "ud2\n"
+        ".popsection\n");
+#endif
 #else
 #error "select a fixture role"
 #endif

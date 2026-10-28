@@ -325,7 +325,11 @@ fn real_library_lifecycle_obeys_dependencies_legacy_functions_and_relocated_arra
             ("LEAF", "libleaf.so", &[][..]),
             ("FIRST", "libfirst.so", &["libleaf.so"][..]),
             ("SECOND", "libsecond.so", &["libfirst.so", "libleaf.so"][..]),
-            ("ROOT", "root", &["libfirst.so", "libsecond.so", "libleaf.so"][..]),
+            (
+                "ROOT",
+                "root",
+                &["libfirst.so", "libsecond.so", "libleaf.so"][..],
+            ),
         ] {
             let mut command = Command::new("x86_64-elf-gcc");
             command.args(["-O2", "-fPIC", "-ffreestanding", "-fno-stack-protector", "-nostdlib"])
@@ -421,7 +425,21 @@ fn real_library_lifecycle_obeys_dependencies_legacy_functions_and_relocated_arra
                     }
                 }
             };
-            plan.initializers(invoke).unwrap();
+            use mochios_posix_client::lifecycle_image::{Image, State};
+            let mut encoded = vec![0; plan.encoded_length().unwrap()];
+            plan.encode_prepared(&bundle, &mut encoded).unwrap();
+            let reader = |address: u64, output: &mut [u8]| -> Result<(), i32> {
+                let offset = (address - 0x10000) as usize;
+                output.copy_from_slice(&encoded[offset..offset + output.len()]);
+                Ok(())
+            };
+            let image = Image::read(0x10000, encoded.len(), reader).unwrap();
+            let state = State::new();
+            let callback = |address| -> Result<(), i32> {
+                invoke(Step::Function { object: 0, address });
+                Ok(())
+            };
+            state.initialize(&image, reader, callback).unwrap();
             let events = || {
                 // SAFETY: these are exported data objects in the mapped root.
                 let length = unsafe {
@@ -446,7 +464,7 @@ fn real_library_lifecycle_obeys_dependencies_legacy_functions_and_relocated_arra
                 object: 0,
                 address: objects[0].bias + root_symbols["_start"],
             });
-            plan.finalizers(invoke).unwrap();
+            state.finalize(&image, reader, callback).unwrap();
             assert_eq!(
                 events(),
                 b"Pl12f34s56r7X8MJIRHGSDCFBAL",

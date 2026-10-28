@@ -1310,3 +1310,123 @@ fn exec_publishes_authenticated_auxiliary_identity_and_removes_secure_loader_env
         assert_eq!(s.entered, 0);
     });
 }
+
+#[test]
+fn exec_embeds_resolved_lifecycle_plan_only_for_a_declared_runtime() {
+    use mochios_posix_client::lifecycle_image::{Image, State};
+    let (root, library) = dependency_fixture(
+        &["-DMOCHIOS_LIFECYCLE_RUNTIME", "-Wl,-rpath,/libraries"],
+        &["-DMOCHIOS_LIFECYCLE_CALLBACKS"],
+    );
+    assert!(
+        mochios_posix_client::pie::Pie::parse_object(&root)
+            .unwrap()
+            .has_lifecycle_runtime()
+            .unwrap()
+    );
+    assert_eq!(
+        search_exec(&root, &[(b"/libraries/libscope.so", &library)], &[], 0, 0),
+        Err(ENOEXEC)
+    );
+    STATE.with_borrow(|state| {
+        assert_eq!(state.entered, 1);
+        assert!(!state.closed.contains(&19));
+        let decoded = mnu_abi::process_image::decode(&state.startup).unwrap();
+        let stack = decoded.stack();
+        let word =
+            |offset| u64::from_le_bytes(stack[offset..offset + 8].try_into().unwrap()) as usize;
+        let mut cursor = (word(0) + 2) * 8;
+        while word(cursor) != 0 {
+            cursor += 8;
+        }
+        cursor += 8;
+        let mut payload = None;
+        while word(cursor) != 0 {
+            if word(cursor) == mochios_posix_client::process_image::AT_LIFECYCLE_IMAGE as usize {
+                assert!(payload.replace(word(cursor + 8)).is_none());
+                assert!(
+                    decoded
+                        .relocations()
+                        .any(|relocation| relocation.offset as usize == cursor + 8
+                            && relocation.kind
+                                == mnu_abi::process_image::RelocationKind::StackAddress)
+                );
+            }
+            cursor += 16;
+        }
+        let offset = payload.expect("lifecycle image must survive native startup encoding");
+        assert_eq!(offset % 8, 0);
+        let reader = |address: u64, output: &mut [u8]| -> Result<(), i32> {
+            let offset = (address - 0x10000) as usize;
+            output.copy_from_slice(&stack[offset..offset + output.len()]);
+            Ok(())
+        };
+        let image = Image::read(0x10000 + offset as u64, stack.len() - offset, reader).unwrap();
+        let lifecycle = State::new();
+        let mut events = Vec::new();
+        lifecycle
+            .initialize(&image, reader, |address| {
+                events.push(address);
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(events.len(), 2);
+        lifecycle
+            .finalize(&image, reader, |address| {
+                events.push(address);
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(events.len(), 4);
+        for address in events {
+            let count = u16::from_le_bytes(state.prepared[56..58].try_into().unwrap()) as usize;
+            assert!(
+                state.prepared[64..64 + count * 56]
+                    .chunks_exact(56)
+                    .any(|header| {
+                        let kind = u32::from_le_bytes(header[..4].try_into().unwrap());
+                        let flags = u32::from_le_bytes(header[4..8].try_into().unwrap());
+                        let base = u64::from_le_bytes(header[16..24].try_into().unwrap());
+                        let memory = u64::from_le_bytes(header[40..48].try_into().unwrap());
+                        kind == 1 && flags & 1 != 0 && address >= base && address < base + memory
+                    })
+            );
+        }
+    });
+    let (unmarked, library) = dependency_fixture(
+        &["-Wl,-rpath,/libraries"],
+        &["-DMOCHIOS_LIFECYCLE_CALLBACKS"],
+    );
+    assert_eq!(
+        search_exec(
+            &unmarked,
+            &[(b"/libraries/libscope.so", &library)],
+            &[],
+            0,
+            0
+        ),
+        Err(ENOEXEC)
+    );
+    STATE.with_borrow(|state| assert_eq!(state.entered, 0));
+    let (bad, library) = dependency_fixture(
+        &[
+            "-DMOCHIOS_LIFECYCLE_RUNTIME",
+            "-DMOCHIOS_LIFECYCLE_BAD_CALLBACK",
+            "-Wl,-rpath,/libraries",
+        ],
+        &["-DMOCHIOS_LIFECYCLE_CALLBACKS"],
+    );
+    assert_eq!(
+        search_exec(&bad, &[(b"/libraries/libscope.so", &library)], &[], 0, 0),
+        Err(ENOEXEC)
+    );
+    STATE.with_borrow(|state| {
+        assert_eq!(state.entered, 0);
+        assert!(state.prepared.is_empty());
+        assert!(!state.closed.contains(&19));
+        assert_eq!(
+            state.closed.iter().filter(|&&handle| handle == 200).count(),
+            1
+        );
+    });
+}
