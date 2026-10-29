@@ -117,6 +117,38 @@ fn main() {
         let sender = message >> 32;
         let length = (message & 0xffff_ffff) as usize;
         let request = &request_bytes[..length.min(request_bytes.len())];
+        if request.starts_with(&protocol::storage_reservation::MAGIC) {
+            let result = filesystem_service::storage_reservation::admit(request, &attached, || {
+                platform::capability::check_thread(sender, "device.storage") == Ok(1)
+            })
+            .and_then(|request| service.reserve_storage(request))
+            .and_then(|object| {
+                filesystem_service::storage_reservation::publish(
+                    object,
+                    |id, rights| {
+                        platform::handle::create_provider_object(endpoint, id, rights).map_err(|_| 5)
+                    },
+                    |id| {
+                        let _ = service.provider_close(id);
+                    },
+                )
+            });
+            match result {
+                Ok(object) => {
+                    let mut outgoing = platform::ipc::IpcObjectHandles::default();
+                    outgoing.count = 1;
+                    outgoing.handles[0] = object;
+                    let _ = platform::ipc::reply_object_handles(sender, &0i64.to_le_bytes(), &outgoing);
+                    // Last native reference, including lost replies, owns release.
+                    let _ = platform::handle::close(object.handle);
+                }
+                Err(error) => {
+                    let _ = platform::ipc::reply(sender, &(-i64::from(error)).to_le_bytes());
+                }
+            }
+            close_attached_handles(&attached);
+            continue;
+        }
         if request.starts_with(&mnu_abi::provider::MAGIC.to_le_bytes()) {
             // Object IDs are identifiers, not authority. Only native object
             // dispatch may invoke this protocol; ordinary IPC cannot forge
@@ -1147,6 +1179,9 @@ fn handle_provider_request(
         return None;
     }
     let result = match header.opcode {
+        _ if service.is_storage_reservation(header.object_id) => {
+            service.validate_storage_reservation(header, payload, attached.count)
+        }
         provider::OP_QUERY if header.basis == mochios_filesystem_protocol::storage_inventory::GET => {
             service.storage_inventory_request(header, payload, attached.count)
         }

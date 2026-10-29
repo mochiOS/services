@@ -94,6 +94,13 @@ pub struct Namespace {
 }
 
 impl Namespace {
+    pub(crate) fn filesystem_volume_count(&self) -> usize {
+        self.volumes
+            .iter()
+            .filter(|volume| matches!(volume, Volume::Ext4(_)))
+            .count()
+    }
+
     pub fn new(filesystem: Ext4) -> Result<Self, i32> {
         let owner = Arc::new(());
         let root = Node {

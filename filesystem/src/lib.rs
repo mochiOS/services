@@ -22,5 +22,6 @@ pub mod service;
 pub mod handle_access;
 pub mod open_publication;
 pub mod storage;
+pub mod storage_reservation;
 pub mod bootstrap_read;
 pub mod bootstrap_ipc;

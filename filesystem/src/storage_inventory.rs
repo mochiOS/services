@@ -19,6 +19,7 @@ pub(super) struct State {
     records: Vec<[u8; wire::RECORD_LEN]>,
     warning: u32,
     created: Option<Instant>,
+    physical_disks: BTreeMap<u64, crate::storage_reservation::Disk>,
 }
 #[derive(Clone)]
 struct Item {
@@ -70,7 +71,13 @@ fn control_value(response: StorageControlResponse) -> Result<StorageControlRespo
 }
 fn physical(
     mut control: impl FnMut(u16, u32, [u64; 4]) -> Result<StorageControlResponse, i32>,
-) -> (Vec<Item>, BTreeMap<Backing, u64>, u32) {
+) -> (
+    Vec<Item>,
+    BTreeMap<Backing, u64>,
+    u32,
+    BTreeMap<u64, crate::storage_reservation::Disk>,
+) {
+    let mut observed = BTreeMap::new();
     let mut items = vec![];
     let mut partitions = BTreeMap::new();
     let mut warning = 0;
@@ -135,9 +142,20 @@ fn physical(
                 format: if guid == [0; 16] { "" } else { "GPT" }.into(),
                 mount: String::new(),
             };
-            Ok((disk_item, d.values[2], key))
+            Ok((
+                disk_item,
+                d.values[2],
+                key,
+                crate::storage_reservation::Disk {
+                    device: disk,
+                    guid: [d.values[0], d.values[1]],
+                    capacity,
+                    sector_bytes: d.values[3] as u32,
+                    partitions: Vec::new(),
+                },
+            ))
         })();
-        let (disk_item, sectors, key) = match inspected {
+        let (disk_item, sectors, key, mut observed_disk) = match inspected {
             Ok(v) => v,
             Err(e) => {
                 warning = e as u32;
@@ -177,7 +195,13 @@ fn physical(
                 if guids.values[2..] == [0, 0] {
                     part_key.extend_from_slice(&start.to_le_bytes());
                 }
-                entries.push((start, count, identity(wire::PARTITION, &part_key), ordinal));
+                entries.push((
+                    start,
+                    count,
+                    identity(wire::PARTITION, &part_key),
+                    ordinal,
+                    guids.values,
+                ));
             }
             Err(5)
         })();
@@ -190,7 +214,7 @@ fn physical(
         };
         entries.sort_by_key(|entry| entry.0);
         let mut previous = 0;
-        if entries.iter().any(|(start, count, _, _)| {
+        if entries.iter().any(|(start, count, _, _, _)| {
             let invalid = *start < previous;
             previous = start + count;
             invalid
@@ -199,7 +223,8 @@ fn physical(
             continue;
         }
         let mut position = 0;
-        for (start, count, id, ordinal) in &entries {
+        for (start, count, id, ordinal, guids) in &entries {
+            observed_disk.partitions.push((*guids, *start, *count));
             if *start > position {
                 items.push(outside(&disk_item, position, *start - position));
             }
@@ -219,13 +244,14 @@ fn physical(
             partitions.insert((disk, *start, *count), *id);
             position = start + count;
         }
+        observed.insert(disk_id, observed_disk);
         // GPT's usable range is not exposed by the driver. Label gaps honestly:
         // they can include partition-table metadata and are not writable claims.
         if !entries.is_empty() && position < sectors {
             items.push(outside(&disk_item, position, sectors - position));
         }
     }
-    (items, partitions, warning)
+    (items, partitions, warning, observed)
 }
 fn outside(disk: &Item, start: u64, count: u64) -> Item {
     let mut key = disk.id.to_le_bytes().to_vec();
@@ -368,9 +394,9 @@ impl FilesystemService {
         };
         Ok((bytes.len() as u64, bytes.to_vec()))
     }
-    fn refresh_storage_inventory(&mut self) -> Result<(), i32> {
+    pub(super) fn refresh_storage_inventory(&mut self) -> Result<(), i32> {
         #[cfg(target_os = "mochios")]
-        let (mut items, mut partitions, mut warning) =
+        let (mut items, mut partitions, mut warning, observed) =
             physical(|operation, device_id, arguments| {
                 mochi_user_platform::storage::control(mnu_abi::StorageControlRequest {
                     operation,
@@ -381,7 +407,7 @@ impl FilesystemService {
                 .map_err(|_| 5)
             });
         #[cfg(not(target_os = "mochios"))]
-        let (mut items, partitions, mut warning) = physical(|_, _, _| Err(95));
+        let (mut items, partitions, mut warning, observed) = physical(|_, _, _| Err(95));
         // The active legacy block session can reject mDriver inspection. The
         // owner may still read the validated GPT of disks it already mounted.
         // No guessed device IDs or probes of arbitrary raw disks are used.
@@ -465,11 +491,155 @@ impl FilesystemService {
             .collect::<Result<Vec<_>, _>>()?;
         self.storage_inventory.generation = generation;
         self.storage_inventory.records = records;
+        self.storage_inventory.physical_disks = observed;
         self.storage_inventory.warning = warning;
         self.storage_inventory.created = Some(Instant::now());
         Ok(())
     }
 }
+
+impl FilesystemService {
+    fn reservable_disk(&self, disk: u64) -> Result<crate::storage_reservation::Disk, i32> {
+        let state = &self.storage_inventory;
+        let mounted = self
+            .namespace
+            .as_ref()
+            .map_or(1, |namespace| namespace.filesystem_volume_count());
+        if mounted != state.mounts.len() {
+            return Err(16);
+        }
+        if state.warning != 0 || state.created.is_none() {
+            return Err(11);
+        }
+        let observed = state.physical_disks.get(&disk).ok_or(95)?;
+        if observed.guid == [0; 2] {
+            return Err(95);
+        }
+        let records = state
+            .records
+            .iter()
+            .map(|bytes| wire::Record::decode(bytes).ok_or(5))
+            .collect::<Result<Vec<_>, _>>()?;
+        let target = records
+            .iter()
+            .find(|r| r.kind == wire::DISK && r.id == disk)
+            .ok_or(116)?;
+        if target.flags & wire::READ_ONLY != 0 {
+            return Err(30);
+        }
+        if target.flags & wire::ACCESS_KNOWN == 0
+            || target.flags & wire::CAPACITY_FROM_PARTITION_MAP != 0
+        {
+            return Err(95);
+        }
+        if target.capacity != observed.capacity || target.sector_bytes != observed.sector_bytes {
+            return Err(116);
+        }
+        // An unknown mount cannot establish that any physical target is safe.
+        if !records
+            .iter()
+            .any(|r| r.kind == wire::VOLUME && r.mount == "/")
+        {
+            return Err(16);
+        }
+        for volume in records.iter().filter(|r| r.kind == wire::VOLUME) {
+            let mut parent = volume.parent;
+            let mut seen = BTreeSet::new();
+            loop {
+                if !seen.insert(parent) {
+                    return Err(16);
+                }
+                let node = records.iter().find(|r| r.id == parent).ok_or(16)?;
+                if node.kind == wire::DISK {
+                    if node.id == disk {
+                        return Err(16);
+                    }
+                    break;
+                }
+                parent = node.parent;
+            }
+        }
+        Ok(observed.clone())
+    }
+
+    /// Called only after authenticated admission; never reachable via a numeric
+    /// filesystem open/close message. This does not authorize block writes.
+    pub fn reserve_storage(
+        &mut self,
+        admitted: crate::storage_reservation::Admission,
+    ) -> Result<u64, i32> {
+        self.reserve_storage_with_refresh(admitted.into_request(), |owner| {
+            owner.refresh_storage_inventory()
+        })
+    }
+
+    fn reserve_storage_with_refresh(
+        &mut self,
+        request: mochios_filesystem_protocol::storage_reservation::Request,
+        refresh: impl FnOnce(&mut Self) -> Result<(), i32>,
+    ) -> Result<u64, i32> {
+        if request.generation != self.storage_inventory.generation {
+            return Err(11);
+        }
+        let previous = self.reservable_disk(request.disk)?;
+        refresh(self)?;
+        let current = self.reservable_disk(request.disk)?;
+        if previous != current {
+            return Err(116);
+        }
+        self.retain_storage_reservation(request.disk, current)
+    }
+
+    fn retain_storage_reservation(
+        &mut self,
+        disk: u64,
+        observed: crate::storage_reservation::Disk,
+    ) -> Result<u64, i32> {
+        let object = self.next_open_id;
+        if object > i64::MAX as u64 {
+            return Err(75);
+        }
+        let next = object.checked_add(1).ok_or(75)?;
+        self.storage_reservations.acquire(object, disk, observed)?;
+        self.next_open_id = next;
+        Ok(object)
+    }
+
+    pub fn is_storage_reservation(&self, object: u64) -> bool {
+        self.storage_reservations.contains(object)
+    }
+
+    pub fn validate_storage_reservation(
+        &mut self,
+        header: provider::RequestHeader,
+        payload: &[u8],
+        attachments: u32,
+    ) -> Result<(u64, Vec<u8>), i32> {
+        use mochios_filesystem_protocol::storage_reservation as reservation;
+        if !matches!(header.opcode, provider::OP_QUERY | provider::OP_CONTROL)
+            || header.basis != reservation::VALIDATE
+        {
+            return Err(95);
+        }
+        if !payload.is_empty()
+            || header.data_length != 0
+            || header.length != 8
+            || header.argument != 0
+            || attachments != 0
+        {
+            return Err(22);
+        }
+        let disk = self.storage_reservations.target(header.object_id)?;
+        let current = self
+            .refresh_storage_inventory()
+            .and_then(|_| self.reservable_disk(disk));
+        let id = self
+            .storage_reservations
+            .validate(header.object_id, current)?;
+        Ok((8, id.to_le_bytes().to_vec()))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -482,7 +652,7 @@ mod tests {
     }
     #[test]
     fn ranges_gaps_and_backing_identity_are_checked() {
-        let (items, parents, warning) = physical(|op, disk, args| {
+        let (items, parents, warning, _) = physical(|op, disk, args| {
             Ok(match (op, args[0], args[1]) {
                 (0, 0, _) => response(7, [1 << 9, 0, 0, 0]),
                 (0, _, _) => StorageControlResponse {
@@ -510,13 +680,13 @@ mod tests {
         );
         assert_eq!(parents.len(), 1);
         assert!(parents.contains_key(&(7, 10, 80)));
-        let (unavailable, _, warning) = physical(|_, _, _| Err(13));
+        let (unavailable, _, warning, _) = physical(|_, _, _| Err(13));
         assert!(unavailable.is_empty());
         assert_eq!(warning, 13);
     }
     #[test]
     fn malformed_or_overlapping_partitions_never_become_free_space() {
-        let (items, parents, warning) = physical(|op, disk, args| {
+        let (items, parents, warning, _) = physical(|op, disk, args| {
             Ok(match (op, args[0], args[1]) {
                 (0, 0, _) => response(7, [0; 4]),
                 (0, _, _) => StorageControlResponse {
@@ -683,5 +853,206 @@ mod tests {
             ),
             Err(11)
         );
+    }
+    fn reservation_fixture() -> FilesystemService {
+        let dir = std::env::temp_dir().join(format!(
+            "mochios-reservation-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&dir).unwrap();
+        let path = dir.join("volume.ext4");
+        let result = std::process::Command::new("mke2fs")
+            .args(["-q", "-t", "ext4", "-F"])
+            .arg(&path)
+            .arg("4096")
+            .output()
+            .unwrap();
+        assert!(result.status.success());
+        let image = std::fs::read(&path).unwrap();
+        std::fs::remove_dir_all(dir).unwrap();
+        let mut service = FilesystemService::new(Ext4::load(Box::new(image)).unwrap());
+        let item = |kind, id, parent, mount: &str| Item {
+            kind,
+            id,
+            parent,
+            capacity: 51200,
+            used: 0,
+            flags: wire::ACCESS_KNOWN,
+            start: 0,
+            sector_bytes: 512,
+            name: "Test".into(),
+            format: if kind == wire::DISK {
+                "GPT".into()
+            } else {
+                "".into()
+            },
+            mount: mount.into(),
+        };
+        service.storage_inventory.records = [
+            item(wire::DISK, 1, 0, ""),
+            item(wire::PARTITION, 2, 1, ""),
+            item(wire::VOLUME, 3, 2, "/"),
+            item(wire::DISK, 4, 0, ""),
+            item(wire::PARTITION, 5, 4, ""),
+        ]
+        .into_iter()
+        .map(|i| i.record(1, 0).encode().unwrap())
+        .collect();
+        service.storage_inventory.mounts.push(Mount {
+            path: "/".into(),
+            filesystem: service.fs.clone(),
+            backing: (0, 0, 100),
+        });
+        service.storage_inventory.created = Some(Instant::now());
+        service.storage_inventory.generation = 1;
+        for id in [1, 4] {
+            service.storage_inventory.physical_disks.insert(
+                id,
+                crate::storage_reservation::Disk {
+                    device: id as u32,
+                    guid: [id, id],
+                    capacity: 51200,
+                    sector_bytes: 512,
+                    partitions: vec![([11, 12, id, id], 0, 100)],
+                },
+            );
+        }
+        service
+    }
+
+    #[test]
+    fn reservation_rejects_mounted_unknown_readonly_and_partial_inventory() {
+        let service = reservation_fixture();
+        assert_eq!(service.reservable_disk(1), Err(16));
+        assert!(service.reservable_disk(4).is_ok());
+        assert!(service.reservable_disk(999).is_err());
+        for mode in 0..5 {
+            let mut service = reservation_fixture();
+            let mut record = wire::Record::decode(
+                &service.storage_inventory.records[if mode < 2 { 3 } else { 2 }],
+            )
+            .unwrap();
+            match mode {
+                0 => record.flags |= wire::READ_ONLY,
+                1 => record.flags = 0,
+                2 => record.parent = 0,
+                3 => record.parent = 999,
+                _ => service.storage_inventory.warning = 5,
+            }
+            let index = if mode < 2 { 3 } else { 2 };
+            service.storage_inventory.records[index] = record.encode().unwrap();
+            assert!(service.reservable_disk(4).is_err());
+        }
+    }
+
+    #[test]
+    fn acquire_rechecks_observations_before_publishing_any_reservation() {
+        use mochios_filesystem_protocol::storage_reservation::Request;
+        let request = Request {
+            generation: 1,
+            disk: 4,
+        };
+        let mut service = reservation_fixture();
+        assert_eq!(
+            service.reserve_storage_with_refresh(
+                Request {
+                    generation: 9,
+                    ..request
+                },
+                |_| panic!("stale selection")
+            ),
+            Err(11)
+        );
+        assert_eq!(
+            service.reserve_storage_with_refresh(request, |s| {
+                s.storage_inventory.physical_disks.get_mut(&4).unwrap().guid[0] += 1;
+                Ok(())
+            }),
+            Err(116)
+        );
+        assert!(service.storage_reservations.is_empty());
+        let mut service = reservation_fixture();
+        let object = service
+            .reserve_storage_with_refresh(request, |_| Ok(()))
+            .unwrap();
+        assert!(service.is_storage_reservation(object));
+        assert_eq!(
+            service.reserve_storage_with_refresh(request, |_| Ok(())),
+            Err(16)
+        );
+        assert_eq!(service.mount_volume(b"/", service.fs.clone()), Err(16));
+        assert_eq!(
+            service.mount_named_volume(b"/", b"temporary", service.fs.clone(), b"/"),
+            Err(16)
+        );
+        service.provider_close(object).unwrap();
+        assert!(service.storage_reservations.is_empty());
+        assert!(
+            service
+                .reserve_storage_with_refresh(request, |_| Ok(()))
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn reservation_objects_cannot_be_used_as_files_or_raw_io_controls() {
+        let mut service = reservation_fixture();
+        let observed = service.reservable_disk(4).unwrap();
+        let object = service.retain_storage_reservation(4, observed).unwrap();
+        let header = provider::RequestHeader {
+            opcode: provider::OP_WRITE_AT,
+            object_id: object,
+            argument: 0,
+            basis: 0,
+            length: 0,
+            data_length: 0,
+        };
+        assert_eq!(
+            service.validate_storage_reservation(header, &[], 0),
+            Err(95)
+        );
+        let header = provider::RequestHeader {
+            opcode: provider::OP_QUERY,
+            basis: mochios_filesystem_protocol::storage_reservation::VALIDATE,
+            length: 8,
+            ..header
+        };
+        assert_eq!(
+            service.validate_storage_reservation(header, &[], 1),
+            Err(22)
+        );
+        assert!(
+            service
+                .provider_write_at(object, 0, b"unauthorized")
+                .is_err()
+        );
+        let closed = service.handle(
+            mochios_filesystem_protocol::Header {
+                opcode: mochios_filesystem_protocol::OP_CLOSE,
+                open_id: object,
+                ..Default::default()
+            },
+            &[],
+        );
+        assert!(closed.header.status < 0);
+        assert!(service.is_storage_reservation(object));
+        // Host discovery cannot prove physical identity. It must revoke, not
+        // silently preserve the fabricated fixture as a native disk.
+        assert_eq!(
+            service.validate_storage_reservation(header, &[], 0),
+            Err(116)
+        );
+        assert_eq!(service.storage_reservations.target(object), Err(116));
+    }
+
+    #[test]
+    fn untracked_mounts_block_reservation_instead_of_implying_an_idle_disk() {
+        let mut service = reservation_fixture();
+        service.storage_inventory.mounts.clear();
+        assert_eq!(service.reservable_disk(4), Err(16));
     }
 }

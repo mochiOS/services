@@ -83,6 +83,7 @@ pub struct RenameAnchors {
 pub struct FilesystemService {
     fs: Ext4,
     storage_inventory: storage_inventory::State,
+    storage_reservations: crate::storage_reservation::Reservations,
     clock: crate::clock::Clock,
     namespace: Option<Namespace>,
     nodes: HashMap<u64, String>,
@@ -135,6 +136,7 @@ impl FilesystemService {
         Self {
             fs,
             storage_inventory: storage_inventory::State::default(),
+            storage_reservations: crate::storage_reservation::Reservations::default(),
             clock,
             namespace: None,
             nodes,
@@ -255,6 +257,9 @@ impl FilesystemService {
     /// Service-owned mount configuration; callers must already hold the volume.
     /// Startup wiring is kept separate from the legacy mount-registration IPC.
     pub fn mount_volume(&mut self, at: &[u8], filesystem: Ext4) -> Result<(), i32> {
+        if !self.storage_reservations.is_empty() {
+            return Err(EBUSY);
+        }
         if self.namespace.is_none() {
             self.namespace = Some(Namespace::new(self.fs.clone())?);
         }
@@ -287,6 +292,9 @@ impl FilesystemService {
         filesystem: Ext4,
         source: &[u8],
     ) -> Result<(), i32> {
+        if !self.storage_reservations.is_empty() {
+            return Err(EBUSY);
+        }
         if self.namespace.is_none() {
             self.namespace = Some(Namespace::new(self.fs.clone())?);
         }
@@ -1970,6 +1978,9 @@ impl FilesystemService {
     }
 
     pub fn provider_close(&mut self, open_id: u64) -> Result<(), i32> {
+        if self.storage_reservations.release(open_id) {
+            return Ok(());
+        }
         self.close(protocol::Header {
             opcode: protocol::OP_CLOSE,
             open_id,
