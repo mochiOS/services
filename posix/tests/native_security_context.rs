@@ -83,7 +83,8 @@ fn native_image_authority_does_not_reintroduce_legacy_path_or_posix_mode_policy(
     assert!(!fs.contains("path_owner_allows"));
     let exec = include_str!("../../../core/src/syscall/exec.rs");
     assert!(exec.contains("process.take_exec_authorization(request.identity, thread)"));
-    assert!(exec.contains("crate::syscall::handle::read_all(image_handle,"));
+    let compact: String = exec.chars().filter(|ch| !ch.is_whitespace()).collect();
+    assert!(compact.contains("crate::syscall::handle::read_all(image_handle,"));
 }
 
 #[test]
