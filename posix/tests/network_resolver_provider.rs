@@ -687,9 +687,23 @@ fn post_completion_signal_failure_reclaims_pending_backend_ownership() {
 
 #[test]
 fn completed_error_handles_and_nodata_are_readable_without_fake_addresses() {
-    for outcome in [
-        Err(resolver::Failure::Transport(-6)),
-        Ok(answer(DnsRecordType::A, 0)),
+    for (outcome, expected_status) in [
+        (Err(resolver::Failure::Transport(-6)), -6),
+        (
+            Err(resolver::Failure::Wire(
+                mochios_network_stack::DnsError::NoData,
+            )),
+            -2,
+        ),
+        (
+            Err(resolver::Failure::Wire(
+                mochios_network_stack::DnsError::Response(
+                    mochios_network_stack::DnsResponseCode::NameError,
+                ),
+            )),
+            -2,
+        ),
+        (Ok(answer(DnsRecordType::A, 0)), -2),
     ] {
         let (mut s, mut b) = setup();
         let f = acquire(&mut s, &mut b, limits());
@@ -698,6 +712,7 @@ fn completed_error_handles_and_nodata_are_readable_without_fake_addresses() {
         s.pump(&mut b, 0);
         let (_, data) = native(&mut s, &mut b, job, provider::OP_READ_AT, 0, 4096, true);
         assert_eq!(w::decode_result(&data).unwrap().values().len(), 0);
+        assert_eq!(w::decode_result(&data).unwrap().status, expected_status);
         STATE.with_borrow(|s| {
             assert!(s.signals.iter().any(
                 |(id, set, _)| *id == object_id(job) && *set == mnu_abi::HANDLE_SIGNAL_READABLE

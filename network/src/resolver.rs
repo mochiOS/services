@@ -3,7 +3,7 @@
 use alloc::vec::Vec;
 use mochios_network_stack::{
     DNS_MAX_MESSAGE_LEN, DnsCache, DnsError, DnsName, DnsRecordName, DnsRecordSet, DnsRecordType,
-    DnsResponseCode, Ipv4Config, decode_dns_records, encode_dns_record_query,
+    DnsResponseCode, Ipv4Config, decode_dns_answer, encode_dns_record_query,
 };
 
 const JOB_LIMIT: usize = 16;
@@ -53,7 +53,7 @@ impl Failure {
     pub(crate) fn status(&self) -> i32 {
         match self {
             Self::Transport(error) => *error,
-            Self::Wire(DnsError::Response(DnsResponseCode::NameError)) => -2,
+            Self::Wire(DnsError::Response(DnsResponseCode::NameError) | DnsError::NoData) => -2,
             Self::Wire(
                 DnsError::Timeout
                 | DnsError::RetryLimit
@@ -130,7 +130,9 @@ impl<D: Copy, S: Copy> Job<D, S> {
         records: DnsRecordSet,
         now: u64,
     ) -> Result<Option<DnsRecordSet>, Failure> {
-        let follow = records.values().is_empty() && records.canonical_name() != &self.name;
+        let follow = records.negative().is_none()
+            && records.values().is_empty()
+            && records.canonical_name() != &self.name;
         let next_name = records.canonical_name().clone();
         let records = match self.prefix.take() {
             Some((prefix, started)) => {
@@ -175,6 +177,7 @@ impl<D: Copy, S: Copy> Job<D, S> {
         io: &mut T,
         now: u64,
         stats: &mut Statistics,
+        cache: &mut DnsCache,
     ) -> Result<Option<DnsRecordSet>, Failure> {
         if now >= self.deadline {
             return Err(DnsError::Timeout.into());
@@ -182,6 +185,14 @@ impl<D: Copy, S: Copy> Job<D, S> {
         for _ in 0..STEP_BUDGET {
             match self.stage {
                 Stage::Prepare => {
+                    // A CNAME can reach a previously cached terminal answer.
+                    // Merge it with the aged prefix without another socket.
+                    if self.prefix.is_some()
+                        && let Some(records) = cache.lookup_records(&self.name, self.kind, now)
+                    {
+                        stats.cache_hits = stats.cache_hits.saturating_add(1);
+                        return self.response(io, records, now);
+                    }
                     let entropy = io.entropy()?;
                     let mut query = [0; DNS_MAX_MESSAGE_LEN];
                     self.transaction = (entropy >> 32) as u16;
@@ -212,7 +223,7 @@ impl<D: Copy, S: Copy> Job<D, S> {
                     if self.attempts != 0
                         && let Some(packet) = io.receive_datagram(socket)?
                     {
-                        match decode_dns_records(&packet, self.transaction, &self.name, self.kind) {
+                        match decode_dns_answer(&packet, self.transaction, &self.name, self.kind) {
                             Ok(records) => return self.response(io, records, now),
                             Err(DnsError::TruncatedResponse) => {
                                 self.tcp(io)?;
@@ -312,12 +323,8 @@ impl<D: Copy, S: Copy> Job<D, S> {
                     }
                     self.body_read += count;
                     if self.body_read == self.body.len() {
-                        match decode_dns_records(
-                            &self.body,
-                            self.transaction,
-                            &self.name,
-                            self.kind,
-                        ) {
+                        match decode_dns_answer(&self.body, self.transaction, &self.name, self.kind)
+                        {
                             Ok(records) => return self.response(io, records, now),
                             Err(DnsError::TransactionMismatch | DnsError::QuestionMismatch) => {
                                 self.length_read = 0;
@@ -389,6 +396,9 @@ impl<D: Copy, S: Copy> Resolver<D, S> {
         let id = Query(self.next);
         self.next += 1;
         let answer = self.cache.lookup_records(&name, kind, now).map(|records| {
+            if let Some(negative) = records.negative() {
+                return Err(Failure::from(negative.error()));
+            }
             Ok(Answer {
                 records,
                 from_cache: true,
@@ -396,6 +406,9 @@ impl<D: Copy, S: Copy> Resolver<D, S> {
         });
         if answer.is_some() {
             self.statistics.cache_hits = self.statistics.cache_hits.saturating_add(1);
+            if answer.as_ref().is_some_and(Result::is_err) {
+                self.statistics.failures = self.statistics.failures.saturating_add(1);
+            }
         } else {
             self.statistics.cache_misses = self.statistics.cache_misses.saturating_add(1);
         }
@@ -429,15 +442,20 @@ impl<D: Copy, S: Copy> Resolver<D, S> {
             if job.answer.is_some() {
                 continue;
             }
-            match job.step(io, now, &mut self.statistics) {
+            match job.step(io, now, &mut self.statistics, &mut self.cache) {
                 Ok(None) => (),
                 Ok(Some(records)) => {
                     job.close(io, now);
                     let _ = self.cache.insert_records(&records, now);
-                    job.answer = Some(Ok(Answer {
-                        records,
-                        from_cache: false,
-                    }));
+                    job.answer = Some(if let Some(negative) = records.negative() {
+                        self.statistics.failures = self.statistics.failures.saturating_add(1);
+                        Err(Failure::from(negative.error()))
+                    } else {
+                        Ok(Answer {
+                            records,
+                            from_cache: false,
+                        })
+                    });
                 }
                 Err(error) => {
                     job.close(io, now);

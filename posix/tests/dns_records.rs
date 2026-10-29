@@ -4,6 +4,8 @@ extern crate alloc;
 #[allow(dead_code)]
 mod production;
 use production::*;
+#[path = "support/dns_negative_records.rs"]
+mod negative;
 
 fn wire(text: &str) -> Vec<u8> {
     if text == "." {

@@ -8,6 +8,8 @@ mod resolver_rpc;
 use mochios_network_stack::{DnsError, DnsRecordName, DnsRecordType, DnsRecordValue, Ipv4Config};
 use resolver::{Failure, Resolver, Transport};
 use std::collections::{BTreeMap, VecDeque};
+#[path = "support/dns_negative_jobs.rs"]
+mod negative;
 
 #[derive(Default)]
 struct Udp {
