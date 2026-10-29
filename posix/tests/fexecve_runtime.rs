@@ -858,6 +858,218 @@ fn dependency_fixture(root_flags: &[&str], library_flags: &[&str]) -> (Vec<u8>, 
     (bytes, library)
 }
 
+fn indirect_fixture(marked: bool, root_flags: &[&str], library_flags: &[&str]) -> [Vec<u8>; 3] {
+    struct Temporary(std::path::PathBuf);
+    impl Drop for Temporary {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+    let directory = Temporary(std::env::temp_dir().join(format!(
+            "mochios-ifunc-exec-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        )));
+    std::fs::create_dir(&directory.0).unwrap();
+    let support =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/support/elf_ifunc.S");
+    for (name, define, deps) in [
+        ("libprovider.so", "PROVIDER", &[][..]),
+        ("libmiddle.so", "MIDDLE", &["libprovider.so"][..]),
+        ("root.so", "ROOT", &["libmiddle.so", "libprovider.so"][..]),
+    ] {
+        let mut c = std::process::Command::new("x86_64-elf-gcc");
+        c.args([
+            "-fPIC",
+            "-nostdlib",
+            "-Wl,-shared,-z,noexecstack,--no-as-needed,--hash-style=both",
+        ])
+        .arg(format!("-D{define}"))
+        .arg(&support)
+        .arg(format!("-L{}", directory.0.display()));
+        if name == "root.so" {
+            c.arg("-Wl,-e,_start,--disable-new-dtags,-rpath,/libraries");
+            if marked {
+                c.arg("-DCRT_CONTRACT");
+            }
+            c.args(root_flags);
+        } else {
+            c.arg(format!("-Wl,-soname,{name}"));
+            c.args(library_flags);
+        }
+        for name in deps {
+            c.arg(format!("-l:{name}"));
+        }
+        let out = c.arg("-o").arg(directory.0.join(name)).output().unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+    ["root.so", "libmiddle.so", "libprovider.so"]
+        .map(|name| std::fs::read(directory.0.join(name)).unwrap())
+}
+
+#[test]
+fn exec_passes_the_child_resolver_plan_only_to_an_explicitly_supporting_runtime() {
+    use mochios_posix_client::{
+        indirect_image::{Captured, Fixup, Region},
+        process_image::AT_INDIRECT_IMAGE,
+    };
+    for marked in [false, true] {
+        let [root, middle, provider] = indirect_fixture(marked, &[], &[]);
+        let parsed = mochios_posix_client::pie::Pie::parse_object(&root).unwrap();
+        assert_eq!(parsed.has_indirect_runtime().unwrap(), marked);
+        assert_eq!(
+            search_exec(
+                &root,
+                &[
+                    (b"/libraries/libmiddle.so", &middle),
+                    (b"/libraries/libprovider.so", &provider)
+                ],
+                &[],
+                0,
+                0
+            ),
+            Err(ENOEXEC)
+        );
+        STATE.with_borrow(|state| {
+            assert_eq!(state.entered, usize::from(marked));
+            assert!(!state.closed.contains(&19));
+            if !marked {
+                assert!(state.prepared.is_empty());
+                return;
+            }
+            let decoded = mnu_abi::process_image::decode(&state.startup).unwrap();
+            let stack = decoded.stack();
+            let word = |o| u64::from_le_bytes(stack[o..o + 8].try_into().unwrap()) as usize;
+            let mut cursor = (word(0) + 2) * 8;
+            while word(cursor) != 0 {
+                cursor += 8;
+            }
+            cursor += 8;
+            let mut offset = None;
+            while word(cursor) != 0 {
+                if word(cursor) == AT_INDIRECT_IMAGE as usize {
+                    assert!(offset.replace(word(cursor + 8)).is_none());
+                    assert!(
+                        decoded
+                            .relocations()
+                            .any(|r| r.offset as usize == cursor + 8
+                                && r.kind == mnu_abi::process_image::RelocationKind::StackAddress)
+                    );
+                }
+                cursor += 16;
+            }
+            let offset = offset.expect("pending resolver image must reach the new CRT");
+            assert_eq!(offset % 8, 0);
+            let image = Captured::capture(
+                0x7000_0000 + offset as u64,
+                stack.len() - offset,
+                &mut [Region::EMPTY; 32],
+                &mut [Fixup::EMPTY; 32],
+                |address, out| -> Result<(), i32> {
+                    let o = (address - 0x7000_0000) as usize;
+                    out.copy_from_slice(&stack[o..o + out.len()]);
+                    Ok(())
+                },
+            )
+            .unwrap()
+            .len();
+            assert!(image >= 6);
+        });
+    }
+}
+
+#[test]
+fn deferred_array_elements_are_rejected_even_with_a_valid_stale_function_address() {
+    let [root, middle, provider] = indirect_fixture(true, &["-DLATE_CALLBACKS"], &[]);
+    let word = |b: &[u8], o| u64::from_le_bytes(b[o..o + 8].try_into().unwrap());
+    let headers = word(&root, 32) as usize;
+    let count = u16::from_le_bytes(root[56..58].try_into().unwrap()) as usize;
+    let file_offset = |address: u64, length: u64| {
+        (headers..headers + count * 56)
+            .step_by(56)
+            .find_map(|h| {
+                let base = word(&root, h + 16);
+                (root[h] == 1 && address >= base && address + length <= base + word(&root, h + 32))
+                    .then(|| (word(&root, h + 8) + address - base) as usize)
+            })
+            .unwrap()
+    };
+    let dynamic = (headers..headers + count * 56)
+        .step_by(56)
+        .find(|h| root[*h] == 2)
+        .unwrap();
+    let at = word(&root, dynamic + 8) as usize;
+    let len = word(&root, dynamic + 32) as usize;
+    let tags: std::collections::BTreeMap<_, _> = root[at..at + len]
+        .chunks_exact(16)
+        .take_while(|p| word(p, 0) != 0)
+        .map(|p| (word(p, 0), word(p, 8)))
+        .collect();
+    assert_eq!(tags[&27], 8);
+    let array = tags[&25];
+    let array_offset = file_offset(array, 8);
+    let rela = file_offset(tags[&7], tags[&8]);
+    let record = (rela..rela + tags[&8] as usize)
+        .step_by(24)
+        .find(|r| word(&root, *r) == array)
+        .unwrap();
+    assert_eq!(word(&root, record + 8) as u32, 1);
+    let libraries = [
+        (b"/libraries/libmiddle.so".as_slice(), middle.as_slice()),
+        (b"/libraries/libprovider.so".as_slice(), provider.as_slice()),
+    ];
+    // A normal RELATIVE array is valid: ordinary relocation produces its final
+    // function before the lifecycle snapshot is flattened.
+    let mut ordinary = root.clone();
+    ordinary[record + 8..record + 16].copy_from_slice(&8u64.to_le_bytes());
+    ordinary[record + 16..record + 24].copy_from_slice(&word(&root, 24).to_le_bytes());
+    assert_eq!(search_exec(&ordinary, &libraries, &[], 0, 0), Err(ENOEXEC));
+    let entry = STATE.with_borrow(|s| {
+        assert_eq!(s.entered, 1);
+        word(&s.prepared, 24)
+    });
+    for stale in [0, entry, entry + 1] {
+        let mut pending = root.clone();
+        pending[array_offset..array_offset + 8].copy_from_slice(&stale.to_le_bytes());
+        assert_eq!(search_exec(&pending, &libraries, &[], 0, 0), Err(ENOEXEC));
+        STATE.with_borrow(|s| {
+            assert_eq!(s.entered, 0, "stale={stale:x}");
+            assert!(s.prepared.is_empty());
+            assert!(!s.closed.contains(&19));
+        });
+    }
+}
+
+#[test]
+fn oversized_resolver_plans_fail_without_materializing_an_executable_object() {
+    let [root, middle, provider] = indirect_fixture(true, &[], &["-DMANY_FIXUPS"]);
+    assert_eq!(
+        search_exec(
+            &root,
+            &[
+                (b"/libraries/libmiddle.so", &middle),
+                (b"/libraries/libprovider.so", &provider)
+            ],
+            &[],
+            0,
+            0
+        ),
+        Err(E2BIG)
+    );
+    STATE.with_borrow(|s| {
+        assert_eq!(s.entered, 0);
+        assert!(s.prepared.is_empty());
+        assert!(!s.closed.contains(&19));
+    });
+}
+
 #[test]
 fn dependency_capture_uses_readable_regular_handles_and_preserves_all_failure_ownership() {
     let (bytes, library) = dependency_fixture(&[], &[]);

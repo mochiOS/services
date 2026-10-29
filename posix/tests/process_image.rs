@@ -295,6 +295,7 @@ fn process_entry_identity_is_literal_userspace_data_before_any_runtime_patch() {
                 identity,
                 lifecycle: &[],
                 tls: &[],
+                indirect: &[],
             },
             &mut output,
         )
@@ -339,6 +340,7 @@ fn process_entry_identity_is_literal_userspace_data_before_any_runtime_patch() {
                     identity,
                     lifecycle: &[],
                     tls: &[],
+                    indirect: &[],
                 },
                 &mut output
             ),
@@ -421,12 +423,14 @@ fn lifecycle_bytes_are_aligned_opaque_stack_data_with_one_generic_relocation() {
 }
 
 #[test]
-fn tls_and_lifecycle_payloads_are_separate_aligned_and_share_the_total_stack_limit() {
+fn loader_payloads_are_separate_aligned_and_share_the_total_stack_limit() {
     use mochios_posix_client::process_image::{
-        AT_LIFECYCLE_IMAGE, AT_TLS_IMAGE, Process, encode_initial_stack_for_process,
+        AT_INDIRECT_IMAGE, AT_LIFECYCLE_IMAGE, AT_TLS_IMAGE, Process,
+        encode_initial_stack_for_process,
     };
     let lifecycle = b"abc";
     let tls = b"\0TLS\xff\0";
+    let indirect = b"irel\0\xfe\0";
     let mut output = [0; process_image::MAX_IMAGE_BYTES];
     let length = encode_initial_stack_for_process(
         &[b"program"],
@@ -437,6 +441,7 @@ fn tls_and_lifecycle_payloads_are_separate_aligned_and_share_the_total_stack_lim
         Process {
             lifecycle,
             tls,
+            indirect,
             ..Process::default()
         },
         &mut output,
@@ -453,6 +458,7 @@ fn tls_and_lifecycle_payloads_are_separate_aligned_and_share_the_total_stack_lim
         if let Some(payload) = match key {
             AT_LIFECYCLE_IMAGE => Some(&lifecycle[..]),
             AT_TLS_IMAGE => Some(&tls[..]),
+            AT_INDIRECT_IMAGE => Some(&indirect[..]),
             _ => None,
         } {
             let offset = u64::from_le_bytes(pair[8..].try_into().unwrap()) as usize;
@@ -471,8 +477,8 @@ fn tls_and_lifecycle_payloads_are_separate_aligned_and_share_the_total_stack_lim
             offsets.push((offset, payload.len()));
         }
     }
-    assert_eq!(offsets.len(), 2);
-    assert!(offsets[0].0 + offsets[0].1 <= offsets[1].0);
+    assert_eq!(offsets.len(), 3);
+    assert!(offsets.windows(2).all(|p| p[0].0 + p[0].1 <= p[1].0));
     assert_eq!(
         encode_initial_stack_for_process(
             &[b"program"],
@@ -496,6 +502,35 @@ fn tls_and_lifecycle_payloads_are_separate_aligned_and_share_the_total_stack_lim
             Process {
                 lifecycle: &payload,
                 tls: &payload,
+                ..Process::default()
+            },
+            &mut output
+        ),
+        Err(EncodeError::ImageTooLarge)
+    );
+    for key in [AT_LIFECYCLE_IMAGE, AT_TLS_IMAGE, AT_INDIRECT_IMAGE] {
+        assert_eq!(
+            encode_initial_stack_for_process(
+                &[b"program"],
+                &[],
+                b"program",
+                [0; 16],
+                &[(key, 0)],
+                Process::default(),
+                &mut output
+            ),
+            Err(EncodeError::InvalidText)
+        );
+    }
+    assert_eq!(
+        encode_initial_stack_for_process(
+            &[b"program"],
+            &[],
+            b"program",
+            [0; 16],
+            &[],
+            Process {
+                indirect: &[0; process_image::MAX_STACK_BYTES],
                 ..Process::default()
             },
             &mut output

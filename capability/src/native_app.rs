@@ -202,6 +202,10 @@ pub(crate) fn launch(
                 .map(|image| image.lifecycle)
                 .unwrap_or(&[]),
             tls: prepared.as_ref().map(|image| image.tls).unwrap_or(&[]),
+            indirect: prepared
+                .as_ref()
+                .map(|image| image.indirect)
+                .unwrap_or(&[]),
         },
     )?;
     crate::resolver::authorize_spawn_image(

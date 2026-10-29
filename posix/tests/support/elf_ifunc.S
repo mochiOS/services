@@ -37,6 +37,11 @@ provider_impl:
 .type public_slot,@object
 public_slot: .quad choose
 .size public_slot,8
+#ifdef MANY_FIXUPS
+.rept 160
+    .quad choose
+.endr
+#endif
 .globl local_slot
 .type local_slot,@object
 local_slot: .quad local_choose
@@ -103,6 +108,25 @@ get_local_calls:
 
 #ifdef ROOT
 .text
+#ifdef CRT_CONTRACT
+.globl __mochios_indirect_v1
+.type __mochios_indirect_v1,@function
+__mochios_indirect_v1:
+    mov $1,%eax
+    ret
+.size __mochios_indirect_v1,.-__mochios_indirect_v1
+#ifdef LATE_CALLBACKS
+.globl __mochios_lifecycle_v1
+.type __mochios_lifecycle_v1,@function
+__mochios_lifecycle_v1:
+    mov $1,%eax
+    ret
+.size __mochios_lifecycle_v1,.-__mochios_lifecycle_v1
+.section .init_array,"aw"
+    .quad choose
+.text
+#endif
+#endif
 .globl _start
 .type _start,@function
 _start:

@@ -98,7 +98,8 @@ fn native_launch_carries_prepared_process_metadata_without_changing_handle_grant
     use mochios_posix_client::{
         launch_arguments::encode_native_launch_for_process,
         process_image::{
-            AT_IMAGE_LOAD_BIAS, AT_LIFECYCLE_IMAGE, AT_TLS_IMAGE, Executable, Identity, Process,
+            AT_IMAGE_LOAD_BIAS, AT_INDIRECT_IMAGE, AT_LIFECYCLE_IMAGE, AT_TLS_IMAGE, Executable,
+            Identity, Process,
         },
     };
     let rights = mnu_abi::HANDLE_RIGHT_SEND | mnu_abi::HANDLE_RIGHT_TRANSFER;
@@ -131,6 +132,7 @@ fn native_launch_carries_prepared_process_metadata_without_changing_handle_grant
             },
             lifecycle: b"life\0\xff",
             tls: b"tls\0\xfe",
+            indirect: b"irel\0\xfd",
         },
     )
     .unwrap();
@@ -186,6 +188,7 @@ fn native_launch_carries_prepared_process_metadata_without_changing_handle_grant
     for (key, payload) in [
         (AT_LIFECYCLE_IMAGE, b"life\0\xff".as_slice()),
         (AT_TLS_IMAGE, b"tls\0\xfe"),
+        (AT_INDIRECT_IMAGE, b"irel\0\xfd"),
     ] {
         let offset = auxiliary.iter().find(|pair| pair.0 == key).unwrap().1 as usize;
         assert_eq!(offset % 8, 0);
