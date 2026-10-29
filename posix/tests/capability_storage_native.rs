@@ -94,6 +94,24 @@ pub mod capability {pub use crate::abi::capability::*;pub use crate::{Capability
         r#"
 fn clear(){FAIL_AFTER.set(None);REGISTRY.with_borrow_mut(|r|r.names=Vec::new());}
 fn main(){
+    {
+        let scoped=Capability::try_intern("device.storage.scoped").unwrap();
+        let mut granted=CapabilitySet::empty();
+        granted.try_insert(scoped).unwrap();
+        granted.try_insert(Capability::FsReadAll).unwrap();
+        granted.try_insert(Capability::FsWriteAll).unwrap();
+        assert!(granted.contains(scoped));
+        assert!(!granted.contains(Capability::DeviceStorage));
+        assert!(!capability_implies(scoped,Capability::DeviceStorage));
+        let metadata=capability::metadata("device.storage.scoped").unwrap();
+        assert_eq!(metadata.classification,capability::CapabilityClassification::Privileged);
+        assert!(!metadata.delegable);
+        assert!(!metadata.user_grantable);
+        let (requested,authorities)=parse_requested_exec_grants(&["device.storage.scoped".into()]).unwrap();
+        assert!(requested.contains(scoped));
+        assert!(!requested.contains(Capability::DeviceStorage));
+        assert!(authorities.is_empty());
+    }
     for invalid in ["","Bad.Name","bad..name","trailing."] {
         assert_eq!(Capability::try_intern(invalid),Err(Error::InvalidArgument));
     }

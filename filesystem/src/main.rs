@@ -119,7 +119,8 @@ fn main() {
         let request = &request_bytes[..length.min(request_bytes.len())];
         if request.starts_with(&protocol::storage_reservation::MAGIC) {
             let result = filesystem_service::storage_reservation::admit(request, &attached, || {
-                platform::capability::check_thread(sender, "device.storage") == Ok(1)
+                platform::capability::check_thread(sender, "device.storage.scoped") == Ok(1)
+                    || platform::capability::check_thread(sender, "device.storage") == Ok(1)
             })
             .and_then(|request| service.reserve_storage(request))
             .and_then(|object| {
