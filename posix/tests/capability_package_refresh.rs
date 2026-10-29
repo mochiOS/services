@@ -1,6 +1,10 @@
 use mochi_user_platform::syscall::{self, SysError};
 use std::cell::Cell;
 
+#[allow(dead_code)]
+#[path = "../../capability/src/consent.rs"]
+mod consent;
+
 thread_local! {
     static INDEX_ERROR: Cell<Option<SysError>> = const { Cell::new(None) };
     static POLICY_ERROR: Cell<Option<SysError>> = const { Cell::new(None) };
@@ -98,6 +102,8 @@ fn publishes_the_new_index_and_policy_only_after_both_reads_succeed() {
                 generation: 1,
             },
             app_prompt_policy: policy::AppPromptPolicy { generation: 1 },
+            consent: consent::Controller::new(),
+            authorization_generation: 1,
         };
         assert_eq!(
             state.refresh_package_index(),
@@ -106,6 +112,7 @@ fn publishes_the_new_index_and_policy_only_after_both_reads_succeed() {
         let generation = if expected.is_none() { 2 } else { 1 };
         assert_eq!(state.package_index.generation, generation);
         assert_eq!(state.app_prompt_policy.generation, generation);
+        assert_eq!(state.authorization_generation, generation);
     }
 }
 
@@ -136,4 +143,27 @@ fn runtime_manifest_and_policy_readers_have_no_legacy_file_fallback() {
         .unwrap();
     assert!(runtime.contains("crate::persistent_grant::read_file(&record.manifest_path)?"));
     assert!(!runtime.contains("platform::file::"));
+}
+
+#[test]
+fn policy_generation_exhaustion_cannot_publish_a_new_policy_with_an_old_consent_epoch() {
+    INDEX_ERROR.set(None);
+    POLICY_ERROR.set(None);
+    DUPLICATE.set(false);
+    let mut state = state::CapabilityServiceState {
+        package_index: package_index::PackageIndex {
+            duplicate: false,
+            generation: 1,
+        },
+        app_prompt_policy: policy::AppPromptPolicy { generation: 1 },
+        consent: consent::Controller::new(),
+        authorization_generation: u64::MAX,
+    };
+    assert_eq!(
+        state.refresh_package_index().unwrap_err().native_error(),
+        Some(syscall::NativeError::LimitExceeded)
+    );
+    assert_eq!(state.package_index.generation, 1);
+    assert_eq!(state.app_prompt_policy.generation, 1);
+    assert_eq!(state.authorization_generation, u64::MAX);
 }

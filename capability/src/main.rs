@@ -11,6 +11,7 @@ mod prepared_image;
 mod object_image;
 mod bootstrap_file;
 mod dynamic_grant;
+mod consent;
 mod package_index;
 mod package_walk;
 mod persistent_grant;
