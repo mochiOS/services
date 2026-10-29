@@ -9,6 +9,7 @@ mod resolver;
 mod resolver_rpc;
 mod resolver_provider;
 mod resolver_backend;
+mod interfaces;
 mod service;
 mod stack;
 mod stream;

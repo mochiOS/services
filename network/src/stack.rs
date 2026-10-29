@@ -95,6 +95,9 @@ impl NetworkStack {
     pub(crate) const fn info(&self) -> InterfaceInfo {
         self.info
     }
+    pub(crate) const fn configuration(&self) -> Option<Ipv4Config> {
+        self.config
+    }
     pub(crate) const fn statistics(&self) -> StackStatistics {
         self.stats
     }

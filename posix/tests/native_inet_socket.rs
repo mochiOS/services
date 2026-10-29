@@ -8,6 +8,9 @@ mod tcp_provider;
 #[cfg(all(target_os = "mochios", mochios_dns_handles_281))]
 #[path = "native_resolver_provider.rs"]
 mod resolver_provider;
+#[cfg(all(target_os = "mochios", mochios_interfaces_284))]
+#[path = "native_interface_snapshot.rs"]
+mod interface_snapshot;
 #[cfg(all(target_os = "mochios", mochios_llvm_runtime_probe_215))]
 #[path = "native_llvm_runtime.rs"]
 mod llvm_runtime;
@@ -30,7 +33,8 @@ mod symbol_versions;
 #[path = "native_copy_relocations.rs"]
 mod copy_relocations;
 // Executed only by a diagnostic manager after authenticated endpoint handoff.
-// The diagnostic manifest alone adds net.connect; normal manager gets none.
+// Socket/DNS fixtures request net.connect in their diagnostic manifest.
+// The interface snapshot fixture uses the normal manager's empty network rights.
 #[cfg(target_os = "mochios")]
 #[path = "../../../user/crates/net-device-protocol/src/datagram_authority.rs"]
 mod authority;
@@ -54,6 +58,12 @@ pub fn run(posix: u32, network: u32) {
         });
     }
     p::io::stdout(b"inet-socket: starting native factory/Provider checks\n").unwrap();
+    #[cfg(mochios_interfaces_284)]
+    {
+        interface_snapshot::run(network);
+        unsafe { alarm(0); }
+        return;
+    }
     #[cfg(mochios_dns_handles_281)]
     {
         resolver_provider::run(network);

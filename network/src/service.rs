@@ -100,6 +100,9 @@ pub(crate) fn run() -> ! {
                 let length = (message & 0xffff_ffff) as usize;
                 let sender = message >> 32;
                 if let Some(bytes) = request.get(..length)
+                    && !crate::interfaces::dispatch(sender, bytes, &handles, &mut response, |out| {
+                        crate::interfaces::encode(Some((stack.info(), stack.configuration())), out)
+                    })
                     && !streams.dispatch(sender, bytes, &handles, now, &mut stack.tcp)
                     && !authority.dispatch_datagram(sender, bytes, &handles, &mut stack, now)
                     && !dns_objects.dispatch(sender, bytes, &handles, &mut stack, now)
@@ -506,6 +509,9 @@ fn unavailable(
                 let length = (message & 0xffff_ffff) as usize;
                 let sender = message >> 32;
                 if let Some(bytes) = request.get(..length)
+                    && !crate::interfaces::dispatch(sender, bytes, &handles, &mut response, |out| {
+                        crate::interfaces::encode(None, out)
+                    })
                     && !streams.dispatch(sender, bytes, &handles, now, &mut stream_backend)
                     && !authority.dispatch_datagram(sender, bytes, &handles, &mut backend, 0)
                     && !dns_objects.dispatch(sender, bytes, &handles, &mut dns_backend, now)
