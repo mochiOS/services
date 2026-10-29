@@ -6,8 +6,13 @@ fixture_support=services/posix/tests/support
 mkdir -p "$fixture_out"
 fixture_defines=()
 fixture_libraries=()
+fixture_link_flags=()
+if test "${MOCHIOS_RELRO:-0}" = 1; then
+  fixture_defines+=(-DRELRO_PROBE)
+  fixture_link_flags=(-Wl,-z,relro,-z,now)
+fi
 if test "${MOCHIOS_LARGE_METADATA:-0}" = 1; then
-  fixture_defines=(-DLARGE_METADATA)
+  fixture_defines+=(-DLARGE_METADATA)
   for index in $(seq 0 109); do
     printf -v library 'libmetadata%03d.so' "$index"
     printf '.text\n.globl metadata_dummy_%s\nmetadata_dummy_%s:\n ret\n.section .note.GNU-stack,"",@progbits\n' "$index" "$index" |
@@ -17,6 +22,7 @@ if test "${MOCHIOS_LARGE_METADATA:-0}" = 1; then
 fi
 x86_64-elf-gcc -O2 -fPIC -ffreestanding -fno-stack-protector -nostdlib \
   "${fixture_defines[@]}" \
+  "${fixture_link_flags[@]}" \
   -isystem out/newlib-port/sdk/sysroot/include -ftls-model=initial-exec \
   -Wl,-shared,-z,noexecstack,-soname,libnative_ifunc.so,--hash-style=both \
   "$fixture_support/native_ifunc_library.c" -o "$fixture_out/libnative_ifunc.so"

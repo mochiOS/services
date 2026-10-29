@@ -2107,3 +2107,89 @@ fn static_fixed_image_keeps_the_original_native_exec_path() {
         });
     }
 }
+
+#[test]
+fn exec_requires_relro_contract_and_carries_protections_with_or_without_resolvers() {
+    use mochios_posix_client::{process_image::AT_INDIRECT_IMAGE, relocation_protection::Image};
+    for supported in [false, true] {
+        let flags = if supported {
+            vec![
+                "-DMOCHIOS_RELRO_RUNTIME",
+                "-Wl,-z,relro,-z,now",
+                "-Wl,-rpath,/libraries",
+            ]
+        } else {
+            vec!["-Wl,-z,relro,-z,now", "-Wl,-rpath,/libraries"]
+        };
+        let (root, library) = dependency_fixture(&flags, &["-Wl,-z,relro,-z,now"]);
+        assert_eq!(
+            search_exec(&root, &[(b"/libraries/libscope.so", &library)], &[], 0, 0),
+            Err(ENOEXEC)
+        );
+        STATE.with_borrow(|s| {
+            assert_eq!(s.entered, usize::from(supported));
+            if !supported {
+                assert!(s.prepared.is_empty());
+                return;
+            }
+            let startup = mnu_abi::process_image::decode(&s.startup).unwrap();
+            let stack = startup.stack();
+            let word = |at| u64::from_le_bytes(stack[at..at + 8].try_into().unwrap());
+            let mut at = (word(0) as usize + 2) * 8;
+            while word(at) != 0 {
+                at += 8;
+            }
+            at += 8;
+            let mut start = None;
+            while word(at) != 0 {
+                if word(at) == AT_INDIRECT_IMAGE {
+                    start = Some(word(at + 8) as usize);
+                }
+                at += 16;
+            }
+            let start = start.expect("RELRO cannot silently disappear");
+            let length = word(start + 16) as usize;
+            let image = Image::parse::<i32>(&stack[start..start + length]).unwrap();
+            assert_eq!(image.ranges().count(), 2);
+            assert!(image.indirect().is_empty());
+            for range in image.ranges() {
+                let count = u16::from_le_bytes(s.prepared[56..58].try_into().unwrap()) as usize;
+                assert!((0..count).any(|i| {
+                    let at = 64 + i * 56;
+                    let word = |n| u64::from_le_bytes(s.prepared[n..n + 8].try_into().unwrap());
+                    let kind = u32::from_le_bytes(s.prepared[at..at + 4].try_into().unwrap());
+                    kind == 1
+                        && word(at + 16) & !4095 <= range.address
+                        && range.address + range.length <= word(at + 16) + word(at + 40) + 4095
+                }));
+            }
+        });
+    }
+    let [root, middle, provider] = indirect_fixture(
+        true,
+        &["-DRELRO_CONTRACT", "-Wl,-z,relro,-z,now"],
+        &["-Wl,-z,relro,-z,now"],
+    );
+    assert_eq!(
+        search_exec(
+            &root,
+            &[
+                (b"/libraries/libmiddle.so", &middle),
+                (b"/libraries/libprovider.so", &provider)
+            ],
+            &[],
+            0,
+            0
+        ),
+        Err(ENOEXEC)
+    );
+    STATE.with_borrow(|s| {
+        assert_eq!(s.entered, 1);
+        let stack = mnu_abi::process_image::decode(&s.startup).unwrap().stack();
+        let start = stack.windows(8).position(|p| p == b"MRELRO01").unwrap();
+        let length = u64::from_le_bytes(stack[start + 16..start + 24].try_into().unwrap()) as usize;
+        let image = Image::parse::<i32>(&stack[start..start + length]).unwrap();
+        assert_eq!(image.ranges().count(), 3);
+        assert_eq!(&image.indirect()[..8], b"MIREL001");
+    });
+}

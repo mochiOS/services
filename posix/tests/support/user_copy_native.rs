@@ -5,6 +5,8 @@ use std::ffi::{c_int, c_void};
 thread_local! {
     pub static CALLS: RefCell<Vec<usize>> = const { RefCell::new(Vec::new()) };
     pub static DENIED: RefCell<Option<std::ops::Range<usize>>> = const { RefCell::new(None) };
+    pub static PROTECTED: RefCell<Vec<(u64, u64, u64)>> = const { RefCell::new(Vec::new()) };
+    pub static PROTECT_FAILURE: RefCell<Option<usize>> = const { RefCell::new(None) };
 }
 #[repr(C)]
 struct Iovec {
@@ -36,6 +38,19 @@ pub mod syscall {
         source: u64,
         length: u64,
     ) -> Result<u64, i32> {
+        if number == SyscallNumber::MemoryProtect {
+            super::PROTECTED.with_borrow_mut(|calls| calls.push((destination, source, length)));
+            if super::PROTECT_FAILURE
+                .with_borrow(|at| *at == Some(super::PROTECTED.with_borrow(|v| v.len())))
+            {
+                return Err(13);
+            }
+            assert_eq!(length, mnu_abi::MEMORY_ACCESS_READ);
+            if unsafe { libc::mprotect(destination as *mut _, source as usize, libc::PROT_READ) } != 0 {
+                return Err(14);
+            }
+            return Ok(0);
+        }
         assert_eq!(number, SyscallNumber::MemoryCopy);
         assert!(length <= mnu_abi::memory_copy::MAX_BYTES as u64);
         super::CALLS.with_borrow_mut(|calls| calls.push(length as usize));

@@ -1,6 +1,9 @@
 /* Resolver/TLS/constructor ordering fixture; all policy remains in userspace. */
 #include <stdio.h>
 #include <unistd.h>
+#ifdef RELRO_PROBE
+#include <errno.h>
+#endif
 extern int native_root_value;
 extern int native_root_fini;
 static __thread int seed = 17;
@@ -54,7 +57,20 @@ static void late_initialize(void) {
     if (seed != 17 || native_root_value != 21 || lifecycle_resolvers != 2) _exit(2);
     late_constructor = 1;
     /* The CRT must have frozen the finalizer before the first constructor. */
+#ifdef RELRO_PROBE
+    /* Faultable POSIX read must reject this destination before constructors
+     * can mutate a RELRO finalizer. It must leave the pipe byte available. */
+    int fds[2];
+    char byte = 1, received = 0;
+    if (pipe(fds) || write(fds[1], &byte, 1) != 1) _exit(7);
+    errno = 0;
+    if (read(fds[0], &native_late_fini_slot, 1) != -1 || errno != EFAULT) _exit(8);
+    if (read(fds[0], &received, 1) != 1 || received != byte) _exit(9);
+    if (close(fds[0]) || close(fds[1])) _exit(10);
+    puts("relro-native: protected before constructor PASS");
+#else
     native_late_fini_slot = 0;
+#endif
 }
 static void late_finalize(void) {
     if (!native_root_fini || !late_constructor || lifecycle_resolvers != 2) _exit(3);

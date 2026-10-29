@@ -226,3 +226,129 @@ fn crt_resolves_once_from_private_metadata_and_propagates_real_memory_faults() {
         assert_eq!(CALLS.get(), expected_calls);
     }
 }
+
+#[test]
+fn crt_seals_relro_after_relocations_and_retains_the_private_plan_through_callbacks() {
+    const CASE: &str = "MOCHIOS_RELRO_ADAPTER_CASE";
+    let Ok(case) = std::env::var(CASE) else {
+        for case in [
+            "success",
+            "empty",
+            "large",
+            "protect-fault",
+            "relocate-fault",
+            "denied",
+        ] {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "crt_seals_relro_after_relocations_and_retains_the_private_plan_through_callbacks"])
+                .env(CASE, case).output().unwrap();
+            assert!(
+                output.status.success(),
+                "case={case}: {}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        return;
+    };
+    use mochios_posix_client::relocation_protection::{self as protection, Range};
+    assert_eq!(implementation::__mochios_relro_v1(), 1);
+    let target = Mapping::new();
+    let other = Mapping::new();
+    let a = first as *const () as u64;
+    let b = second as *const () as u64;
+    let mut regions = [
+        Region {
+            address: a.min(b),
+            length: a.max(b) - a.min(b) + 1,
+            access: Access::Executable,
+        },
+        Region {
+            address: target.0 as u64,
+            length: 4096,
+            access: Access::Writable,
+        },
+    ];
+    regions.sort_unstable_by_key(|r| r.address);
+    let mut fixups = vec![
+        Fixup::new(target.0 as u64, a, 5),
+        Fixup::new(target.0 as u64 + 8, b, 0),
+    ];
+    if case == "large" {
+        for i in 0..180 {
+            fixups.push(Fixup::new(target.0 as u64 + 16 + i * 8, b, 0));
+        }
+    }
+    let inner = if case == "empty" {
+        0
+    } else {
+        mochios_posix_client::indirect_image::encoded_length(2, fixups.len()).unwrap()
+    };
+    let mut ranges = [
+        Range {
+            address: target.0 as u64,
+            length: 4096,
+        },
+        Range {
+            address: other.0 as u64,
+            length: 4096,
+        },
+    ];
+    ranges.sort_unstable_by_key(|r| r.address);
+    let mut bytes = vec![0; protection::encoded_length(2, inner).unwrap()];
+    if inner != 0 {
+        assert_eq!(encode(&regions, &mut fixups, &mut bytes), Ok(inner));
+    }
+    assert_eq!(
+        protection::wrap(inner, &ranges, &mut bytes),
+        Ok(bytes.len())
+    );
+    let original = bytes.clone();
+    METADATA.with_borrow_mut(|m| *m = bytes);
+    AUX.set(Some(METADATA.with_borrow(|m| m.as_ptr() as usize)));
+    METADATA.with_borrow_mut(|m| m[56..64].fill(0));
+    assert_eq!(implementation::initialize(), Err(ENOEXEC));
+    assert_eq!(CALLS.get(), 0);
+    assert!(user_copy_native::PROTECTED.with_borrow(|c| c.is_empty()));
+    METADATA.with_borrow_mut(|m| m.copy_from_slice(&original));
+    if case == "denied" {
+        address_space::DENIED.set(true);
+        assert_eq!(implementation::initialize(), Err(ENOMEM));
+        address_space::DENIED.set(false);
+        assert_eq!(CALLS.get(), 0);
+    }
+    if case == "protect-fault" {
+        user_copy_native::PROTECT_FAILURE.replace(Some(2));
+    }
+    if case == "relocate-fault" {
+        target.protect(libc::PROT_READ);
+    }
+    let result = implementation::initialize();
+    if case == "relocate-fault" {
+        assert_eq!(result, Err(EFAULT));
+        assert_eq!(CALLS.get(), 1);
+        assert!(user_copy_native::PROTECTED.with_borrow(|c| c.is_empty()));
+        assert_eq!(implementation::initialize(), Err(ENOEXEC));
+        return;
+    }
+    assert_eq!(CALLS.get(), if case == "empty" { 0 } else { fixups.len() });
+    assert_eq!(target.word(0), if case == "empty" { 0 } else { 78 });
+    assert_eq!(user_copy_native::PROTECTED.with_borrow(|c| c.len()), 2);
+    assert_eq!(
+        user_copy::write(ranges[0].address as *mut u8, &[0]),
+        Err(EFAULT)
+    );
+    if case == "protect-fault" {
+        assert_eq!(result, Err(EACCES));
+        assert_eq!(user_copy::write(ranges[1].address as *mut u8, &[0]), Ok(()));
+        assert_eq!(implementation::initialize(), Err(ENOEXEC));
+    } else {
+        assert_eq!(result, Ok(true));
+        assert_eq!(
+            user_copy::write(ranges[1].address as *mut u8, &[0]),
+            Err(EFAULT)
+        );
+        assert_eq!(implementation::initialize(), Ok(true));
+    }
+    assert_eq!(user_copy_native::PROTECTED.with_borrow(|c| c.len()), 2);
+}

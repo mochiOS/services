@@ -107,6 +107,15 @@ get_local_calls:
 #endif
 
 #ifdef ROOT
+#ifdef RELRO_CONTRACT
+.text
+.globl __mochios_relro_v1
+.type __mochios_relro_v1,@function
+__mochios_relro_v1:
+    mov $1,%eax
+    ret
+.size __mochios_relro_v1,.-__mochios_relro_v1
+#endif
 .text
 #ifdef CRT_CONTRACT
 .globl __mochios_indirect_v1
