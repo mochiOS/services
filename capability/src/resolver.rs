@@ -62,6 +62,7 @@ pub(crate) struct ApplicationIdentity {
 pub(crate) struct VerifiedManifest {
     pub(crate) manifest: platform::package::PackageManifest,
     pub(crate) identity: ApplicationIdentity,
+    pub(crate) manifest_digest: [u8; 32],
     certificate_allowed: Vec<String>,
 }
 
@@ -91,6 +92,7 @@ pub(crate) fn verified_manifest(
     }
     Ok(VerifiedManifest {
         manifest,
+        manifest_digest: record.verification.manifest_digest,
         certificate_allowed,
         identity: ApplicationIdentity {
             package_id: identity.package_id.into(),

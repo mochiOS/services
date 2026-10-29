@@ -47,6 +47,7 @@ fn parse_nul_list(
 pub(crate) fn spawn_application_from_manifest(
     index: &PackageIndex,
     policy: &AppPromptPolicy,
+    trusted_images: &crate::trusted_images::TrustedImages,
     sender: u64,
     buf: &[u8],
     posix_endpoint: platform::handle::Handle,
@@ -148,7 +149,7 @@ pub(crate) fn spawn_application_from_manifest(
                 mochi_user_syscall::EACCES as i64,
             ));
         }
-        if !is_trusted_prompt_broker(header.shell_endpoint) {
+        if !is_trusted_prompt_broker(trusted_images, header.shell_endpoint) {
             return Err(mochi_user_syscall::SysError::from_raw(
                 mochi_user_syscall::EACCES as i64,
             ));
@@ -229,6 +230,7 @@ pub(crate) fn spawn_application_from_manifest(
     ));
     spawn_items.extend(items[1..].iter().cloned());
     crate::native_app::launch(
+        trusted_images,
         entry_path,
         &spawn_items,
         posix_endpoint,

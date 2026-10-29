@@ -25,6 +25,7 @@ pub(crate) struct Catalog {
     root: Image,
     libraries: Vec<Image>,
     identity: ApplicationIdentity,
+    manifest_digest: [u8; 32],
 }
 
 fn denied() -> syscall::SysError {
@@ -97,6 +98,25 @@ fn decode_key(hash: &str) -> Result<[u8; 32], syscall::SysError> {
     Ok(digest)
 }
 
+/// Immutable bootstrap readers may select a legacy root without a file table.
+/// Once a manifest declares file bindings, even a service root must obey them.
+pub(crate) fn validate_declared_root(
+    manifest: &package::PackageManifest,
+    path: &str,
+    bytes: &[u8],
+) -> Result<(), syscall::SysError> {
+    let binary = manifest.binary(path).ok_or_else(denied)?;
+    if binary.file.is_none() && manifest.files.is_empty() {
+        return Ok(());
+    }
+    let expected = image(manifest, binary)?;
+    if expected.size != bytes.len() as u64 || expected.digest != <[u8; 32]>::from(Sha256::digest(bytes))
+    {
+        return Err(denied());
+    }
+    Ok(())
+}
+
 fn matches_dependency(
     required: &package::LibraryDependency,
     actual: &VerifiedManifest,
@@ -154,6 +174,7 @@ impl Catalog {
             },
             libraries: Vec::new(),
             identity: verified.identity,
+            manifest_digest: verified.manifest_digest,
         })
     }
 
@@ -183,6 +204,7 @@ impl Catalog {
         let root = image(manifest, binary)?;
         let architecture = manifest.package_architecture.clone();
         let identity = verified.identity.clone();
+        let manifest_digest = verified.manifest_digest;
         let mut packages = alloc::vec![verified];
         let mut libraries = Vec::new();
         let mut cursor = 0;
@@ -229,11 +251,16 @@ impl Catalog {
             root,
             libraries,
             identity,
+            manifest_digest,
         })
     }
 
     pub(crate) fn identity(&self) -> &ApplicationIdentity {
         &self.identity
+    }
+
+    pub(crate) fn manifest_digest(&self) -> [u8; 32] {
+        self.manifest_digest
     }
 
     /// Select a signed record using the actual open candidate, then verify the

@@ -194,6 +194,7 @@ pub(crate) fn serve_capability_requests(mut state: CapabilityServiceState) -> ! 
                 spawn_application_from_manifest(
                     &state.package_index,
                     &state.app_prompt_policy,
+                    &state.trusted_images,
                     sender,
                     slice,
                     attached.handles[0].handle,
@@ -455,7 +456,7 @@ pub(crate) fn serve_capability_requests(mut state: CapabilityServiceState) -> ! 
             continue;
         }
         if opcode == platform::capability::CAPABILITY_DECISION_OPCODE {
-            let status = if !is_trusted_prompt_broker(sender) {
+            let status = if !is_trusted_prompt_broker(&state.trusted_images, sender) {
                 mochi_user_syscall::EACCES
             } else {
                 parse_decision_request(slice)

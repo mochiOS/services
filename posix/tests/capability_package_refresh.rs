@@ -5,6 +5,25 @@ use std::cell::Cell;
 #[path = "../../capability/src/consent.rs"]
 mod consent;
 
+// This fixture isolates publication of index/policy state; role authentication
+// and the immutable bootstrap source are exercised by trusted_broker_images.
+mod bootstrap_file {
+    pub fn read_file(_: &str) -> Result<Vec<u8>, super::SysError> {
+        panic!("unexpected bootstrap I/O")
+    }
+}
+mod trusted_images {
+    pub(crate) struct TrustedImages;
+    impl TrustedImages {
+        pub fn bootstrap(
+            _: &super::package_index::PackageIndex,
+            _: fn(&str) -> Result<Vec<u8>, super::SysError>,
+        ) -> Result<Self, super::SysError> {
+            Ok(Self)
+        }
+    }
+}
+
 thread_local! {
     static INDEX_ERROR: Cell<Option<SysError>> = const { Cell::new(None) };
     static POLICY_ERROR: Cell<Option<SysError>> = const { Cell::new(None) };
@@ -104,6 +123,7 @@ fn publishes_the_new_index_and_policy_only_after_both_reads_succeed() {
             app_prompt_policy: policy::AppPromptPolicy { generation: 1 },
             consent: consent::Controller::new(),
             authorization_generation: 1,
+            trusted_images: trusted_images::TrustedImages,
         };
         assert_eq!(
             state.refresh_package_index(),
@@ -158,6 +178,7 @@ fn policy_generation_exhaustion_cannot_publish_a_new_policy_with_an_old_consent_
         app_prompt_policy: policy::AppPromptPolicy { generation: 1 },
         consent: consent::Controller::new(),
         authorization_generation: u64::MAX,
+        trusted_images: trusted_images::TrustedImages,
     };
     assert_eq!(
         state.refresh_package_index().unwrap_err().native_error(),

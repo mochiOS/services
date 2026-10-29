@@ -22,6 +22,7 @@ mod resolver {
     pub(crate) struct VerifiedManifest {
         pub manifest: mochi_user_platform::package::PackageManifest,
         pub identity: ApplicationIdentity,
+        pub manifest_digest: [u8; 32],
     }
     pub(crate) fn authorize_spawn_image(
         _: u64,
@@ -47,6 +48,22 @@ mod persistent_grant {
         ) -> Result<T, ClientError<platform::syscall::SysError>>,
     ) -> Result<T, platform::syscall::SysError> {
         panic!("metadata tests must not issue native IPC")
+    }
+}
+
+mod trusted_images {
+    pub(crate) struct TrustedImages;
+    impl TrustedImages {
+        pub fn record_created(
+            &self,
+            _: &crate::resolver::ApplicationIdentity,
+            _: [u8; 32],
+            _: &[u8],
+            _: &[u8],
+            _: u32,
+        ) -> Result<(), mochi_user_platform::syscall::SysError> {
+            panic!("metadata tests must not register a live image")
+        }
     }
 }
 

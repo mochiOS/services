@@ -1,3 +1,6 @@
+#[cfg(all(target_os = "mochios", mochios_broker_image_probe_301))]
+#[path = "native_broker_manager.rs"]
+mod broker_image;
 #[cfg(target_os = "mochios")]
 mod libc_udp {
     include!("support/native_libc_udp.inc");
@@ -77,6 +80,15 @@ pub fn run(posix: u32, network: u32) {
         });
     }
     p::io::stdout(b"inet-socket: starting native factory/Provider checks\n").unwrap();
+    #[cfg(mochios_broker_image_probe_301)]
+    {
+        broker_image::run(posix);
+        unsafe {
+            alarm(0);
+        }
+        return;
+    }
+
     #[cfg(mochios_netdb_public_285)]
     {
         llvm_runtime::run();

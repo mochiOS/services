@@ -9,6 +9,7 @@ pub(crate) struct CapabilityServiceState {
     // must authenticate fresh observations before entering this controller.
     pub(crate) consent: crate::consent::Controller,
     pub(crate) authorization_generation: u64,
+    pub(crate) trusted_images: crate::trusted_images::TrustedImages,
 }
 
 impl CapabilityServiceState {
@@ -20,11 +21,16 @@ impl CapabilityServiceState {
             ));
         }
         let app_prompt_policy = load_app_prompt_policy(&package_index);
+        let trusted_images = crate::trusted_images::TrustedImages::bootstrap(
+            &package_index,
+            crate::bootstrap_file::read_file,
+        )?;
         Ok(Self {
             package_index,
             app_prompt_policy,
             consent: crate::consent::Controller::new(),
             authorization_generation: 1,
+            trusted_images,
         })
     }
 

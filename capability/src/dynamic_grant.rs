@@ -10,41 +10,23 @@ use crate::persistent_grant::{append_persistent_grant, read_file};
 use crate::policy::is_known_capability;
 use crate::resolver::binary_caps;
 
-const TRUSTED_PROMPT_PACKAGE_ID: &[u8] = b"org.mochios.msh";
-const TRUSTED_WORKSPACE_PACKAGE_ID: &[u8] = b"org.mochios.workspace";
-const BUILT_IN_DEVELOPER_ID: &[u8] = b"org.mochios.system";
-const BUILT_IN_PROVENANCE: u8 = 1;
-
-pub(crate) fn is_trusted_prompt_broker(endpoint: u64) -> bool {
-    trusted_broker_package(endpoint).is_some()
+pub(crate) fn is_trusted_prompt_broker(
+    trusted: &crate::trusted_images::TrustedImages,
+    endpoint: u64,
+) -> bool {
+    use crate::trusted_images::Role;
+    crate::consent_peer::capture(endpoint)
+        .and_then(|peer| trusted.role(&peer))
+        .is_ok_and(|role| matches!(role, Some(Role::TextPrompt | Role::Workspace)))
 }
 
-pub(crate) fn is_trusted_workspace(endpoint: u64) -> bool {
-    trusted_broker_package(endpoint) == Some(TRUSTED_WORKSPACE_PACKAGE_ID)
-}
-
-fn trusted_broker_package(endpoint: u64) -> Option<&'static [u8]> {
-    let Ok(context) = platform::process::thread_security_context(endpoint) else {
-        return None;
-    };
-    let package_len = context.package_id_len as usize;
-    let developer_len = context.developer_id_len as usize;
-    let trusted_identity = package_len <= context.package_id.len()
-        && developer_len <= context.developer_id.len()
-        && &context.developer_id[..developer_len] == BUILT_IN_DEVELOPER_ID
-        && context.subject_key_id == [0; 32]
-        && context.provenance == BUILT_IN_PROVENANCE;
-    if !trusted_identity {
-        return None;
-    }
-    let package = &context.package_id[..package_len];
-    if package == TRUSTED_PROMPT_PACKAGE_ID {
-        Some(TRUSTED_PROMPT_PACKAGE_ID)
-    } else if package == TRUSTED_WORKSPACE_PACKAGE_ID {
-        Some(TRUSTED_WORKSPACE_PACKAGE_ID)
-    } else {
-        None
-    }
+pub(crate) fn is_trusted_workspace(
+    trusted: &crate::trusted_images::TrustedImages,
+    endpoint: u64,
+) -> bool {
+    crate::consent_peer::capture(endpoint)
+        .and_then(|peer| trusted.role(&peer))
+        .is_ok_and(|role| role == Some(crate::trusted_images::Role::Workspace))
 }
 
 fn current_process_id() -> Result<u64, mochi_user_syscall::SysError> {

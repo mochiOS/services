@@ -140,6 +140,7 @@ impl Drop for Reference {
 }
 
 pub(crate) fn launch(
+    trusted_images: &crate::trusted_images::TrustedImages,
     path: &str,
     items: &[String],
     endpoint: u32,
@@ -265,6 +266,13 @@ pub(crate) fn launch(
                 },
             )
         })?;
+        trusted_images.record_created(
+            catalog.identity(),
+            catalog.manifest_digest(),
+            &bytes,
+            output,
+            process.0,
+        )?;
         platform::process::resume_handle(process.0)?;
         Ok(id)
     })();
