@@ -16,6 +16,8 @@ extern int native_local_call(void);
 extern int native_resolver_count(void);
 extern int native_constructor_value(void);
 extern int native_late_resolution(void);
+extern int native_late_constructor(void);
+extern int native_lifecycle_resolvers(void);
 extern void native_set_seed(int);
 static void initialize(void) __attribute__((constructor));
 static void initialize(void) { root_constructor_value = native_pick(); }
@@ -38,6 +40,7 @@ int main(int argc, char **argv) {
     const char *expected = argv[after_exec ? 2 : 1];
     CHECK(geteuid() == (strcmp(expected, "--expect-euid=501") == 0 ? 501 : 0));
     CHECK(root_constructor_value == 73 && native_constructor_value() == 146);
+    CHECK(native_late_constructor() == 1 && native_lifecycle_resolvers() == 2);
     CHECK(native_pick() == 73 && native_pointer_call() == 73 && native_local_call() == 73);
     CHECK(native_resolver_count() > 0 && !native_late_resolution());
     if (after_exec) { puts("indirect-native: reexec PASS"); return 42; }
@@ -58,6 +61,6 @@ int main(int argc, char **argv) {
     int status = -1;
     CHECK(waitpid(child, &status, 0) == child && status == (42 << 8));
     CHECK(native_resolver_count() == count && !native_late_resolution());
-    printf("indirect-native: TLS/constructors/eager/pthread/fork/exec PASS euid=%lu\n", (unsigned long)geteuid());
+    printf("indirect-native: TLS/IFUNC-init-fini/eager/pthread/fork/exec PASS euid=%lu\n", (unsigned long)geteuid());
     return 0;
 }

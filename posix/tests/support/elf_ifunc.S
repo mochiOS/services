@@ -122,8 +122,20 @@ __mochios_lifecycle_v1:
     mov $1,%eax
     ret
 .size __mochios_lifecycle_v1,.-__mochios_lifecycle_v1
+#ifdef DEFERRED_LIFECYCLE
+.globl __mochios_lifecycle_v2
+.type __mochios_lifecycle_v2,@function
+__mochios_lifecycle_v2:
+    mov $2,%eax
+    ret
+.size __mochios_lifecycle_v2,.-__mochios_lifecycle_v2
+#endif
 .section .init_array,"aw"
     .quad choose
+#ifdef DEFERRED_LIFECYCLE
+.section .fini_array,"aw"
+    .quad choose
+#endif
 .text
 #endif
 #endif

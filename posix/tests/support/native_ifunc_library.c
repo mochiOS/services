@@ -8,6 +8,8 @@ static int calls;
 static int constructor_value;
 static int constructor_started;
 static int late_resolution;
+static int late_constructor;
+static int lifecycle_resolvers;
 static int implementation(void) { return seed + native_root_value + 35; }
 static int bad_implementation(void) { return -1; }
 static int (*select_implementation(void))(void) __attribute__((used));
@@ -32,6 +34,38 @@ int native_resolver_count(void) { return calls; }
 int native_constructor_value(void) { return constructor_value; }
 int native_late_resolution(void) { return late_resolution; }
 void native_set_seed(int value) { seed = value; }
+int native_late_constructor(void) { return late_constructor; }
+int native_lifecycle_resolvers(void) { return lifecycle_resolvers; }
+extern void (*native_late_fini_slot)(void);
+static void late_initialize(void) {
+    if (seed != 17 || native_root_value != 21 || lifecycle_resolvers != 2) _exit(2);
+    late_constructor = 1;
+    /* The CRT must have frozen the finalizer before the first constructor. */
+    native_late_fini_slot = 0;
+}
+static void late_finalize(void) {
+    if (!native_root_fini || !late_constructor || lifecycle_resolvers != 2) _exit(3);
+    puts("indirect-native: captured IFUNC fini PASS");
+}
+static void (*select_initialize(void))(void) __attribute__((used));
+static void (*select_initialize(void))(void) {
+    if (seed != 17 || native_root_value != 21 || constructor_started || late_constructor) _exit(4);
+    ++lifecycle_resolvers;
+    return late_initialize;
+}
+static void (*select_finalize(void))(void) __attribute__((used));
+static void (*select_finalize(void))(void) {
+    if (seed != 17 || native_root_value != 21 || constructor_started || late_constructor) _exit(5);
+    ++lifecycle_resolvers;
+    return late_finalize;
+}
+__asm__(".local late_init_pick\n.type late_init_pick,@gnu_indirect_function\n"
+        ".set late_init_pick,select_initialize\n"
+        ".local late_fini_pick\n.type late_fini_pick,@gnu_indirect_function\n"
+        ".set late_fini_pick,select_finalize\n"
+        ".section .init_array,\"aw\"\n.quad late_init_pick\n"
+        ".section .fini_array,\"aw\"\n.globl native_late_fini_slot\n"
+        ".hidden native_late_fini_slot\nnative_late_fini_slot: .quad late_fini_pick\n.text\n");
 static void initialize(void) __attribute__((constructor));
 static void initialize(void) {
     constructor_started = 1;

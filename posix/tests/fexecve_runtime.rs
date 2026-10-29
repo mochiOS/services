@@ -1048,6 +1048,76 @@ fn deferred_array_elements_are_rejected_even_with_a_valid_stale_function_address
 }
 
 #[test]
+fn exec_preserves_late_init_and_fini_recipes_for_a_v2_crt() {
+    use mochios_posix_client::{lifecycle_image::deferred, process_image::AT_LIFECYCLE_IMAGE};
+    let [root, middle, provider] =
+        indirect_fixture(true, &["-DLATE_CALLBACKS", "-DDEFERRED_LIFECYCLE"], &[]);
+    assert!(
+        mochios_posix_client::pie::Pie::parse_object(&root)
+            .unwrap()
+            .has_deferred_lifecycle_runtime()
+            .unwrap()
+    );
+    assert_eq!(
+        search_exec(
+            &root,
+            &[
+                (b"/libraries/libmiddle.so", &middle),
+                (b"/libraries/libprovider.so", &provider),
+            ],
+            &[],
+            0,
+            0
+        ),
+        Err(ENOEXEC)
+    );
+    STATE.with_borrow(|s| {
+        assert_eq!(s.entered, 1);
+        let decoded = mnu_abi::process_image::decode(&s.startup).unwrap();
+        let stack = decoded.stack();
+        let word = |b: &[u8], o| u64::from_le_bytes(b[o..o + 8].try_into().unwrap());
+        let mut cursor = (word(stack, 0) as usize + 2) * 8;
+        while word(stack, cursor) != 0 {
+            cursor += 8;
+        }
+        cursor += 8;
+        let mut offset = None;
+        while word(stack, cursor) != 0 {
+            if word(stack, cursor) == AT_LIFECYCLE_IMAGE {
+                assert!(offset.replace(word(stack, cursor + 8) as usize).is_none());
+                assert!(
+                    decoded
+                        .relocations()
+                        .any(|r| r.offset as usize == cursor + 8
+                            && r.kind == mnu_abi::process_image::RelocationKind::StackAddress)
+                );
+            }
+            cursor += 16;
+        }
+        let start = offset.expect("late lifecycle must be explicitly inherited");
+        let length = word(stack, start + 16) as usize;
+        let plan = deferred::Plan::parse::<i32>(&stack[start..start + length]).unwrap();
+        let mut output = vec![0; plan.flat_length()];
+        let mut reads = Vec::new();
+        let entry = word(&s.prepared, 24);
+        assert_eq!(
+            plan.resolve::<i32>(&mut output, |address, b| {
+                reads.push(address);
+                assert_eq!(b.len(), 8);
+                b.copy_from_slice(&entry.to_le_bytes());
+                Ok(())
+            }),
+            Ok(output.len())
+        );
+        assert_eq!(reads.len(), 2);
+        assert_ne!(reads[0], reads[1]);
+        assert_eq!(word(&output, 8) as u32, 1);
+        assert_eq!(word(&output, output.len() - 16), entry);
+        assert_eq!(word(&output, output.len() - 8), entry);
+    });
+}
+
+#[test]
 fn oversized_resolver_plans_fail_without_materializing_an_executable_object() {
     let [root, middle, provider] = indirect_fixture(true, &[], &["-DMANY_FIXUPS"]);
     assert_eq!(
