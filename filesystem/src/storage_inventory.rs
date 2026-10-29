@@ -355,6 +355,54 @@ impl FilesystemService {
         });
         Ok(())
     }
+    pub fn storage_epoch_request(
+        &mut self,
+        h: provider::RequestHeader,
+        payload: &[u8],
+        attachments: u32,
+    ) -> Result<(u64, Vec<u8>), i32> {
+        if h.opcode != provider::OP_QUERY
+            || h.basis != mochios_filesystem_protocol::storage_region::EPOCH
+            || h.argument != 0
+            || h.length != 8
+            || h.data_length != 16
+            || payload.len() != 16
+            || attachments != 0
+        {
+            return Err(22);
+        }
+        let open = self.opens.get(&h.object_id).ok_or(9)?;
+        if open.volume != 0 || open.inode.index.get() != 2 || !open.inode.file_type().is_dir() {
+            return Err(13);
+        }
+        let generation = u64::from_le_bytes(payload[..8].try_into().map_err(|_| 22)?);
+        let disk = u64::from_le_bytes(payload[8..].try_into().map_err(|_| 22)?);
+        let selected = self.selected_storage(generation, disk)?;
+        #[cfg(not(target_os = "mochios"))]
+        {
+            let _ = selected;
+            Err(95)
+        }
+        #[cfg(target_os = "mochios")]
+        {
+            let identity = mochi_user_platform::storage::control(mnu_abi::StorageControlRequest {
+                operation: mnu_abi::STORAGE_CONTROL_INSPECT,
+                device_id: selected.device,
+                arguments: [mnu_abi::STORAGE_QUERY_DEVICE_IDENTITY, 0, 0, 0],
+                reserved0: 0,
+            })
+            .map_err(|_| 5)?;
+            if identity.status != 0
+                || identity.values[0] == 0
+                || identity.values[3] != 0
+                || identity.values[2] != 512
+                || identity.values[1].checked_mul(512) != Some(selected.capacity)
+            {
+                return Err(116);
+            }
+            Ok((8, identity.values[0].to_le_bytes().to_vec()))
+        }
+    }
     pub fn storage_inventory_request(
         &mut self,
         header: provider::RequestHeader,

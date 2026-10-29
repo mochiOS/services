@@ -1206,6 +1206,9 @@ fn handle_provider_request(
         _ if service.is_storage_reservation(header.object_id) => {
             service.validate_storage_reservation(header, payload, attached.count)
         }
+        provider::OP_QUERY if header.basis == mochios_filesystem_protocol::storage_region::EPOCH => {
+            service.storage_epoch_request(header,payload,attached.count)
+        }
         provider::OP_QUERY if header.basis == mochios_filesystem_protocol::storage_inventory::GET => {
             service.storage_inventory_request(header, payload, attached.count)
         }

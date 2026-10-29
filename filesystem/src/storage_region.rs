@@ -149,7 +149,7 @@ impl FilesystemService {
                 [mnu_abi::STORAGE_QUERY_DEVICE_IDENTITY, 0, 0, 0],
             )?;
             if identity.status != 0
-                || identity.values[0] == 0
+                || identity.values[0] != r.epoch
                 || identity.values[2] != 512
                 || identity.values[3] != 0
                 || identity.values[1].checked_mul(512) != Some(before.capacity)
@@ -272,6 +272,7 @@ mod tests {
             disk: 2,
             first: 0,
             sectors: 10,
+            epoch: 7,
         }
         .encode();
         let mut h = mnu_abi::IpcObjectHandles::default();
