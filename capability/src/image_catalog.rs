@@ -245,7 +245,7 @@ impl Catalog {
     ) -> Result<(), syscall::SysError> {
         let selected = match source {
             Source::Root => &self.root,
-            Source::Dependency { path, .. } => self
+            Source::Dependency { path, .. } | Source::Interpreter { path } => self
                 .libraries
                 .iter()
                 .find(|image| image.path.as_bytes() == path)

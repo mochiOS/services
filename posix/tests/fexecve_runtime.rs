@@ -55,6 +55,8 @@ thread_local! {static STATE:RefCell<State>=RefCell::new(State::default());static
 mod exec_image;
 #[path = "support/scoped_preparation.rs"]
 mod scoped_preparation;
+#[path = "support/interpreter_preparation.rs"]
+mod interpreter_preparation;
 #[path = "../../../user/crates/newlib-runtime/src/exec_inputs.rs"]
 mod exec_inputs;
 #[path = "../../../user/crates/newlib-runtime/src/exec_handle.rs"]

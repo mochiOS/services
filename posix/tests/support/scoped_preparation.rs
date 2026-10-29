@@ -285,6 +285,7 @@ unsafe impl Backend for FaultAllocation {
                     STATE.with_borrow(|state| assert!(!state.closed.contains(&200)));
                     Some(path.to_vec())
                 }
+                Source::Interpreter { path } => Some(path.to_vec()),
             };
             captures.seen.push((path, bytes.to_vec()));
             STATE.with_borrow_mut(|state| {
@@ -295,7 +296,9 @@ unsafe impl Backend for FaultAllocation {
                 if captures.mutate_after_capture {
                     match source {
                         Source::Root => state.bytes.fill(0),
-                        Source::Dependency { .. } => state.libraries[0].1.fill(0),
+                        Source::Dependency { .. } | Source::Interpreter { .. } => {
+                            state.libraries[0].1.fill(0)
+                        }
                     }
                 }
             });
@@ -319,6 +322,123 @@ unsafe impl Backend for FaultAllocation {
     fn readonly_image(&self, image: u32) -> Result<u32, i32> {
         exec_image::Runtime.readonly_image(image)
     }
+}
+
+#[test]
+fn interpreter_capture_uses_only_the_delegated_scope_and_authenticated_bytes() {
+    use super::interpreter_preparation::fixture;
+    let root = fixture::image(true, false, false);
+    let loader = fixture::image(false, false, true);
+    for reject in [None, Some((1, EACCES)), Some((2, EIO))] {
+        reset(0);
+        STATE.with_borrow_mut(|state| {
+            state.bytes = root.clone();
+            state.libraries = vec![(fixture::PATH.to_vec(), loader.clone())];
+        });
+        ALLOCATIONS.with_borrow_mut(|s| *s = Allocations::default());
+        CAPTURES.with_borrow_mut(|s| {
+            *s = Captures {
+                reject,
+                mutate_after_capture: true,
+                ..Default::default()
+            }
+        });
+        let client = PosixClient::new(TransportState {
+            deny: false,
+            calls: RefCell::new(Vec::new()),
+        });
+        let scope = Scoped::new(
+            &client,
+            ObjectHandleAttachment {
+                handle: 777,
+                rights: wire::TOKEN_RIGHTS,
+            },
+            &FaultAllocation,
+            translate,
+        )
+        .unwrap();
+        let mut owner = Preparation::default();
+        let result = scope.prepare(&mut owner, 19, Environment::default());
+        match reject {
+            Some((_, error)) => assert!(matches!(result,Err(e) if e==error)),
+            None => assert!(result.is_ok()),
+        }
+        drop(owner);
+        ALLOCATIONS.with_borrow(|s| assert!(s.live.is_empty()));
+        CAPTURES.with_borrow(|s| {
+            assert_eq!(s.seen[0], (None, root.clone()));
+            if reject != Some((1, EACCES)) {
+                assert_eq!(s.seen[1], (Some(fixture::PATH.to_vec()), loader.clone()));
+            }
+        });
+        STATE.with_borrow(|s| {
+            assert_eq!(s.opened, 0);
+            assert_eq!(s.identity_queries, 0);
+            assert!(!s.closed.contains(&19) && !s.closed.contains(&777));
+            assert_eq!(
+                s.library_paths,
+                if reject == Some((1, EACCES)) {
+                    Vec::<Vec<u8>>::new()
+                } else {
+                    vec![fixture::PATH.to_vec()]
+                }
+            );
+            if reject.is_some() {
+                assert_eq!(s.images_created, 0);
+            }
+        });
+    }
+}
+
+#[test]
+fn interpreter_allocation_failures_release_every_owned_resource_and_prevent_retry() {
+    use super::interpreter_preparation::fixture;
+    for failure in 1..32 {
+        reset(0);
+        STATE.with_borrow_mut(|state| {
+            state.bytes = fixture::image(true, false, false);
+            state.libraries = vec![(fixture::PATH.to_vec(), fixture::image(false, false, true))];
+        });
+        ALLOCATIONS.with_borrow_mut(|state| {
+            *state = Allocations {
+                fail_at: failure,
+                ..Default::default()
+            }
+        });
+        CAPTURES.with_borrow_mut(|state| *state = Captures::default());
+        let mut owner = Preparation::<FaultAllocation>::default();
+        let result = owner.prepare(
+            &FaultAllocation,
+            19,
+            Environment::default(),
+            Default::default(),
+        );
+        let success = result.is_ok();
+        if !success {
+            assert!(matches!(result, Err(ENOMEM)));
+        }
+        assert!(matches!(
+            owner.prepare(
+                &FaultAllocation,
+                19,
+                Environment::default(),
+                Default::default()
+            ),
+            Err(EINVAL)
+        ));
+        drop(owner);
+        ALLOCATIONS.with_borrow(|state| assert!(state.live.is_empty()));
+        STATE.with_borrow(|state| {
+            assert!(!state.closed.contains(&19));
+            for handle in [200, 28, 29] {
+                assert!(state.closed.iter().filter(|&&h| h == handle).count() <= 1);
+            }
+        });
+        if success {
+            return;
+        }
+    }
+    panic!("did not reach successful interpreter preparation");
 }
 
 #[test]

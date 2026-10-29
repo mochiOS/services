@@ -123,7 +123,11 @@ fn exact_inputs_use_one_authenticated_snapshot_without_reopening_executables() {
 #[test]
 fn modified_truncated_and_appended_bytes_are_rejected_for_every_input() {
     let approved = catalog();
-    for (source, expected) in [(Source::Root, ROOT), (dependency(LIB.as_bytes()), LIBRARY)] {
+    for (source, expected) in [
+        (Source::Root, ROOT),
+        (dependency(LIB.as_bytes()), LIBRARY),
+        (Source::Interpreter { path: LIB.as_bytes() }, LIBRARY),
+    ] {
         let mut modified = expected.to_vec();
         modified[0] ^= 1;
         let mut appended = expected.to_vec();
@@ -139,6 +143,30 @@ fn modified_truncated_and_appended_bytes_are_rejected_for_every_input() {
             );
         }
     }
+}
+
+#[test]
+fn interpreter_uses_exact_authenticated_library_binding_without_extra_identity() {
+    let approved = catalog();
+    assert_eq!(
+        approved.validate(
+            Source::Interpreter {
+                path: LIB.as_bytes()
+            },
+            LIBRARY
+        ),
+        Ok(())
+    );
+    for path in [APP.as_bytes(), b"library.so", b"/tmp/library.so"] {
+        assert!(
+            approved
+                .validate(Source::Interpreter { path }, LIBRARY)
+                .is_err()
+        );
+    }
+    assert_eq!(approved.identity().package_id, "org.mochios.test");
+    assert_eq!(approved.identity().developer_id, "org.mochios.system");
+    FILES.with_borrow(|files| assert_eq!(files.reads, [RECORD, MANIFEST]));
 }
 
 #[test]
