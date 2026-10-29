@@ -128,5 +128,6 @@ fn main(){
  assert_eq!(observed.image_revision,1);assert_eq!(observed.process_id,17);
 }
 "#);
+    program.push_str(include_str!("support/unmeasured_memory.inc"));
     probe::run(&program);
 }
