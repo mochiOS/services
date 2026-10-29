@@ -69,6 +69,9 @@ impl Fixture {
             .arg(format!("-D{define}"))
             .arg(support.join("elf_ifunc.S"))
             .arg(format!("-L{}", f.directory.display()));
+            if mode == "READONLY_SLOTS" {
+                c.args(["-DREADONLY_SLOTS", "-Wl,-z,separate-code"]);
+            }
             if name == "root.so" {
                 c.arg("-Wl,-e,_start");
                 if !mode.is_empty() {
@@ -173,6 +176,7 @@ struct Prepared {
     plan: Vec<u8>,
     regions: usize,
     fixups: usize,
+    writable: Vec<mochios_posix_client::relocation_protection::Range>,
 }
 fn prepare(bytes: &[Vec<u8>]) -> Result<Prepared, Error> {
     let images = bytes
@@ -191,6 +195,11 @@ fn prepare(bytes: &[Vec<u8>]) -> Result<Prepared, Error> {
         .collect();
     let mut order = [0; 3];
     let scope = Scope::new(&objects, &mut order)?;
+    let mut writable = Vec::new();
+    scope.readonly_writes(|r| {
+        writable.push(r);
+        Ok(())
+    })?;
     let (r, f) = scope.deferred_counts()?;
     let mut regions = vec![Region::EMPTY; r];
     let mut fixups = vec![Fixup::EMPTY; f];
@@ -201,6 +210,7 @@ fn prepare(bytes: &[Vec<u8>]) -> Result<Prepared, Error> {
         plan: vec![0xcc; deferred.encoded_length()?],
         regions: r,
         fixups: f,
+        writable,
     };
     assert_eq!(deferred.encode(&mut result.plan)?, result.plan.len());
     assert_eq!(
@@ -249,6 +259,18 @@ fn execute(p: &Prepared, fixture: &Fixture, expected: u64, addend: u64) {
     )
     .unwrap();
     let state = State::new();
+    for range in &p.writable {
+        assert_eq!(
+            unsafe {
+                libc::mprotect(
+                    range.address as *mut _,
+                    range.length as usize,
+                    libc::PROT_READ | libc::PROT_WRITE,
+                )
+            },
+            0
+        );
+    }
     state
         .apply(
             &captured,
@@ -281,6 +303,36 @@ fn execute(p: &Prepared, fixture: &Fixture, expected: u64, addend: u64) {
         )
         .unwrap();
     assert_eq!(load(BASES[1] + middle["local_calls"]), 2);
+    for range in &p.writable {
+        assert_eq!(
+            unsafe {
+                libc::mprotect(
+                    range.address as *mut _,
+                    range.length as usize,
+                    libc::PROT_READ,
+                )
+            },
+            0
+        );
+        let mut descriptors = [-1; 2];
+        let mut byte = 0u8;
+        assert_eq!(unsafe { libc::pipe(descriptors.as_mut_ptr()) }, 0);
+        assert_eq!(
+            unsafe { libc::write(descriptors[1], (&byte as *const u8).cast(), 1) },
+            1
+        );
+        assert_eq!(
+            unsafe { libc::read(descriptors[0], range.address as *mut _, 1) },
+            -1
+        );
+        assert_eq!(std::io::Error::last_os_error().raw_os_error(), Some(14));
+        assert_eq!(
+            unsafe { libc::read(descriptors[0], (&mut byte as *mut u8).cast(), 1) },
+            1
+        );
+        assert_eq!(unsafe { libc::close(descriptors[0]) }, 0);
+        assert_eq!(unsafe { libc::close(descriptors[1]) }, 0);
+    }
     assert_eq!(load(BASES[1] + middle["seen_during_resolve"]), expected);
     assert_eq!(load(BASES[1] + middle["zero_slot"]), 0);
     let implementation = if expected == 73 {
@@ -498,6 +550,11 @@ fn planning_checks_all_scratch_capacities_before_emitting_any_bundle() {
 #[test]
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 fn copied_data_observes_provider_ifuncs_before_root_resolvers_like_gnu_loader() {
+    copy_reference(false);
+    copy_reference(true);
+}
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+fn copy_reference(readonly: bool) {
     let mut f = Fixture::new("both", "", false);
     let source = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/support/elf_ifunc_copy.S");
     let root = f.directory.join("copy-root");
@@ -515,6 +572,14 @@ fn copied_data_observes_provider_ifuncs_before_root_resolvers_like_gnu_loader() 
         .arg("-o")
         .arg(&root));
     f.bytes[0] = std::fs::read(&root).unwrap();
+    if readonly {
+        let headers = headers(&f.bytes[0]).collect::<Vec<_>>();
+        for h in headers {
+            if f.bytes[0][h] == 1 && f.bytes[0][h + 4] & 2 != 0 {
+                f.bytes[0][h + 4..h + 8].copy_from_slice(&4u32.to_le_bytes());
+            }
+        }
+    }
     assert!(
         relocations(&f.bytes[0])
             .iter()
@@ -539,6 +604,18 @@ fn copied_data_observes_provider_ifuncs_before_root_resolvers_like_gnu_loader() 
     .unwrap();
     let mut mappings = host_mappings::Mappings::default();
     mappings.install(&prepared.bundle);
+    for range in &prepared.writable {
+        assert_eq!(
+            unsafe {
+                libc::mprotect(
+                    range.address as *mut _,
+                    range.length as usize,
+                    libc::PROT_READ | libc::PROT_WRITE,
+                )
+            },
+            0
+        );
+    }
     State::new()
         .apply_with_copies(
             &captured,
@@ -563,6 +640,18 @@ fn copied_data_observes_provider_ifuncs_before_root_resolvers_like_gnu_loader() 
             },
         )
         .unwrap();
+    for range in &prepared.writable {
+        assert_eq!(
+            unsafe {
+                libc::mprotect(
+                    range.address as *mut _,
+                    range.length as usize,
+                    libc::PROT_READ,
+                )
+            },
+            0
+        );
+    }
     let symbols = run(Command::new("x86_64-elf-nm").arg(&root));
     let root_slot = symbols
         .lines()
@@ -598,4 +687,24 @@ fn copied_data_observes_provider_ifuncs_before_root_resolvers_like_gnu_loader() 
         .arg("-o")
         .arg(&reference));
     run(Command::new(reference).env("LD_LIBRARY_PATH", &f.directory));
+}
+
+#[test]
+fn readonly_data_ifunc_slots_use_temporary_writes_and_return_to_readonly() {
+    let fixture = Fixture::new("both", "READONLY_SLOTS", false);
+    fixture.gnu(73);
+    let p = prepare(&fixture.bytes).unwrap();
+    assert_eq!(p.writable.len(), 1);
+    let symbol = fixture.symbols(1)["public_slot"] + BASES[1];
+    assert!(
+        p.writable
+            .iter()
+            .any(|r| r.address <= symbol && symbol + 8 <= r.address + r.length)
+    );
+    assert!(headers(&p.bundle).any(|h| p.bundle[h] == 1
+        && p.bundle[h + 4] == 4
+        && word(&p.bundle, h + 16) <= symbol
+        && symbol + 8 <= word(&p.bundle, h + 16) + word(&p.bundle, h + 40)));
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    execute(&p, &fixture, 73, 0);
 }

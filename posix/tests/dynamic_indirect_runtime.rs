@@ -28,6 +28,7 @@ thread_local! {
     static METADATA: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
     static CALLS: Cell<usize> = const { Cell::new(0) };
     static COPY_TARGET: Cell<Option<usize>> = const { Cell::new(None) };
+    static REVOKE_WRITE: Cell<Option<usize>> = const { Cell::new(None) };
 }
 mod auxiliary {
     pub struct Vector;
@@ -49,6 +50,12 @@ extern "C" fn first() -> u64 {
     // The callback may modify its input metadata. Later fixups must continue
     // using the private snapshot, not these now-invalid original bytes.
     METADATA.with_borrow_mut(|bytes| bytes.fill(0xff));
+    if let Some(address) = REVOKE_WRITE.get() {
+        assert_eq!(
+            unsafe { libc::mprotect(address as *mut _, 4096, libc::PROT_READ) },
+            0
+        );
+    }
     73
 }
 extern "C" fn second() -> u64 {
@@ -351,4 +358,140 @@ fn crt_seals_relro_after_relocations_and_retains_the_private_plan_through_callba
         assert_eq!(implementation::initialize(), Ok(true));
     }
     assert_eq!(user_copy_native::PROTECTED.with_borrow(|c| c.len()), 2);
+}
+
+#[test]
+fn crt_temporarily_writes_only_after_full_capture_and_rolls_back_failed_transactions() {
+    const CASE: &str = "MOCHIOS_WRITABLE_ADAPTER_CASE";
+    let Ok(case) = std::env::var(CASE) else {
+        for case in [
+            "success",
+            "large",
+            "invalid-inner",
+            "first-prepare-fault",
+            "second-prepare-fault",
+            "first-restore-fault",
+            "second-restore-fault",
+            "resolver-fault",
+        ] {
+            let output=std::process::Command::new(std::env::current_exe().unwrap()).args(["--exact","crt_temporarily_writes_only_after_full_capture_and_rolls_back_failed_transactions"]).env(CASE,case).output().unwrap();
+            assert!(
+                output.status.success(),
+                "case={case}: {}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        return;
+    };
+    use mochios_posix_client::relocation_protection::{self as protection, Range};
+    assert_eq!(implementation::__mochios_relro_v2(), 2);
+    let target = Mapping::new();
+    let other = Mapping::new();
+    let a = first as *const () as u64;
+    let b = second as *const () as u64;
+    let mut regions = [
+        Region {
+            address: a.min(b),
+            length: a.max(b) - a.min(b) + 1,
+            access: Access::Executable,
+        },
+        Region {
+            address: target.0 as u64,
+            length: 4096,
+            access: Access::Writable,
+        },
+        Region {
+            address: other.0 as u64,
+            length: 4096,
+            access: Access::Writable,
+        },
+    ];
+    regions.sort_unstable_by_key(|r| r.address);
+    let mut fixups = vec![
+        Fixup::new(target.0 as u64, a, 5),
+        Fixup::new(other.0 as u64, b, 0),
+    ];
+    if case == "large" {
+        for i in 0..180 {
+            fixups.push(Fixup::new(target.0 as u64 + 8 + i * 8, b, 0));
+        }
+    }
+    let inner = mochios_posix_client::indirect_image::encoded_length(3, fixups.len()).unwrap();
+    let mut ranges = [
+        Range {
+            address: target.0 as u64,
+            length: 4096,
+        },
+        Range {
+            address: other.0 as u64,
+            length: 4096,
+        },
+    ];
+    ranges.sort_unstable_by_key(|r| r.address);
+    let mut bytes = vec![0; protection::encoded_length_with_writable(2, 2, inner).unwrap()];
+    assert_eq!(encode(&regions, &mut fixups, &mut bytes), Ok(inner));
+    if case == "invalid-inner" {
+        bytes[inner - 8] = 2;
+    }
+    assert_eq!(
+        protection::wrap_with_writable(inner, &ranges, &ranges, &mut bytes),
+        Ok(bytes.len())
+    );
+    METADATA.with_borrow_mut(|m| *m = bytes);
+    AUX.set(Some(METADATA.with_borrow(|m| m.as_ptr() as usize)));
+    target.protect(libc::PROT_READ);
+    other.protect(libc::PROT_READ);
+    let failure = match case.as_str() {
+        "first-prepare-fault" => Some(1),
+        "second-prepare-fault" => Some(2),
+        "first-restore-fault" => Some(3),
+        "second-restore-fault" => Some(4),
+        _ => None,
+    };
+    user_copy_native::PROTECT_FAILURE.replace(failure);
+    if case == "resolver-fault" {
+        REVOKE_WRITE.set(Some(target.0 as usize));
+    }
+    let result = implementation::initialize();
+    if case == "invalid-inner" {
+        assert_eq!(result, Err(ENOEXEC));
+        assert_eq!(CALLS.get(), 0);
+        assert!(user_copy_native::PROTECTED.with_borrow(|c| c.is_empty()));
+    } else if case.contains("prepare-fault") {
+        assert_eq!(result, Err(EACCES));
+        assert_eq!(CALLS.get(), 0);
+    } else if case == "resolver-fault" {
+        assert_eq!(result, Err(EFAULT));
+        assert_eq!(CALLS.get(), 1);
+    } else {
+        assert_eq!(CALLS.get(), fixups.len());
+        assert_eq!(target.word(0), 78);
+        assert_eq!(
+            result,
+            if failure.is_some() {
+                Err(EACCES)
+            } else {
+                Ok(true)
+            }
+        );
+    }
+    for range in ranges {
+        assert_eq!(
+            user_copy::write(range.address as *mut u8, &[0]),
+            Err(EFAULT)
+        );
+    }
+    let calls = CALLS.get();
+    let edits = user_copy_native::PROTECTED.with_borrow(|p| p.len());
+    assert_eq!(
+        implementation::initialize(),
+        if result.is_ok() {
+            Ok(true)
+        } else {
+            Err(ENOEXEC)
+        }
+    );
+    assert_eq!(CALLS.get(), calls);
+    assert_eq!(user_copy_native::PROTECTED.with_borrow(|p| p.len()), edits);
 }

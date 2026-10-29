@@ -53,6 +53,13 @@ void native_set_seed(int value) { seed = value; }
 int native_late_constructor(void) { return late_constructor; }
 int native_lifecycle_resolvers(void) { return lifecycle_resolvers; }
 extern void (*native_late_fini_slot)(void);
+#ifdef READONLY_RELOCATION
+extern int (*const native_readonly_slot)(void);
+__asm__(".section .rodata.ifunc,\"a\",@progbits\n"
+        ".globl native_readonly_slot\n.type native_readonly_slot,@object\n"
+        "native_readonly_slot: .quad native_pick\n.size native_readonly_slot,8\n.text\n");
+int native_readonly_call(void) { return native_readonly_slot(); }
+#endif
 static void late_initialize(void) {
     if (seed != 17 || native_root_value != 21 || lifecycle_resolvers != 2) _exit(2);
     late_constructor = 1;
@@ -66,6 +73,13 @@ static void late_initialize(void) {
     errno = 0;
     if (read(fds[0], &native_late_fini_slot, 1) != -1 || errno != EFAULT) _exit(8);
     if (read(fds[0], &received, 1) != 1 || received != byte) _exit(9);
+#ifdef READONLY_RELOCATION
+    if (native_readonly_call() != 73 || write(fds[1], &byte, 1) != 1) _exit(11);
+    errno = 0;
+    if (read(fds[0], (void *)&native_readonly_slot, 1) != -1 || errno != EFAULT) _exit(12);
+    if (read(fds[0], &received, 1) != 1 || received != byte) _exit(13);
+    puts("readonly-relocation: resolved data restored before constructor PASS");
+#endif
     if (close(fds[0]) || close(fds[1])) _exit(10);
     puts("relro-native: protected before constructor PASS");
 #else

@@ -2193,3 +2193,58 @@ fn exec_requires_relro_contract_and_carries_protections_with_or_without_resolver
         assert_eq!(&image.indirect()[..8], b"MIREL001");
     });
 }
+
+#[test]
+fn exec_requires_the_writable_contract_and_keeps_readonly_source_loads_readonly() {
+    use mochios_posix_client::relocation_protection::Image;
+    for supported in [false, true] {
+        let flags = if supported {
+            vec!["-DWRITABLE_CONTRACT"]
+        } else {
+            vec!["-DRELRO_CONTRACT"]
+        };
+        let [root, middle, provider] =
+            indirect_fixture(true, &flags, &["-DREADONLY_SLOTS", "-Wl,-z,separate-code"]);
+        assert_eq!(
+            search_exec(
+                &root,
+                &[
+                    (b"/libraries/libmiddle.so", &middle),
+                    (b"/libraries/libprovider.so", &provider)
+                ],
+                &[],
+                0,
+                0
+            ),
+            Err(ENOEXEC)
+        );
+        STATE.with_borrow(|s| {
+            assert_eq!(s.entered, usize::from(supported));
+            if !supported {
+                assert!(s.prepared.is_empty());
+                return;
+            }
+            let stack = mnu_abi::process_image::decode(&s.startup).unwrap().stack();
+            let start = stack.windows(8).position(|p| p == b"MRELRO01").unwrap();
+            let length =
+                u64::from_le_bytes(stack[start + 16..start + 24].try_into().unwrap()) as usize;
+            let image = Image::parse::<i32>(&stack[start..start + length]).unwrap();
+            assert_eq!(image.writable_ranges().count(), 1);
+            assert!(!image.indirect().is_empty());
+            let count = u16::from_le_bytes(s.prepared[56..58].try_into().unwrap()) as usize;
+            for range in image.writable_ranges() {
+                assert!(image.ranges().any(|r| r.address <= range.address
+                    && range.address + range.length <= r.address + r.length));
+                assert!((0..count).any(|i| {
+                    let h = 64 + i * 56;
+                    let word = |at| u64::from_le_bytes(s.prepared[at..at + 8].try_into().unwrap());
+                    s.prepared[h] == 1
+                        && s.prepared[h + 4] == 4
+                        && word(h + 16) & !4095 == range.address
+                        && ((word(h + 16) + word(h + 40) + 4095) & !4095)
+                            == range.address + range.length
+                }));
+            }
+        });
+    }
+}

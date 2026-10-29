@@ -32,7 +32,11 @@ provider_impl:
 #endif
 
 #ifdef MIDDLE
+#ifdef READONLY_SLOTS
+.section .rodata.ifunc,"a",@progbits
+#else
 .data
+#endif
 .globl public_slot
 .type public_slot,@object
 public_slot: .quad choose
@@ -50,6 +54,7 @@ local_slot: .quad local_choose
 .type zero_slot,@object
 zero_slot: .quad zero_choose
 .size zero_slot,8
+.data
 .globl local_calls
 .hidden local_calls
 local_calls: .quad 0
@@ -115,6 +120,15 @@ __mochios_relro_v1:
     mov $1,%eax
     ret
 .size __mochios_relro_v1,.-__mochios_relro_v1
+#endif
+#ifdef WRITABLE_CONTRACT
+.text
+.globl __mochios_relro_v2
+.type __mochios_relro_v2,@function
+__mochios_relro_v2:
+    mov $2,%eax
+    ret
+.size __mochios_relro_v2,.-__mochios_relro_v2
 #endif
 .text
 #ifdef CRT_CONTRACT

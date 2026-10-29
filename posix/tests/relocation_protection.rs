@@ -286,3 +286,154 @@ fn elf_relro_uses_gnu_page_rounding_and_stays_inside_the_source_load() {
     put(&mut small, 64 + 2 * 56 + 40, 0x100);
     assert!(!Pie::parse(&small).unwrap().has_relro().unwrap());
 }
+
+fn writable_fixture() -> Vec<u8> {
+    let mut b = vec![0; 128];
+    for (at, v) in [
+        (0, u64::from_le_bytes(*b"MRELRO01")),
+        (8, 2 | (2 << 32)),
+        (16, 128),
+        (24, 40),
+        (32, 1),
+        (40, 0x800000),
+        (48, 4096),
+        (56, 0x900000),
+        (64, 8192),
+        (72, 0x800000),
+        (80, 4096),
+    ] {
+        put(&mut b, at, v);
+    }
+    b[88..96].copy_from_slice(b"MIREL001");
+    put(&mut b, 96, 1);
+    put(&mut b, 112, 40);
+    b
+}
+#[test]
+fn writable_envelope_requires_full_restoration_and_an_explicit_consumer() {
+    let b = writable_fixture();
+    let image = Image::parse::<i32>(&b).unwrap();
+    let writers = image.writable_ranges().collect::<Vec<_>>();
+    assert_eq!(
+        writers,
+        [Range {
+            address: 0x800000,
+            length: 4096
+        }]
+    );
+    let final_ranges = image.ranges().collect::<Vec<_>>();
+    let mut out = vec![0; 128];
+    out[..40].copy_from_slice(image.indirect());
+    assert_eq!(
+        policy::wrap_with_writable(40, &final_ranges, &writers, &mut out),
+        Ok(128)
+    );
+    assert_eq!(out, b);
+    let state = State::new();
+    assert_eq!(
+        state.apply::<i32>(
+            &image,
+            |_| panic!("legacy consumer"),
+            |_| panic!("legacy consumer")
+        ),
+        Err(Error::Invalid)
+    );
+    let events = RefCell::new(Vec::new());
+    state
+        .apply_with_writable::<i32>(
+            &image,
+            |plan| {
+                for w in plan.writable_ranges() {
+                    events.borrow_mut().push((w.address, 3));
+                }
+                events.borrow_mut().push((0, 0));
+                Ok(())
+            },
+            |r| {
+                events.borrow_mut().push((r.address, 1));
+                Ok(())
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        *events.borrow(),
+        [(0x800000, 3), (0, 0), (0x800000, 1), (0x900000, 1)]
+    );
+    for end in 0..b.len() {
+        assert!(
+            policy::capture(BASE, b.len(), &mut [0; 128], read(&b[..end])).is_err(),
+            "end={end}"
+        );
+    }
+    for (at, v) in [
+        (8, 3 | (2 << 32)),
+        (24, 0),
+        (32, 0),
+        (32, u64::MAX),
+        (72, 0x900001),
+        (72, 0xa00000),
+        (80, 8192),
+        (80, 0),
+        (80, u64::MAX),
+    ] {
+        let mut bad = b.clone();
+        put(&mut bad, at, v);
+        assert!(Image::parse::<i32>(&bad).is_err(), "at={at} value={v}");
+    }
+    let mut outside = [Range {
+        address: 0xa00000,
+        length: 4096,
+    }];
+    let mut out = vec![0xcc; 128];
+    assert!(policy::wrap_with_writable(40, &final_ranges, &outside, &mut out).is_err());
+    assert!(out.iter().all(|b| *b == 0xcc));
+    let original = outside;
+    assert!(
+        policy::merge(&mut [Range {
+            address: u64::MAX,
+            length: 4096
+        }])
+        .is_err()
+    );
+    assert_eq!(outside, original);
+}
+#[test]
+fn merged_protection_ranges_cover_overlapping_and_adjacent_pages_without_gaps() {
+    let mut ranges = [
+        Range {
+            address: 0x805000,
+            length: 4096,
+        },
+        Range {
+            address: 0x800000,
+            length: 8192,
+        },
+        Range {
+            address: 0x801000,
+            length: 8192,
+        },
+        Range {
+            address: 0x803000,
+            length: 8192,
+        },
+    ];
+    assert_eq!(policy::merge(&mut ranges), Ok(1));
+    assert_eq!(
+        ranges[0],
+        Range {
+            address: 0x800000,
+            length: 6 * 4096
+        }
+    );
+    let mut separated = [
+        Range {
+            address: 0x800000,
+            length: 4096,
+        },
+        Range {
+            address: 0x802000,
+            length: 4096,
+        },
+    ];
+    assert_eq!(policy::merge(&mut separated), Ok(2));
+}

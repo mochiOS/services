@@ -19,7 +19,11 @@ mod netdb;
 mod llvm_runtime;
 #[cfg(all(
     target_os = "mochios",
-    any(mochios_startup_metadata_probe_293, mochios_relro_probe_294)
+    any(
+        mochios_startup_metadata_probe_293,
+        mochios_relro_probe_294,
+        mochios_readonly_relocation_probe_295
+    )
 ))]
 #[path = "startup_metadata_native.rs"]
 mod startup_metadata;
@@ -130,7 +134,11 @@ pub fn run(posix: u32, network: u32) {
     }
     #[cfg(mochios_llvm_runtime_probe_215)]
     {
-        #[cfg(any(mochios_startup_metadata_probe_293, mochios_relro_probe_294))]
+        #[cfg(any(
+            mochios_startup_metadata_probe_293,
+            mochios_relro_probe_294,
+            mochios_readonly_relocation_probe_295
+        ))]
         startup_metadata::run(posix);
         llvm_runtime::run();
         #[cfg(not(mochios_tcp_socket_276))]

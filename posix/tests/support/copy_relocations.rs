@@ -324,6 +324,18 @@ fn malformed_copy_ranges_kinds_symbols_and_overlaps_are_rejected() {
             w32(&mut root, header + 4, 4);
         }
     }
+    assert!(fixture.prepare(&root, &fixture.library).is_ok());
+    // Read-only data can be prepared before installation; executable COPY
+    // targets still cannot enter a writable relocation transaction.
+    for index in 0..u16::from_le_bytes(root[56..58].try_into().unwrap()) as usize {
+        let header = word(&root, 32) as usize + index * 56;
+        if root[header] == 1
+            && address >= word(&root, header + 16)
+            && address < word(&root, header + 16) + word(&root, header + 40)
+        {
+            w32(&mut root, header + 4, 5);
+        }
+    }
     assert!(Pie::parse_object(&root).is_err());
 }
 

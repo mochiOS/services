@@ -11,6 +11,10 @@ if test "${MOCHIOS_RELRO:-0}" = 1; then
   fixture_defines+=(-DRELRO_PROBE)
   fixture_link_flags=(-Wl,-z,relro,-z,now)
 fi
+if test "${MOCHIOS_READONLY_RELOCATION:-0}" = 1; then
+  fixture_defines+=(-DREADONLY_RELOCATION)
+  fixture_link_flags+=(-Wl,-z,separate-code)
+fi
 if test "${MOCHIOS_LARGE_METADATA:-0}" = 1; then
   fixture_defines+=(-DLARGE_METADATA)
   for index in $(seq 0 109); do

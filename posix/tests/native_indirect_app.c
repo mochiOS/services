@@ -22,6 +22,9 @@ extern int native_copy_direct(void);
 extern int native_copy_selected(void);
 extern void *native_copy_address(void);
 extern int (*native_copied_pointer)(void);
+#ifdef READONLY_RELOCATION
+extern int native_readonly_call(void);
+#endif
 #ifdef LARGE_METADATA
 #include <errno.h>
 #include <sys/mman.h>
@@ -45,9 +48,15 @@ static void check(int condition, const char *expression) {
 static void *thread_entry(void *unused) {
     (void)unused;
     CHECK(native_pick() == 73);
+#ifdef READONLY_RELOCATION
+    CHECK(native_readonly_call() == 73);
+#endif
     native_set_seed(5);
     CHECK(native_pick() == 61 && native_pointer_call() == 61 && native_local_call() == 61);
     CHECK(native_copy_direct() == 61 && native_copy_selected() == 61);
+#ifdef READONLY_RELOCATION
+    CHECK(native_readonly_call() == 61);
+#endif
     return (void *)(uintptr_t)1;
 }
 int main(int argc, char **argv) {

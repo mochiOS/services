@@ -45,8 +45,17 @@ pub mod syscall {
             {
                 return Err(13);
             }
-            assert_eq!(length, mnu_abi::MEMORY_ACCESS_READ);
-            if unsafe { libc::mprotect(destination as *mut _, source as usize, libc::PROT_READ) } != 0 {
+            assert!(
+                length == mnu_abi::MEMORY_ACCESS_READ
+                    || length == mnu_abi::MEMORY_ACCESS_READ | mnu_abi::MEMORY_ACCESS_WRITE
+            );
+            let flags = libc::PROT_READ
+                | if length & mnu_abi::MEMORY_ACCESS_WRITE != 0 {
+                    libc::PROT_WRITE
+                } else {
+                    0
+                };
+            if unsafe { libc::mprotect(destination as *mut _, source as usize, flags) } != 0 {
                 return Err(14);
             }
             return Ok(0);
