@@ -38,7 +38,7 @@ impl Reservations {
             || self.0.values().any(|r| {
                 r.disk == disk
                     || r.observed.device == observed.device
-                    || r.observed.guid == observed.guid
+                    || (observed.guid != [0; 2] && r.observed.guid == observed.guid)
             })
         {
             return Err(16);

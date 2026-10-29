@@ -165,6 +165,7 @@ fn physical(
         let disk_id = disk_item.id;
         let sector_bytes = u64::from(disk_item.sector_bytes);
         items.push(disk_item.clone());
+        if observed_disk.guid == [0;2] { observed.insert(disk_id,observed_disk); continue; }
         let table = (|| -> Result<_, i32> {
             let mut entries = vec![];
             for ordinal in 0..=128 {
@@ -394,7 +395,7 @@ impl FilesystemService {
         };
         Ok((bytes.len() as u64, bytes.to_vec()))
     }
-    pub(super) fn refresh_storage_inventory(&mut self) -> Result<(), i32> {
+    pub(crate) fn refresh_storage_inventory(&mut self) -> Result<(), i32> {
         #[cfg(target_os = "mochios")]
         let (mut items, mut partitions, mut warning, observed) =
             physical(|operation, device_id, arguments| {
@@ -499,7 +500,11 @@ impl FilesystemService {
 }
 
 impl FilesystemService {
-    fn reservable_disk(&self, disk: u64) -> Result<crate::storage_reservation::Disk, i32> {
+    pub(crate) fn selected_storage(&self, generation:u64, disk:u64)->Result<crate::storage_reservation::Disk,i32> {
+        if generation!=self.storage_inventory.generation {return Err(11)}
+        self.reservable_disk(disk)
+    }
+    pub(crate) fn reservable_disk(&self, disk: u64) -> Result<crate::storage_reservation::Disk, i32> {
         let state = &self.storage_inventory;
         let mounted = self
             .namespace
@@ -512,9 +517,6 @@ impl FilesystemService {
             return Err(11);
         }
         let observed = state.physical_disks.get(&disk).ok_or(95)?;
-        if observed.guid == [0; 2] {
-            return Err(95);
-        }
         let records = state
             .records
             .iter()
@@ -590,7 +592,7 @@ impl FilesystemService {
         self.retain_storage_reservation(request.disk, current)
     }
 
-    fn retain_storage_reservation(
+    pub(crate) fn retain_storage_reservation(
         &mut self,
         disk: u64,
         observed: crate::storage_reservation::Disk,

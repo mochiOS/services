@@ -84,6 +84,7 @@ pub struct FilesystemService {
     fs: Ext4,
     storage_inventory: storage_inventory::State,
     storage_reservations: crate::storage_reservation::Reservations,
+    pub(super) storage_regions: std::collections::BTreeMap<u64, crate::storage_region::Region>,
     clock: crate::clock::Clock,
     namespace: Option<Namespace>,
     nodes: HashMap<u64, String>,
@@ -137,6 +138,7 @@ impl FilesystemService {
             fs,
             storage_inventory: storage_inventory::State::default(),
             storage_reservations: crate::storage_reservation::Reservations::default(),
+            storage_regions: std::collections::BTreeMap::new(),
             clock,
             namespace: None,
             nodes,
@@ -1978,6 +1980,12 @@ impl FilesystemService {
     }
 
     pub fn provider_close(&mut self, open_id: u64) -> Result<(), i32> {
+        if let Some(mut region) = self.storage_regions.remove(&open_id) {
+            if let Err(error) = region.close() {
+                self.storage_regions.insert(open_id, region);
+                return Err(error);
+            }
+        }
         if self.storage_reservations.release(open_id) {
             return Ok(());
         }

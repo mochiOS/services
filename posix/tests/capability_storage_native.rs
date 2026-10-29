@@ -96,6 +96,9 @@ fn clear(){FAIL_AFTER.set(None);REGISTRY.with_borrow_mut(|r|r.names=Vec::new());
 fn main(){
     {
         let scoped=Capability::try_intern("device.storage.scoped").unwrap();
+        let writable=Capability::try_intern("device.storage.scoped.write").unwrap();
+        assert!(!capability_implies(writable,Capability::DeviceStorage));
+        assert!(!capability_implies(scoped,writable));
         let mut granted=CapabilitySet::empty();
         granted.try_insert(scoped).unwrap();
         granted.try_insert(Capability::FsReadAll).unwrap();

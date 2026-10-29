@@ -117,6 +117,28 @@ fn main() {
         let sender = message >> 32;
         let length = (message & 0xffff_ffff) as usize;
         let request = &request_bytes[..length.min(request_bytes.len())];
+        if request.starts_with(&protocol::storage_region::MAGIC) {
+            let result=filesystem_service::storage_region::admit(request,&attached,|| {
+                platform::capability::check_thread(sender,"device.storage.scoped.write")==Ok(1)
+            }).and_then(|admission|service.acquire_storage_region(admission));
+            match result {
+                Ok(object)=> {
+                    match platform::handle::create_provider_object(endpoint,object,filesystem_service::storage_region::RIGHTS) {
+                        Ok(raw)=> {
+                            let mut outgoing=platform::ipc::IpcObjectHandles::default();
+                            outgoing.count=1;
+                            outgoing.handles[0]=mnu_abi::IpcObjectHandle{handle:raw,reserved:0,rights:filesystem_service::storage_region::RIGHTS};
+                            let _=platform::ipc::reply_object_handles(sender,&0i64.to_le_bytes(),&outgoing);
+                            let _=platform::handle::close(raw);
+                        }
+                        Err(_)=>{let _=service.provider_close(object);let _=platform::ipc::reply(sender,&(-5i64).to_le_bytes());}
+                    }
+                }
+                Err(error)=>{let _=platform::ipc::reply(sender,&(-i64::from(error)).to_le_bytes());}
+            }
+            close_attached_handles(&attached);
+            continue;
+        }
         if request.starts_with(&protocol::storage_reservation::MAGIC) {
             let result = filesystem_service::storage_reservation::admit(request, &attached, || {
                 platform::capability::check_thread(sender, "device.storage.scoped") == Ok(1)
@@ -1180,6 +1202,7 @@ fn handle_provider_request(
         return None;
     }
     let result = match header.opcode {
+        _ if service.is_storage_region(header.object_id) => service.storage_region_request(header,payload,attached.count),
         _ if service.is_storage_reservation(header.object_id) => {
             service.validate_storage_reservation(header, payload, attached.count)
         }

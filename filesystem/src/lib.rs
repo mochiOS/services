@@ -25,3 +25,5 @@ pub mod storage;
 pub mod storage_reservation;
 pub mod bootstrap_read;
 pub mod bootstrap_ipc;
+
+pub mod storage_region;
