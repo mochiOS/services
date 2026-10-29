@@ -598,3 +598,42 @@ fn unwind_from_resolver_or_writer_leaves_a_terminal_failure() {
         );
     }
 }
+
+#[test]
+fn allocation_preflight_bounds_counts_and_capture_rechecks_a_changed_header() {
+    use mochios_posix_client::indirect_image::workspace;
+    let bytes = sample();
+    assert_eq!(
+        workspace(BASE, bytes.len(), reader(&bytes)),
+        Ok((2, 2, bytes.len()))
+    );
+    assert_eq!(
+        workspace(BASE, bytes.len() - 1, reader(&bytes)),
+        Err(Error::TooLarge)
+    );
+    assert_eq!(
+        workspace(BASE, bytes.len(), reader(&bytes[..39])),
+        Err(Error::Read(14))
+    );
+    for base in [0, BASE + 1, END - 32, u64::MAX - 7] {
+        assert!(workspace::<i32>(base, bytes.len(), |_, _| panic!("invalid base")).is_err());
+    }
+    for (offset, value) in [(0, 0), (8, 3 | (2 << 32)), (16, u64::MAX), (24, 0), (32, 1)] {
+        let mut bad = bytes.clone();
+        put(&mut bad, offset, value);
+        assert!(workspace(BASE, bytes.len(), reader(&bad)).is_err());
+    }
+    let mut changed = bytes.clone();
+    put(&mut changed, 8, 1 | (3 << 32));
+    put(&mut changed, 24, (bytes.len() + 24) as u64);
+    assert!(matches!(
+        Captured::capture(
+            BASE,
+            bytes.len() + 24,
+            &mut [Region::EMPTY; 2],
+            &mut [Fixup::EMPTY; 2],
+            reader(&changed)
+        ),
+        Err(Error::BufferTooSmall)
+    ));
+}

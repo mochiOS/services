@@ -11,8 +11,13 @@ use mochios_posix_client::{
 use mochios_posix_protocol as posix_protocol;
 use std::cell::{Cell, RefCell};
 const PAGE_SIZE: usize = 4096;
+const NATIVE_READ_WRITE: u64 = 3;
+#[path = "support/startup_storage_vm.rs"]
+mod address_space;
 #[path = "../../../user/crates/newlib-runtime/src/dynamic_indirect.rs"]
 mod implementation;
+#[path = "../../../user/crates/newlib-runtime/src/startup_storage.rs"]
+mod startup_storage;
 #[path = "../../../user/crates/newlib-runtime/src/user_copy.rs"]
 mod user_copy;
 #[path = "support/user_copy_native.rs"]
@@ -99,6 +104,9 @@ fn crt_resolves_once_from_private_metadata_and_propagates_real_memory_faults() {
             "copy",
             "copy-read-fault",
             "copy-write-fault",
+            "large",
+            "large-denied",
+            "large-fault",
         ] {
             let out = std::process::Command::new(std::env::current_exe().unwrap())
                 .args([
@@ -159,6 +167,12 @@ fn crt_resolves_once_from_private_metadata_and_propagates_real_memory_faults() {
     if with_copy {
         fixups.insert(1, Fixup::copy(copy.0 as u64, target.0 as u64, 16));
     }
+    if case.starts_with("large") {
+        for i in 0..180 {
+            fixups.push(Fixup::new(target.0 as u64 + 16 + i * 8, b, 0));
+        }
+    }
+    let expected_calls = fixups.len() - usize::from(with_copy);
     let mut bytes = vec![0; 40 + regions.len() * 24 + fixups.len() * 32];
     assert_eq!(encode(&regions, &mut fixups, &mut bytes), Ok(bytes.len()));
     let original = bytes.clone();
@@ -172,7 +186,13 @@ fn crt_resolves_once_from_private_metadata_and_propagates_real_memory_faults() {
     assert_eq!(implementation::initialize(), Err(ENOEXEC));
     assert_eq!(CALLS.get(), 0);
     METADATA.with_borrow_mut(|m| m.copy_from_slice(&original));
-    if case == "fault" {
+    if case == "large-denied" {
+        address_space::DENIED.set(true);
+        assert_eq!(implementation::initialize(), Err(ENOMEM));
+        assert_eq!(CALLS.get(), 0);
+        address_space::DENIED.set(false);
+    }
+    if case == "fault" || case == "large-fault" {
         target.protect(libc::PROT_READ);
     } else if case == "copy-write-fault" {
         copy.protect(libc::PROT_READ);
@@ -193,7 +213,7 @@ fn crt_resolves_once_from_private_metadata_and_propagates_real_memory_faults() {
         assert_eq!(implementation::initialize(), Err(ENOEXEC));
         assert_eq!(CALLS.get(), 1);
     } else {
-        assert!(case == "success" || case == "copy");
+        assert!(case == "success" || case == "copy" || case.starts_with("large"));
         assert_eq!(result, Ok(true));
         assert_eq!(target.word(0), 78);
         assert_eq!(target.word(1), 0);
@@ -201,8 +221,8 @@ fn crt_resolves_once_from_private_metadata_and_propagates_real_memory_faults() {
             assert_eq!(copy.word(0), 78);
             assert_eq!(copy.word(1), 0);
         }
-        assert_eq!(CALLS.get(), 2);
+        assert_eq!(CALLS.get(), expected_calls);
         assert_eq!(implementation::initialize(), Ok(true));
-        assert_eq!(CALLS.get(), 2);
+        assert_eq!(CALLS.get(), expected_calls);
     }
 }

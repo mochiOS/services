@@ -5,6 +5,51 @@ use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 use std::sync::Arc;
 
+#[test]
+fn native_creation_prepares_mappings_after_tls_and_before_process_publication() {
+    let source = include_str!("../../../core/src/syscall/exec.rs");
+    let body = source
+        .split("fn exec_with_data(")
+        .nth(1)
+        .unwrap()
+        .split("fn check_image_byte_ceiling(")
+        .next()
+        .unwrap();
+    let mappings = body
+        .find("initial_mappings::prepare(new_pt_phys, startup, &mut deferred_zero_regions)")
+        .unwrap();
+    assert!(
+        body.find("map_initial_tls(new_pt_phys, aslr_seed)")
+            .unwrap()
+            < mappings
+    );
+    assert!(
+        mappings
+            < body
+                .find("proc.set_memory_regions(deferred_zero_regions)")
+                .unwrap()
+    );
+    assert!(mappings < body.find("crate::task::add_process(proc)").unwrap());
+    let creation = source
+        .split("pub fn process_create_syscall(")
+        .nth(1)
+        .unwrap()
+        .split("fn consume_address_space_for_create(")
+        .next()
+        .unwrap();
+    assert!(!creation.contains("startup.mappings().next().is_some()"));
+    assert!(creation.contains("startup.context_updates().next().is_some()"));
+    assert!(
+        mnu_abi::process_create::MAX_REQUEST_BYTES
+            >= mnu_abi::process_image::MAX_IMAGE_BYTES
+                + mnu_abi::process_create::HEADER_LEN
+                + mnu_abi::process_create::MAX_IDENTITY_BYTES
+                + mnu_abi::process_create::MAX_LABEL_BYTES
+                + mnu_abi::process_create::MAX_HANDLES * mnu_abi::process_create::HANDLE_LEN
+                + mnu_abi::process_create::MAX_VALUES * mnu_abi::process_create::VALUE_LEN
+    );
+}
+
 thread_local! {
     static FAIL: Cell<bool> = const { Cell::new(false) };
     static LOOKUPS: Cell<usize> = const { Cell::new(0) };

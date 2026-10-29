@@ -281,3 +281,39 @@ fn captures_header_once_and_resolves_a_deferred_preinit_like_other_array_entries
     .unwrap();
     assert_eq!(output, expected());
 }
+
+#[test]
+fn allocation_preflight_never_allows_header_growth_to_escape_private_storage() {
+    let bytes = recipe();
+    assert_eq!(
+        deferred::encoded_length(BASE, bytes.len(), metadata(&bytes)),
+        Ok(bytes.len())
+    );
+    assert_eq!(
+        deferred::encoded_length(BASE, bytes.len() - 1, metadata(&bytes)),
+        Err(Error::TooLarge)
+    );
+    assert_eq!(
+        deferred::encoded_length(BASE, bytes.len(), metadata(&bytes[..31])),
+        Err(Error::Read(14))
+    );
+    for base in [0, BASE + 1, u64::MAX - 7, 0x8000_0000_0000 - 16] {
+        assert!(
+            deferred::encoded_length::<i32>(base, bytes.len(), |_, _| panic!("invalid base"))
+                .is_err()
+        );
+    }
+    for (offset, value) in [(0, 0), (8, 3), (16, 0), (16, u64::MAX)] {
+        let mut bad = bytes.clone();
+        put(&mut bad, offset, value);
+        assert!(deferred::encoded_length(BASE, bytes.len(), metadata(&bad)).is_err());
+    }
+    let mut changed = bytes.clone();
+    put(&mut changed, 16, (bytes.len() + 16) as u64);
+    let mut output = vec![0xcc; bytes.len()];
+    assert_eq!(
+        deferred::capture(BASE, bytes.len() + 16, &mut output, metadata(&changed)),
+        Err(Error::TooLarge)
+    );
+    assert!(output.iter().all(|b| *b == 0xcc));
+}

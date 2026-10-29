@@ -10,6 +10,17 @@ static int constructor_started;
 static int late_resolution;
 static int late_constructor;
 static int lifecycle_resolvers;
+#ifdef LARGE_METADATA
+static int large_initializers;
+static int large_finalizers;
+static void large_initialize(void) __attribute__((used));
+static void large_initialize(void) { ++large_initializers; }
+static void large_finalize(void) __attribute__((used));
+static void large_finalize(void) { ++large_finalizers; }
+int native_large_initializers(void) { return large_initializers; }
+__asm__(".section .data,\"aw\"\n.rept 200\n.quad native_pick\n.endr\n"
+        ".section .init_array,\"aw\"\n.rept 640\n.quad large_initialize\n.endr\n.text\n");
+#endif
 static int implementation(void) { return seed + native_root_value + 35; }
 static int bad_implementation(void) { return -1; }
 static int (*select_implementation(void))(void) __attribute__((used));
@@ -47,6 +58,9 @@ static void late_initialize(void) {
 }
 static void late_finalize(void) {
     if (!native_root_fini || !late_constructor || lifecycle_resolvers != 2) _exit(3);
+#ifdef LARGE_METADATA
+    if (large_initializers != 640 || large_finalizers != 640) _exit(6);
+#endif
     puts("indirect-native: captured IFUNC fini PASS");
 }
 static void (*select_initialize(void))(void) __attribute__((used));
@@ -68,6 +82,9 @@ __asm__(".local late_init_pick\n.type late_init_pick,@gnu_indirect_function\n"
         ".section .init_array,\"aw\"\n.quad late_init_pick\n"
         ".section .fini_array,\"aw\"\n.globl native_late_fini_slot\n"
         ".hidden native_late_fini_slot\nnative_late_fini_slot: .quad late_fini_pick\n.text\n");
+#ifdef LARGE_METADATA
+__asm__(".section .fini_array,\"aw\"\n.rept 640\n.quad large_finalize\n.endr\n.text\n");
+#endif
 static void initialize(void) __attribute__((constructor));
 static void initialize(void) {
     constructor_started = 1;

@@ -39,6 +39,19 @@ pub(crate) fn metadata_for_process(
     random: [u8; 16],
     process: mochios_posix_client::process_image::Process<'_>,
 ) -> Result<Vec<u8>, Error> {
+    metadata_impl(path, items, endpoint, random, process, None)
+}
+fn metadata_impl<'a>(
+    path: &str,
+    items: &[String],
+    endpoint: u32,
+    random: [u8; 16],
+    process: mochios_posix_client::process_image::Process<'_>,
+    mapped: Option<(
+        &mut mochios_posix_client::startup_metadata::Owner<app_image::Mechanisms<'a>>,
+        &app_image::Mechanisms<'a>,
+    )>,
+) -> Result<Vec<u8>, Error> {
     use mnu_abi::process_create::{self, HandleGrant};
     let mut arguments = vec![path.as_bytes()];
     let mut environment = Vec::new();
@@ -59,16 +72,34 @@ pub(crate) fn metadata_for_process(
         }
     }
     let mut startup = vec![0; process_create::MAX_REQUEST_BYTES];
-    let length = mochios_posix_client::process_image::encode_initial_stack_for_process(
-        &arguments,
-        &environment,
-        path.as_bytes(),
-        random,
-        &[],
-        process,
-        &mut startup,
-    )
-    .map_err(|_| invalid())?;
+    let length = if let Some((owner, mechanisms)) = mapped {
+        let n = owner
+            .encode(
+                mechanisms,
+                &arguments,
+                &environment,
+                path.as_bytes(),
+                random,
+                &[],
+                process,
+                &mut startup,
+            )
+            .map_err(app_image::status)?;
+        owner
+            .attach(&mut startup, n, &[])
+            .map_err(app_image::status)?
+    } else {
+        mochios_posix_client::process_image::encode_initial_stack_for_process(
+            &arguments,
+            &environment,
+            path.as_bytes(),
+            random,
+            &[],
+            process,
+            &mut startup,
+        )
+        .map_err(|_| invalid())?
+    };
     let mut result = vec![0; process_create::MAX_REQUEST_BYTES];
     // Native labels are bounded display hints, never executable identity. Keep
     // the full path as identity; an application's bundle name labels its task.
@@ -189,7 +220,8 @@ pub(crate) fn launch(
         .map(|image| image.image)
         .unwrap_or(source.handle());
     let output = prepared.as_ref().map(|image| image.bytes).unwrap_or(&bytes);
-    let metadata = metadata_for_process(
+    let mut metadata_owner = mochios_posix_client::startup_metadata::Owner::default();
+    let metadata = metadata_impl(
         path,
         items,
         endpoint,
@@ -207,6 +239,7 @@ pub(crate) fn launch(
                 .map(|image| image.indirect)
                 .unwrap_or(&[]),
         },
+        Some((&mut metadata_owner, &mechanisms)),
     )?;
     crate::resolver::authorize_spawn_image(
         0,

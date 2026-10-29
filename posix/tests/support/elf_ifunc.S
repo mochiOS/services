@@ -115,6 +115,14 @@ __mochios_indirect_v1:
     mov $1,%eax
     ret
 .size __mochios_indirect_v1,.-__mochios_indirect_v1
+#ifdef LARGE_METADATA
+.globl __mochios_startup_metadata_v1
+.type __mochios_startup_metadata_v1,@function
+__mochios_startup_metadata_v1:
+    mov $1,%eax
+    ret
+.size __mochios_startup_metadata_v1,.-__mochios_startup_metadata_v1
+#endif
 #ifdef LATE_CALLBACKS
 .globl __mochios_lifecycle_v1
 .type __mochios_lifecycle_v1,@function

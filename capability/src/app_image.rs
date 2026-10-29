@@ -124,4 +124,8 @@ unsafe impl Backend for Mechanisms<'_> {
     fn readonly_image(&self, image: u32) -> Result<u32, i32> {
         p::handle::duplicate(image, mochios_posix_protocol::CHECK_EXECUTABLE_RIGHTS).map_err(native)
     }
+    fn readonly_metadata(&self, image: u32) -> Result<u32, i32> {
+        p::handle::duplicate(image, mochios_posix_client::startup_metadata::READER_RIGHTS)
+            .map_err(native)
+    }
 }

@@ -23,6 +23,13 @@ unsafe extern "C" {
 }
 pub mod syscall {
     pub use mnu_abi::SyscallNumber;
+    pub fn raw_syscall2(number: SyscallNumber, address: u64, length: u64) -> Result<u64, i32> {
+        assert_eq!(number, SyscallNumber::MemoryUnmap);
+        if unsafe { libc::munmap(address as *mut _, length as usize) } != 0 {
+            return Err(14);
+        }
+        Ok(0)
+    }
     pub fn raw_syscall3(
         number: SyscallNumber,
         destination: u64,

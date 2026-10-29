@@ -22,6 +22,17 @@ extern int native_copy_direct(void);
 extern int native_copy_selected(void);
 extern void *native_copy_address(void);
 extern int (*native_copied_pointer)(void);
+#ifdef LARGE_METADATA
+#include <errno.h>
+#include <sys/mman.h>
+extern unsigned long getauxval(unsigned long);
+extern int native_large_initializers(void);
+static uint64_t metadata_word(unsigned long address, unsigned offset) {
+    uint64_t value;
+    memcpy(&value, (const void *)(uintptr_t)(address + offset), sizeof(value));
+    return value;
+}
+#endif
 extern void native_set_seed(int);
 static void initialize(void) __attribute__((constructor));
 static void initialize(void) { root_constructor_value = native_pick(); }
@@ -48,6 +59,18 @@ int main(int argc, char **argv) {
     CHECK(native_late_constructor() == 1 && native_lifecycle_resolvers() == 2);
     CHECK(native_copy_direct() == 73 && native_copy_selected() == 73);
     CHECK(native_copy_address() == &native_copied_pointer);
+#ifdef LARGE_METADATA
+    unsigned long life = getauxval(0x6d000005), tls = getauxval(0x6d000006), indirect = getauxval(0x6d000007);
+    CHECK(life >= 0x300000000000UL && life < 0x310000000000UL);
+    CHECK(tls > life && indirect > tls);
+    CHECK(metadata_word(life, 16) > 4096 && metadata_word(tls, 16) > 4096 && metadata_word(indirect, 24) > 4096);
+    CHECK(native_large_initializers() == 640);
+    errno = 0;
+    CHECK(mprotect((void *)(uintptr_t)(life & ~4095UL), 4096, PROT_READ | PROT_WRITE) == -1 && errno == EACCES);
+    errno = 0;
+    CHECK(mprotect((void *)(uintptr_t)(life & ~4095UL), 4096, PROT_READ | PROT_EXEC) == -1 && errno == EACCES);
+    puts("startup-metadata: mapped lifecycle/TLS/resolvers over 4KiB PASS");
+#endif
     CHECK(native_pick() == 73 && native_pointer_call() == 73 && native_local_call() == 73);
     CHECK(native_resolver_count() > 0 && !native_late_resolution());
     if (after_exec) { puts("indirect-native: reexec PASS"); return 42; }

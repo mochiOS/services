@@ -41,6 +41,8 @@ struct State {
     entered: usize,
     bytes: Vec<u8>,
     prepared: Vec<u8>,
+    metadata: Vec<u8>,
+    images_created: usize,
     startup: Vec<u8>,
     libraries: Vec<(Vec<u8>, Vec<u8>)>,
     library_paths: Vec<Vec<u8>>,
@@ -253,12 +255,23 @@ mod syscall {
                     if s.failure == 9 {
                         return Err(super::ENOMEM);
                     }
-                    s.prepared = vec![0; p as usize];
-                    Ok(28)
+                    s.images_created += 1;
+                    if s.images_created == 1 {
+                        s.prepared = vec![0; p as usize];
+                        Ok(28)
+                    } else {
+                        assert_eq!(s.images_created, 2);
+                        s.metadata = vec![0; p as usize];
+                        Ok(30)
+                    }
                 })
             }
             SyscallNumber::HandleDuplicate => {
                 assert!(super::DEFER.get() > 0);
+                if p == 30 {
+                    assert_eq!(len, mochios_posix_client::startup_metadata::READER_RIGHTS);
+                    return Ok(31);
+                }
                 assert_eq!(
                     (p, len),
                     (28, super::posix_protocol::CHECK_EXECUTABLE_RIGHTS)
@@ -289,7 +302,7 @@ mod syscall {
         offset: u64,
     ) -> Result<u64, i32> {
         if n == SyscallNumber::HandleWriteAt {
-            assert_eq!(h, 28);
+            assert!(h == 28 || h == 30);
             assert_eq!(super::DEFER.get(), 0);
             return super::STATE.with_borrow_mut(|s| {
                 if s.failure == 10 {
@@ -297,8 +310,13 @@ mod syscall {
                 }
                 let count = (len as usize).min(17);
                 let start = offset as usize;
-                assert!(start + count <= s.prepared.len());
-                s.prepared[start..start + count]
+                let output = if h == 28 {
+                    &mut s.prepared
+                } else {
+                    &mut s.metadata
+                };
+                assert!(start + count <= output.len());
+                output[start..start + count]
                     .copy_from_slice(unsafe { std::slice::from_raw_parts(p as *const u8, count) });
                 Ok(count as u64)
             });
@@ -1229,6 +1247,39 @@ fn oversized_resolver_plans_fail_without_materializing_an_executable_object() {
         assert_eq!(s.entered, 0);
         assert!(s.prepared.is_empty());
         assert!(!s.closed.contains(&19));
+    });
+}
+
+#[test]
+fn large_resolver_plans_are_mapped_readonly_after_explicit_runtime_support() {
+    let [root, middle, provider] =
+        indirect_fixture(true, &["-DLARGE_METADATA"], &["-DMANY_FIXUPS"]);
+    assert_eq!(
+        search_exec(
+            &root,
+            &[
+                (b"/libraries/libmiddle.so", &middle),
+                (b"/libraries/libprovider.so", &provider)
+            ],
+            &[],
+            0,
+            0
+        ),
+        Err(ENOEXEC)
+    );
+    STATE.with_borrow(|s| {
+        assert_eq!(s.entered, 1);
+        assert_eq!(s.images_created, 2);
+        assert!(s.metadata.len() > 4096);
+        let image = mnu_abi::process_image::decode(&s.startup).unwrap();
+        let mapping = image.mappings().next().unwrap();
+        assert_eq!(mapping.backing_handle, 31);
+        assert_eq!(mapping.access, mnu_abi::MEMORY_ACCESS_READ);
+        assert_eq!(mapping.options, mnu_abi::MEMORY_MAP_SHARED);
+        assert!(image.stack().len() < 4096);
+        assert!(s.closed.contains(&30) && s.closed.contains(&31));
+        assert!(!s.closed.contains(&19));
+        assert_eq!(&s.metadata[..8], b"MIREL001");
     });
 }
 

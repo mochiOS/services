@@ -192,3 +192,58 @@ fn dtv_lookup_is_bounded_and_rejects_missing_modules_and_corrupt_metadata() {
         None
     );
 }
+
+#[test]
+fn allocation_preflight_bounds_templates_and_decode_rechecks_changed_counts() {
+    let bytes = payload();
+    let reader = |address: usize, out: &mut [u8]| -> Result<(), i32> {
+        let at = address.checked_sub(0x1000).ok_or(14)?;
+        out.copy_from_slice(bytes.get(at..at + out.len()).ok_or(14)?);
+        Ok(())
+    };
+    assert_eq!(
+        image::workspace(0x1000, bytes.len(), reader),
+        Ok((3, bytes.len()))
+    );
+    assert_eq!(
+        image::workspace(0x1000, bytes.len() - 1, reader),
+        Err(Error::TooLarge)
+    );
+    assert_eq!(
+        image::workspace::<i32>(0x1000, bytes.len(), |_, _| Err(14)),
+        Err(Error::Read(14))
+    );
+    for base in [0, 1, usize::MAX & !7] {
+        assert_eq!(
+            image::workspace::<i32>(base, bytes.len(), |_, _| panic!("invalid base")),
+            Err(Error::Invalid)
+        );
+    }
+    assert_eq!(
+        image::workspace::<i32>(usize::MAX - 63, bytes.len(), |_, out| {
+            out.copy_from_slice(&bytes[..32]);
+            Ok(())
+        }),
+        Err(Error::Invalid)
+    );
+    for (offset, value) in [(0, 0), (8, 2 | (3 << 32)), (8, 1), (16, 33), (24, 1)] {
+        let mut bad = bytes.clone();
+        put(&mut bad, offset, value);
+        assert!(
+            image::workspace(0x1000, bytes.len(), |_, out| -> Result<(), i32> {
+                out.copy_from_slice(&bad[..32]);
+                Ok(())
+            })
+            .is_err()
+        );
+    }
+    let mut changed = bytes.clone();
+    put(&mut changed, 8, 1 | (4 << 32));
+    put(&mut changed, 16, (bytes.len() + image::MODULE_BYTES) as u64);
+    let mut output = templates();
+    assert_eq!(
+        decode(&changed, bytes.len() + image::MODULE_BYTES, &mut output),
+        Err(Error::TooLarge)
+    );
+    assert_eq!(output, templates());
+}

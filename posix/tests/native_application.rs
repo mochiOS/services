@@ -106,6 +106,7 @@ fn application_metadata_accepts_local_prepared_data_and_keeps_remote_items_unpri
         },
         lifecycle: b"life\0",
         tls: b"tls\0",
+        indirect: &[],
     };
     let bytes = production::metadata_for_process(
         "/app",

@@ -514,6 +514,7 @@ fn creation_backend_retains_before_publication_and_never_weakens_grants() {
     );
     assert!(body.find("thread.suspend()").unwrap() < body.find("add_thread(thread)").unwrap());
     let native = &exec[exec.find("pub fn process_create_syscall(").unwrap()..];
+    let compact: String = native.split_whitespace().collect();
     for required in [
         "caller_has_process_spawn_capability()",
         "PendingExecKind::Spawn",
@@ -523,7 +524,11 @@ fn creation_backend_retains_before_publication_and_never_weakens_grants() {
         "export_inherited_handles(Some(owner), &specs)",
         "ImageLaunch::Created(startup)",
     ] {
-        assert!(native.contains(required));
+        let required: String = required.split_whitespace().collect();
+        assert!(
+            compact.contains(&required),
+            "missing native invariant: {required}"
+        );
     }
     for forbidden in [
         "load_exec_image(",

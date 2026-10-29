@@ -9,6 +9,9 @@ type c_int = i32;
 const ENOEXEC: i32 = 8;
 const ENOENT: i32 = 2;
 const E2BIG: i32 = 7;
+const EIO:i32=5;
+#[path="../../../user/crates/newlib-runtime/src/startup_storage.rs"]
+mod startup_storage;
 const EOVERFLOW: i32 = 75;
 const PAGE_SIZE: usize = 4096;
 const NATIVE_READ_WRITE: u64 = 3;
@@ -454,4 +457,55 @@ fn crt_uses_serialized_modules_and_rejects_invalid_present_metadata_without_fall
     TLS_AUX.set(Err(13));
     assert_eq!(runtime::allocate(&ThreadControl::default()), Err(13));
     assert!(MAPPINGS.with_borrow(|m| m.is_empty()));
+}
+
+#[test]
+fn large_module_metadata_uses_bounded_private_scratch_and_reclaims_it_on_failure() {
+    use static_tls::image;
+    let data = [79u8; 8];
+    let template = static_tls::Template {
+        source: data.as_ptr() as usize,
+        file_size: 8,
+        memory_size: 32,
+        alignment: 16,
+        residue: 0,
+    };
+    let mut templates = vec![None; 180];
+    templates[179] = Some(template);
+    let mut payload = vec![0; image::encoded_length(templates.len()).unwrap()];
+    image::encode(&templates, &mut payload).unwrap();
+    assert!(payload.len() > 4096);
+    AUX.set(Some(auxiliary::Vector {
+        table: 1,
+        count: 0,
+        bias: Err(14),
+    }));
+    TLS_AUX.set(Ok(payload.as_ptr() as usize));
+    let control = ThreadControl::default();
+    runtime::allocate(&control).unwrap();
+    assert_eq!(
+        MAPPINGS.with_borrow(|m| m.len()),
+        1,
+        "scratch must be gone after TLS publication"
+    );
+    let module = static_tls::modules::Plan::new(&templates, PAGE_SIZE)
+        .unwrap()
+        .modules()
+        .find(|m| m.index == 179)
+        .unwrap();
+    let address = control.thread_local_base.load(Ordering::Acquire) as usize - module.distance;
+    assert_eq!(
+        unsafe { std::slice::from_raw_parts(address as *const u8, 8) },
+        data
+    );
+    destroy(&control);
+    assert!(MAPPINGS.with_borrow(|m| m.is_empty()));
+    LIMIT.set(Err(12));
+    assert_eq!(runtime::allocate(&ThreadControl::default()), Err(12));
+    LIMIT.set(Ok(()));
+    COPIES.set(0);
+    COPY_FAIL.set(2);
+    assert_eq!(runtime::allocate(&ThreadControl::default()), Err(14));
+    assert!(MAPPINGS.with_borrow(|m| m.is_empty()));
+    COPY_FAIL.set(usize::MAX);
 }
