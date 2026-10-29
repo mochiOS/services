@@ -20,6 +20,9 @@ mod llvm_runtime;
 #[cfg(all(target_os = "mochios", mochios_interpreter_probe_296))]
 #[path = "interpreter_native.rs"]
 mod interpreter;
+#[cfg(all(target_os = "mochios", mochios_elf_mapping_probe_297))]
+#[path = "native_elf_mapping.rs"]
+mod elf_mapping;
 #[cfg(all(
     target_os = "mochios",
     any(
@@ -137,6 +140,12 @@ pub fn run(posix: u32, network: u32) {
     }
     #[cfg(mochios_llvm_runtime_probe_215)]
     {
+        #[cfg(mochios_elf_mapping_probe_297)]
+        {
+            elf_mapping::run(posix);
+            unsafe { alarm(0); }
+            return;
+        }
         #[cfg(any(
             mochios_startup_metadata_probe_293,
             mochios_relro_probe_294,
