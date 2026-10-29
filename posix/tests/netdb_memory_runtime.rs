@@ -29,6 +29,14 @@ mod user_copy_native;
 use memory as netdb_memory;
 use memory::{AddrInfo, List};
 use user_copy_native::{syscall, syscall_errno};
+#[path = "support/netdb_backend_runtime.rs"]
+mod backend_checks;
+#[path = "../../../user/crates/newlib-runtime/src/netdb_backend.rs"]
+mod netdb_backend;
+#[path = "../../../user/crates/newlib-runtime/src/vector_buffer.rs"]
+mod vector_buffer;
+use vector_buffer::VectorBuffer;
+const ENOMEM: c_int = 12;
 const PAGE_SIZE: usize = 4096;
 const EFAULT: c_int = 14;
 const EIO: c_int = 5;

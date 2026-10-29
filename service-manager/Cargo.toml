@@ -4,7 +4,11 @@ version = "0.1.0"
 edition = "2024"
 build = "build.rs"
 
+[features]
+posix-native-probes = ["dep:libc"]
+
 [dependencies]
+libc = { path = "../../libraries/libc", optional = true }
 mochios-keychain-protocol = { path = "../../user/crates/keychain-protocol" }
 mnu-abi = { git = "https://github.com/mochiOS/mnu", package = "mnu-abi" }
 mochi-user-platform = { git = "https://github.com/mochiOS/syscalls", package = "mochi-user-platform", default-features = false, features = ["std"] }

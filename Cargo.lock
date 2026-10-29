@@ -3135,6 +3135,7 @@ dependencies = [
 name = "service-manager"
 version = "0.1.0"
 dependencies = [
+ "libc",
  "mnu-abi",
  "mochi-user-platform",
  "mochi-user-syscall",

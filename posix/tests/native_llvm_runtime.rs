@@ -82,6 +82,7 @@ pub fn run() {
                         arguments.as_ptr(),
                         environment.as_ptr(),
                     );
+                    eprintln!("native probe exec {} failed errno={}", path.to_string_lossy(), *__errno());
                     _exit(126);
                 }
                 let mut status = 0;
