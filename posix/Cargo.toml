@@ -130,3 +130,8 @@ harness = false
 name = "native_network_unavailable"
 path = "tests/native_network_unavailable.rs"
 harness = false
+
+[[test]]
+name = "native_process_image_info"
+path = "tests/native_process_image_info.rs"
+harness = false
