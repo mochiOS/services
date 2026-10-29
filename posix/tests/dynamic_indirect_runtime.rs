@@ -22,6 +22,7 @@ thread_local! {
     static AUX: Cell<Option<usize>> = const { Cell::new(None) };
     static METADATA: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
     static CALLS: Cell<usize> = const { Cell::new(0) };
+    static COPY_TARGET: Cell<Option<usize>> = const { Cell::new(None) };
 }
 mod auxiliary {
     pub struct Vector;
@@ -47,6 +48,13 @@ extern "C" fn first() -> u64 {
 }
 extern "C" fn second() -> u64 {
     CALLS.set(CALLS.get() + 1);
+    if let Some(address) = COPY_TARGET.get() {
+        // SAFETY: the test retains this private readable mapping until return.
+        assert_eq!(
+            unsafe { core::ptr::read_unaligned(address as *const u64) },
+            78
+        );
+    }
     0
 }
 struct Mapping(*mut libc::c_void);
@@ -85,7 +93,13 @@ fn crt_resolves_once_from_private_metadata_and_propagates_real_memory_faults() {
     // Each initial image owns one static execution state. Use separate actual
     // processes for successful and terminally failed startup transactions.
     let Ok(case) = std::env::var(CASE) else {
-        for case in ["success", "fault"] {
+        for case in [
+            "success",
+            "fault",
+            "copy",
+            "copy-read-fault",
+            "copy-write-fault",
+        ] {
             let out = std::process::Command::new(std::env::current_exe().unwrap())
                 .args([
                     "--exact",
@@ -105,13 +119,19 @@ fn crt_resolves_once_from_private_metadata_and_propagates_real_memory_faults() {
         return;
     };
     assert_eq!(implementation::__mochios_indirect_v1(), 1);
+    assert_eq!(implementation::__mochios_indirect_v2(), 2);
     assert_eq!(implementation::initialize(), Ok(false));
     AUX.set(Some(1));
     assert_eq!(implementation::initialize(), Err(ENOEXEC));
     let target = Mapping::new();
+    let copy = Mapping::new();
+    let with_copy = case.starts_with("copy");
+    if with_copy {
+        COPY_TARGET.set(Some(copy.0 as usize));
+    }
     let a = first as *const () as u64;
     let b = second as *const () as u64;
-    let mut regions = [
+    let mut regions = vec![
         Region {
             address: a.min(b),
             length: a.max(b) - a.min(b) + 1,
@@ -123,38 +143,64 @@ fn crt_resolves_once_from_private_metadata_and_propagates_real_memory_faults() {
             access: Access::Writable,
         },
     ];
+    if with_copy {
+        regions[1].access = Access::ReadWrite;
+        regions.push(Region {
+            address: copy.0 as u64,
+            length: PAGE_SIZE as u64,
+            access: Access::ReadWrite,
+        });
+    }
     regions.sort_unstable_by_key(|r| r.address);
-    let mut fixups = [
+    let mut fixups = vec![
         Fixup::new(target.0 as u64, a, 5),
         Fixup::new(target.0 as u64 + 8, b, 0),
     ];
-    let mut bytes = vec![0; 40 + 2 * 24 + 2 * 32];
+    if with_copy {
+        fixups.insert(1, Fixup::copy(copy.0 as u64, target.0 as u64, 16));
+    }
+    let mut bytes = vec![0; 40 + regions.len() * 24 + fixups.len() * 32];
     assert_eq!(encode(&regions, &mut fixups, &mut bytes), Ok(bytes.len()));
     let original = bytes.clone();
     METADATA.with_borrow_mut(|m| *m = bytes);
     AUX.set(Some(METADATA.with_borrow(|m| m.as_ptr() as usize)));
     // Fail before calling even the first resolver when the last record is bad.
-    METADATA.with_borrow_mut(|m| m[144] = 1);
+    METADATA.with_borrow_mut(|m| {
+        let last = m.len() - 8;
+        m[last] = 2;
+    });
     assert_eq!(implementation::initialize(), Err(ENOEXEC));
     assert_eq!(CALLS.get(), 0);
     METADATA.with_borrow_mut(|m| m.copy_from_slice(&original));
     if case == "fault" {
         target.protect(libc::PROT_READ);
+    } else if case == "copy-write-fault" {
+        copy.protect(libc::PROT_READ);
+    } else if case == "copy-read-fault" {
+        user_copy_native::DENIED
+            .with_borrow_mut(|r| *r = Some(target.0 as usize..target.0 as usize + 16));
     }
     let result = implementation::initialize();
     METADATA.with_borrow_mut(|m| m.copy_from_slice(&original));
-    if case == "fault" {
+    if case.ends_with("fault") {
         assert_eq!(result, Err(EFAULT));
         assert_eq!(CALLS.get(), 1);
-        assert_eq!(target.word(0), 0);
+        assert_eq!(target.word(0), if with_copy { 78 } else { 0 });
+        assert_eq!(copy.word(0), 0);
         target.protect(libc::PROT_READ | libc::PROT_WRITE);
+        copy.protect(libc::PROT_READ | libc::PROT_WRITE);
+        user_copy_native::DENIED.with_borrow_mut(|r| *r = None);
         assert_eq!(implementation::initialize(), Err(ENOEXEC));
         assert_eq!(CALLS.get(), 1);
     } else {
-        assert_eq!(case, "success");
+        assert!(case == "success" || case == "copy");
         assert_eq!(result, Ok(true));
         assert_eq!(target.word(0), 78);
         assert_eq!(target.word(1), 0);
+        if with_copy {
+            assert_eq!(copy.word(0), 78);
+            assert_eq!(copy.word(1), 0);
+        }
         assert_eq!(CALLS.get(), 2);
         assert_eq!(implementation::initialize(), Ok(true));
         assert_eq!(CALLS.get(), 2);

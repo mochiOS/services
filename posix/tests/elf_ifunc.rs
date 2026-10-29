@@ -496,7 +496,8 @@ fn planning_checks_all_scratch_capacities_before_emitting_any_bundle() {
 }
 
 #[test]
-fn copying_data_with_pending_ifuncs_fails_before_any_image_is_ready_to_run() {
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+fn copied_data_observes_provider_ifuncs_before_root_resolvers_like_gnu_loader() {
     let mut f = Fixture::new("both", "", false);
     let source = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/support/elf_ifunc_copy.S");
     let root = f.directory.join("copy-root");
@@ -508,16 +509,93 @@ fn copying_data_with_pending_ifuncs_fails_before_any_image_is_ready_to_run() {
             "-Wl,-e,_start,--no-dynamic-linker,--export-dynamic",
             "-Wl,-z,noexecstack,--no-as-needed",
         ])
-        .arg(source)
+        .arg(&source)
         .arg(format!("-L{}", f.directory.display()))
         .args(["-l:libmiddle.so", "-l:libprovider.so"])
         .arg("-o")
         .arg(&root));
-    f.bytes[0] = std::fs::read(root).unwrap();
+    f.bytes[0] = std::fs::read(&root).unwrap();
     assert!(
         relocations(&f.bytes[0])
             .iter()
             .any(|p| word(&f.bytes[0], *p + 8) as u32 == 5)
     );
-    assert!(matches!(prepare(&f.bytes), Err(Error::Unsupported)));
+    let prepared = prepare(&f.bytes).unwrap();
+    assert_eq!(word(&prepared.plan, 8) as u32, 2);
+    assert!(records(&prepared).any(|(_, source, length)| source >= BASES[1] && length == 8));
+    let mut regions = vec![Region::EMPTY; prepared.regions];
+    let mut fixups = vec![Fixup::EMPTY; prepared.fixups];
+    let captured = Captured::capture(
+        PLAN,
+        prepared.plan.len(),
+        &mut regions,
+        &mut fixups,
+        |a, out| {
+            let at = (a - PLAN) as usize;
+            out.copy_from_slice(&prepared.plan[at..at + out.len()]);
+            Ok::<(), i32>(())
+        },
+    )
+    .unwrap();
+    let mut mappings = host_mappings::Mappings::default();
+    mappings.install(&prepared.bundle);
+    State::new()
+        .apply_with_copies(
+            &captured,
+            |a, out| {
+                file_offset(&prepared.bundle, a, out.len() as u64);
+                // SAFETY: the test owns the checked live fixture extent.
+                unsafe {
+                    std::ptr::copy_nonoverlapping(a as *const u8, out.as_mut_ptr(), out.len())
+                };
+                Ok(())
+            },
+            |a| -> Result<u64, i32> {
+                // SAFETY: capture checked the resolver against this fixture's RX LOADs.
+                let f: unsafe extern "C" fn() -> u64 = unsafe { std::mem::transmute(a as usize) };
+                Ok(unsafe { f() })
+            },
+            |a, out| {
+                file_offset(&prepared.bundle, a, out.len() as u64);
+                // SAFETY: capture checked a writable extent in this owned fixture.
+                unsafe { std::ptr::copy_nonoverlapping(out.as_ptr(), a as *mut u8, out.len()) };
+                Ok(())
+            },
+        )
+        .unwrap();
+    let symbols = run(Command::new("x86_64-elf-nm").arg(&root));
+    let root_slot = symbols
+        .lines()
+        .find_map(|s| {
+            let p: Vec<_> = s.split_whitespace().collect();
+            (p.len() == 3 && p[2] == "root_slot").then(|| u64::from_str_radix(p[0], 16).unwrap())
+        })
+        .unwrap();
+    let expected = BASES[2] + f.symbols(2)["provider_impl"];
+    file_offset(&prepared.bundle, root_slot, 8);
+    assert_eq!(
+        unsafe { std::ptr::read_unaligned(root_slot as *const u64) },
+        expected
+    );
+    let entry = word(&prepared.bundle, 24);
+    let function: unsafe extern "C" fn() -> u64 = unsafe { std::mem::transmute(entry as usize) };
+    assert_eq!(unsafe { function() }, expected);
+    // A separate process runs the same assembly and DSOs with GNU's actual
+    // loader. Its syscall-only _start checks COPY and root resolver ordering.
+    let reference = f.directory.join("gnu-copy-reference");
+    run(Command::new("x86_64-elf-gcc")
+        .args([
+            "-fno-pic",
+            "-no-pie",
+            "-nostdlib",
+            "-DGNU_REFERENCE",
+            "-Wl,-e,_start,--export-dynamic,-z,noexecstack,--no-as-needed",
+            "-Wl,--dynamic-linker,/lib64/ld-linux-x86-64.so.2",
+        ])
+        .arg(&source)
+        .arg(format!("-L{}", f.directory.display()))
+        .args(["-l:libmiddle.so", "-l:libprovider.so"])
+        .arg("-o")
+        .arg(&reference));
+    run(Command::new(reference).env("LD_LIBRARY_PATH", &f.directory));
 }

@@ -28,6 +28,8 @@ __asm__(".local native_local_pick\n.type native_local_pick,@gnu_indirect_functio
         ".set native_local_pick,select_implementation\n");
 static int (*volatile selected_pointer)(void) = native_pick;
 static int (*volatile local_pointer)(void) = native_local_pick;
+int (*native_copied_pointer)(void) = native_pick;
+void *native_copy_address(void) { return &native_copied_pointer; }
 int native_pointer_call(void) { return selected_pointer(); }
 int native_local_call(void) { return local_pointer(); }
 int native_resolver_count(void) { return calls; }

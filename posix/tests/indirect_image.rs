@@ -181,7 +181,7 @@ fn header_version_reserved_length_and_count_overflow_are_validated() {
     for (at, value) in [
         (0, 0),
         (8, 0),
-        (8, 2 | (2u64 << 32)),
+        (8, 3 | (2u64 << 32)),
         (24, 151),
         (24, 153),
         (24, u64::MAX),

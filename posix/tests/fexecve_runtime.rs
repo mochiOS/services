@@ -885,18 +885,34 @@ fn indirect_fixture(marked: bool, root_flags: &[&str], library_flags: &[&str]) -
         c.args([
             "-fPIC",
             "-nostdlib",
-            "-Wl,-shared,-z,noexecstack,--no-as-needed,--hash-style=both",
+            "-Wl,-z,noexecstack,--no-as-needed,--hash-style=both",
         ])
         .arg(format!("-D{define}"))
-        .arg(&support)
+        .arg(
+            if name == "root.so" && root_flags.contains(&"-DCOPY_ROOT") {
+                support.with_file_name("elf_ifunc_copy.S")
+            } else {
+                support.clone()
+            },
+        )
         .arg(format!("-L{}", directory.0.display()));
         if name == "root.so" {
+            if root_flags.contains(&"-DCOPY_ROOT") {
+                c.args([
+                    "-fno-pic",
+                    "-no-pie",
+                    "-Wl,--export-dynamic,--no-dynamic-linker",
+                ]);
+            } else {
+                c.arg("-Wl,-shared");
+            }
             c.arg("-Wl,-e,_start,--disable-new-dtags,-rpath,/libraries");
             if marked {
                 c.arg("-DCRT_CONTRACT");
             }
             c.args(root_flags);
         } else {
+            c.arg("-Wl,-shared");
             c.arg(format!("-Wl,-soname,{name}"));
             c.args(library_flags);
         }
@@ -1115,6 +1131,82 @@ fn exec_preserves_late_init_and_fini_recipes_for_a_v2_crt() {
         assert_eq!(word(&output, output.len() - 16), entry);
         assert_eq!(word(&output, output.len() - 8), entry);
     });
+}
+
+#[test]
+fn exec_requires_copy_contract_and_inherits_the_complete_ordered_copy_plan() {
+    use mochios_posix_client::{
+        indirect_image::{Captured, Fixup, Region},
+        process_image::AT_INDIRECT_IMAGE,
+    };
+    for supported in [false, true] {
+        let flags = if supported {
+            vec!["-DCOPY_ROOT", "-DCOPY_CONTRACT"]
+        } else {
+            vec!["-DCOPY_ROOT"]
+        };
+        let [root, middle, provider] = indirect_fixture(true, &flags, &[]);
+        assert_eq!(
+            search_exec(
+                &root,
+                &[
+                    (b"/libraries/libmiddle.so", &middle),
+                    (b"/libraries/libprovider.so", &provider)
+                ],
+                &[],
+                0,
+                0
+            ),
+            Err(ENOEXEC)
+        );
+        STATE.with_borrow(|s| {
+            assert_eq!(s.entered, usize::from(supported));
+            if !supported {
+                assert!(s.prepared.is_empty());
+                return;
+            }
+            let decoded = mnu_abi::process_image::decode(&s.startup).unwrap();
+            let stack = decoded.stack();
+            let word = |o| u64::from_le_bytes(stack[o..o + 8].try_into().unwrap());
+            let mut cursor = (word(0) as usize + 2) * 8;
+            while word(cursor) != 0 {
+                cursor += 8;
+            }
+            cursor += 8;
+            let mut start = None;
+            while word(cursor) != 0 {
+                if word(cursor) == AT_INDIRECT_IMAGE {
+                    assert!(start.replace(word(cursor + 8) as usize).is_none());
+                }
+                cursor += 16;
+            }
+            let start = start.unwrap();
+            assert_eq!(word(start + 8) as u32, 2);
+            let mut fixups = [Fixup::EMPTY; 32];
+            let count = Captured::capture(
+                0x7000_0000 + start as u64,
+                stack.len() - start,
+                &mut [Region::EMPTY; 32],
+                &mut fixups,
+                |a, out| {
+                    let at = (a - 0x7000_0000) as usize;
+                    out.copy_from_slice(&stack[at..at + out.len()]);
+                    Ok::<(), i32>(())
+                },
+            )
+            .unwrap()
+            .len();
+            let copy = fixups[..count]
+                .iter()
+                .position(|f| f.copy_source().is_some())
+                .unwrap();
+            assert!(
+                copy > 0 && copy + 1 < count,
+                "COPY must follow provider resolvers and precede root resolver"
+            );
+            assert_eq!(fixups[copy].width(), 8);
+        });
+    }
 }
 
 #[test]
