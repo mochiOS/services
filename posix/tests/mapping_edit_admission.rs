@@ -14,6 +14,13 @@ fn reserved_later_mapping_rejects_the_entire_edit_before_any_side_effect() {
     let end = start + process[start..].find("/// memory_sync").unwrap();
     let unmap = &process[start..end];
     let protection = include_str!("../../../core/src/syscall/memory.rs");
+    // The read-only observer has its own native boundary test. This fixture
+    // supplies the editing backend, so do not pull in the observer's context.
+    let observer = protection.find("/// Observe only").unwrap();
+    let edits = protection
+        .find("#[inline(never)]\nfn protect_memory_pages(")
+        .unwrap();
+    let protection = format!("{}{}", &protection[..observer], &protection[edits..]);
     let protection = protection
         .lines()
         .filter(|line| !line.starts_with("//!"))
