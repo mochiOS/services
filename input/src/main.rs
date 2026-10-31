@@ -235,6 +235,7 @@ fn keycode_for_scancode(scancode: u8, extended: bool) -> Option<u16> {
         (0x34, false) => KEY_DOT,
         (0x35, false) => KEY_SLASH,
         (0x47, true) => KEY_HOME,
+        (0x48, true) => KEY_UP,
         (0x49, true) => KEY_PAGE_UP,
         (0x4b, true) => KEY_LEFT,
         (0x4d, true) => KEY_RIGHT,
