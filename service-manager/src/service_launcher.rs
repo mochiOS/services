@@ -333,6 +333,11 @@ pub(crate) fn spawn_user_session(
     });
     let mut arguments = fixed_service_arguments(service, logger_endpoint, ready_target);
     append_posix_handle(&mut arguments, posix_endpoint);
+    let path = core::str::from_utf8(
+        mochios_posix_client::configuration::DEFAULT_EXECUTABLE_PATH,
+    )
+    .map_err(|_| sys_error(mochi_user_syscall::EINVAL))?;
+    arguments.push(alloc::format!("{ENVIRONMENT_PREFIX}PATH={path}"));
     if let Some(user) = session_user(identity.uid) {
         arguments.push(alloc::format!("{SESSION_USER_ARG_PREFIX}{}", user.name));
         for (name, value) in [

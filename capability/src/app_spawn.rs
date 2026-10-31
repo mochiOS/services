@@ -83,6 +83,18 @@ pub(crate) fn spawn_application_from_manifest(
     }
 
     let mut spawn_items = Vec::new();
+    // GUI launches establish a user environment; explicit argv/envp launches
+    // below preserve the caller's environment, including an absent PATH.
+    if !items[1..].iter().any(|item| {
+        item.strip_prefix(ENVIRONMENT_PREFIX)
+            .is_some_and(|entry| entry.starts_with("PATH="))
+    }) {
+        let path = core::str::from_utf8(
+            mochios_posix_client::configuration::DEFAULT_EXECUTABLE_PATH,
+        )
+        .map_err(|_| mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64))?;
+        spawn_items.push(format!("{ENVIRONMENT_PREFIX}PATH={path}"));
+    }
     spawn_items.push(format!(
         "{}MOCHI_EXECUTABLE_PATH={}",
         ENVIRONMENT_PREFIX, entry_path

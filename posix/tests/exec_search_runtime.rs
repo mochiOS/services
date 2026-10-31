@@ -462,11 +462,15 @@ fn slash_paths_never_read_path_and_empty_names_never_attempt_execution() {
 fn default_empty_and_long_search_lists_preserve_search_and_errno_rules() {
     let _serial = SERIAL.lock().unwrap();
     for spawn in [false, true] {
-        reset(std::ptr::null(), &[2, 13]);
+        reset(std::ptr::null(), &[2, 2, 13]);
         assert_eq!(call(spawn, c"tool".as_ptr()), 13);
         assert_eq!(
             *CALLS.lock().unwrap(),
-            [b"/bin/tool".to_vec(), b"/usr/bin/tool".to_vec()]
+            [
+                b"/system/bin/tool".to_vec(),
+                b"/bin/tool".to_vec(),
+                b"/usr/bin/tool".to_vec()
+            ]
         );
         reset(c"".as_ptr(), &[0]);
         assert_eq!(call(spawn, c"tool".as_ptr()), 0);
