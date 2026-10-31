@@ -132,6 +132,15 @@ pub(crate) fn handle_request(
                     4,
                     u32::from(native_window_overlaps(windows, surfaces, area)),
                 );
+                // Existing clients read offset 4; the reserved word at 8 adds
+                // control exclusion without changing the request or reply size.
+                put_u32(
+                    &mut reply,
+                    8,
+                    u32::from(crate::window::maximized_controls_overlap(
+                        surfaces, windows, area,
+                    )),
+                );
             }
         }
         OP_DECOR_SUBSCRIBE => {
@@ -418,12 +427,11 @@ pub(crate) fn handle_request(
                             .saturating_sub(insets.right)
                             .max(1);
                         let height = display_height
-                            .saturating_sub(40)
                             .saturating_sub(insets.top)
                             .saturating_sub(insets.bottom)
                             .max(1);
                         surfaces[content_index].x = insets.left as i32;
-                        surfaces[content_index].y = 40i32.saturating_add(insets.top as i32);
+                        surfaces[content_index].y = insets.top as i32;
                         windows[window_index].configured_width = width;
                         windows[window_index].configured_height = height;
                         send_window_configure(&surfaces[content_index], width, height);

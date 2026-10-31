@@ -152,6 +152,18 @@ fn hit_test(surfaces: &[Surface], windows: &[Window], x: i32, y: i32) -> Option<
             && point_inside_window_frame(surfaces, windows, surface, x, y)
         {
             if surface.role == SurfaceRole::Panel {
+                if crate::window::maximized_controls_overlap(
+                    surfaces,
+                    windows,
+                    Rect {
+                        x,
+                        y,
+                        width: 1,
+                        height: 1,
+                    },
+                ) {
+                    continue;
+                }
                 let sx = x.saturating_sub(surface.x) as usize;
                 let sy = y.saturating_sub(surface.y) as usize;
                 // Keep the hidden shell's top-edge reveal target reachable.
@@ -851,6 +863,50 @@ mod tests {
             pointer_keyboard_focus_target(&surfaces, &[], Some(1), Some(0)),
             Some(0)
         );
+    }
+
+    #[test]
+    fn maximized_controls_take_priority_over_the_panels_top_edge_reveal() {
+        let mut content = Surface::empty();
+        content.live = true;
+        content.visible = true;
+        content.handle = SurfaceHandle(41);
+        content.token = content.handle.0;
+        content.window = WindowId(7);
+        content.width = 1280;
+        content.height = 760;
+        content.y = 40;
+        content.role = SurfaceRole::Toplevel;
+        let mut decor = Surface::empty();
+        decor.live = true;
+        decor.visible = true;
+        decor.is_decoration = true;
+        decor.handle = SurfaceHandle(42);
+        decor.token = decor.handle.0;
+        decor.window = WindowId(7);
+        decor.width = 1280;
+        decor.height = 40;
+        decor.role = SurfaceRole::Toplevel;
+        let mut window = Window::empty();
+        window.live = true;
+        window.id = WindowId(7);
+        window.content = content.handle;
+        window.decoration = Some(decor.handle);
+        window.insets.top = 40;
+        window.state = crate::protocol::WINDOW_STATE_MAXIMIZED;
+        let mut panel = Surface::empty();
+        panel.live = true;
+        panel.visible = true;
+        panel.width = 1280;
+        panel.height = 800;
+        panel.role = SurfaceRole::Panel;
+        let surfaces = [content, decor, panel];
+        for (x, y) in [(1279, 0), (1279, 20), (1160, 0)] {
+            assert_eq!(hit_test(&surfaces, &[window], x, y), Some(1));
+        }
+        assert_eq!(hit_test(&surfaces, &[window], 1100, 0), Some(2));
+        window.state = crate::protocol::WINDOW_STATE_NORMAL;
+        assert_eq!(hit_test(&surfaces, &[window], 1279, 0), Some(2));
     }
 
     #[test]

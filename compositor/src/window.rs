@@ -260,3 +260,43 @@ pub(crate) fn window_frame_rect(content: &Surface, window: &Window) -> Rect {
             .saturating_add(window.insets.bottom),
     }
 }
+
+/// Control targets of visible maximized windows, including the screen's top
+/// and right edges. Panel reveal must not intercept these decoration targets.
+pub(crate) fn maximized_controls_overlap(
+    surfaces: &[Surface],
+    windows: &[Window],
+    area: Rect,
+) -> bool {
+    windows.iter().any(|window| {
+        if !window.live || window.state != crate::protocol::WINDOW_STATE_MAXIMIZED {
+            return false;
+        }
+        let Some(index) = content_surface_index_for_window(surfaces, window) else {
+            return false;
+        };
+        let content = &surfaces[index];
+        if !content.live
+            || !content.visible
+            || content.role != SurfaceRole::Toplevel
+            || window.decoration.is_none()
+        {
+            return false;
+        }
+        let frame = window_frame_rect(content, window);
+        let width = frame.width.min(44 * 3);
+        let controls = Rect {
+            x: frame
+                .x
+                .saturating_add(frame.width.saturating_sub(width) as i32),
+            y: frame.y,
+            width,
+            height: window.insets.top.min(frame.height),
+        };
+        controls.height > 0
+            && i64::from(area.x) < i64::from(controls.x) + i64::from(controls.width)
+            && i64::from(controls.x) < i64::from(area.x) + i64::from(area.width)
+            && i64::from(area.y) < i64::from(controls.y) + i64::from(controls.height)
+            && i64::from(controls.y) < i64::from(area.y) + i64::from(area.height)
+    })
+}
