@@ -12,6 +12,8 @@ use std::{
 pub mod syscall {
     pub use mochi_user_syscall::*;
 }
+#[path = "../../../user/crates/platform/src/execution_peer.rs"]
+pub mod execution_peer;
 pub mod capability {
     pub use mochios_capability_protocol::*;
 }
