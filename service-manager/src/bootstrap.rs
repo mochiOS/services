@@ -17,6 +17,9 @@ mod input_authority_probe;
 #[cfg(mochios_consent_input_probe_306)]
 #[path = "../../posix/tests/support/consent_input_manager_306.rs"]
 mod consent_input_probe;
+#[cfg(mochios_presentation_probe_307)]
+#[path = "../../posix/tests/support/presentation_manager_307.rs"]
+mod presentation_probe;
 
 struct Runtime {
     logger_endpoint: u64,
@@ -1187,6 +1190,19 @@ fn resident(
         crate::portal::prewarm(&mut runtime.permission_prompt, runtime.logger_endpoint);
     }
     let mut request_bytes = [0u8; 1024];
+    let mut consent_session = crate::consent_session::Epoch::default();
+    let initial_context = active_session.map_or((1, false), |session| (session.id, true));
+    if let Err(error) = consent_session.native(initial_context.0, initial_context.1) {
+        platform::logln!("service-manager.service: consent session publication failed: {error:?}");
+    }
+    #[cfg(mochios_presentation_probe_307)]
+    if initial_context.1 {
+        presentation_probe::run(
+            platform::logger::endpoint().unwrap_or(0),
+            &mut consent_session,
+            initial_context.0,
+        );
+    }
     if let Some(runtime) = runtime.as_mut() {
         if active_session.is_some() {
             runtime.unpublished_session_roots.clear();
@@ -1223,6 +1239,11 @@ fn resident(
                     let _ = active_session.take();
                     // No authentication or new image may precede this gate.
                     active_session = runtime.login_next_session(previous);
+                    if let Some(session) = active_session {
+                        if let Err(error) = consent_session.native(session.id, true) {
+                            platform::logln!("service-manager.service: consent session publication failed: {error:?}");
+                        }
+                    }
                 }
                 Ok(false) => logout.last_error = None,
                 Err(error) => {
@@ -1346,6 +1367,10 @@ fn resident(
             );
             continue;
         };
+        if let Err(error) = consent_session.native(session.id, false) {
+            reply_session_status(sender, request.action, session.id, errno(error) as i32);
+            continue;
+        }
         let locked = runtime
             .keychain
             .as_ref()
@@ -1374,6 +1399,12 @@ fn resident(
                         Some(_) => mochi_user_syscall::EACCES as i32,
                         None => mochi_user_syscall::EIO as i32,
                     };
+                let status = if status == 0 {
+                    consent_session.native(session.id, true).err()
+                        .map_or(0, |error| errno(error) as i32)
+                } else {
+                    status
+                };
                 reply_session_status(sender, request.action, session.id, status);
             }
             platform::session_control::Action::LogOut => {

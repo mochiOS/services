@@ -8,6 +8,8 @@ mod driver_controller;
 mod input_endpoint;
 #[path="../../../service-manager/src/consent_input.rs"]
 mod consent_input;
+#[path="../../../service-manager/src/consent_session.rs"]
+mod consent_session;
 #[path="../../../service-manager/src/launch_arguments.rs"]
 mod launch_arguments;
 #[path="../../../service-manager/src/keychain_control.rs"]

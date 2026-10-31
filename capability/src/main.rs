@@ -15,6 +15,10 @@ mod dynamic_grant;
 mod consent;
 mod consent_peer;
 mod consent_input;
+mod consent_presentation;
+#[cfg(mochios_presentation_probe_307)]
+#[path = "../../posix/tests/support/presentation_broker_307.rs"]
+mod presentation_probe;
 #[cfg(mochios_consent_input_probe_306)]
 #[path = "../../posix/tests/support/consent_input_broker_306.rs"]
 mod consent_input_probe;

@@ -3746,6 +3746,7 @@ dependencies = [
  "tiny-skia",
  "ui_layout",
  "unicode-script",
+ "unicode-segmentation",
  "wgpu",
  "winit",
  "zeroize",

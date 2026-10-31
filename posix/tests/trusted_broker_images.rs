@@ -174,6 +174,18 @@ const PROFILES: &[(trusted_images::Role, &str, &str, &str)] = &[
         "service",
         "/system/services/compositor.service",
     ),
+    (
+        trusted_images::Role::SessionOwner,
+        "org.mochios.service-manager",
+        "service",
+        "/system/services/service-manager.service",
+    ),
+    (
+        trusted_images::Role::TextDisplay,
+        "org.mochios.terminal",
+        "application",
+        "/system/applications/Terminal.app/entry.elf",
+    ),
 ];
 fn elf(kind: u16, tag: u8) -> Vec<u8> {
     let mut b = vec![0; 4096];

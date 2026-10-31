@@ -7,6 +7,7 @@ mod bootstrap;
 mod driver_controller;
 mod input_endpoint;
 mod consent_input;
+mod consent_session;
 mod launch_arguments;
 mod keychain_control;
 mod launch_rollback;

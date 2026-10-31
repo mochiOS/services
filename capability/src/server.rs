@@ -118,6 +118,10 @@ pub(crate) fn serve_capability_requests(mut state: CapabilityServiceState) -> ! 
     platform::logln!("capability.service: ready");
     let mut buf = [0u8; 1024];
     let mut input_authority: Option<crate::consent_input::Channel> = None;
+    let mut display_authority: Option<crate::consent_presentation::Channel> = None;
+    let mut desktop_sessions = crate::consent_presentation::Sessions::default();
+    #[cfg(mochios_presentation_probe_307)]
+    let mut presentation_probe: Option<crate::presentation_probe::Probe> = None;
     #[cfg(mochios_consent_input_probe_306)]
     let mut input_probe: Option<crate::consent_input_probe::Probe> = None;
     loop {
@@ -137,6 +141,81 @@ pub(crate) fn serve_capability_requests(mut state: CapabilityServiceState) -> ! 
         } else {
             0
         };
+        #[cfg(mochios_presentation_probe_307)]
+        if matches!(
+            opcode,
+            crate::presentation_probe::HELLO | crate::presentation_probe::STATUS
+        ) {
+            let result = (|| {
+                if slice.len() != 4 || attached.count != 0 || !attached.is_user_delivery() {
+                    return Err(mochi_user_syscall::SysError::from_raw(-22));
+                }
+                let channel = display_authority.as_ref()
+                    .ok_or_else(|| mochi_user_syscall::SysError::from_raw(-13))?;
+                if opcode == crate::presentation_probe::HELLO {
+                    if presentation_probe.is_some() {
+                        return Err(mochi_user_syscall::SysError::from_raw(-16));
+                    }
+                    let (probe, reply) = crate::presentation_probe::Probe::begin(
+                        sender, &state.trusted_images, channel,
+                    )?;
+                    presentation_probe = Some(probe);
+                    Ok(reply)
+                } else {
+                    presentation_probe.as_ref()
+                        .ok_or_else(|| mochi_user_syscall::SysError::from_raw(-2))?
+                        .status(sender, &state.trusted_images, channel)
+                }
+            })();
+            close_received_handles(&attached);
+            match result {
+                Ok(reply) => { let _ = platform::ipc::reply(sender, &reply); }
+                Err(error) => capability_reply(sender, error_status(error)),
+            }
+            continue;
+        }
+        if opcode == platform::capability::presentation::SESSION_OPCODE {
+            let result = (|| {
+                if attached.count != 0 || !attached.is_user_delivery() {
+                    return Err(mochi_user_syscall::SysError::from_raw(
+                        mochi_user_syscall::EACCES as i64,
+                    ));
+                }
+                let context =
+                    platform::capability::presentation::decode_session(slice).map_err(|_| {
+                        mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64)
+                    })?;
+                // Revoke pending observations before any remote publication.
+                // No renderer reply can keep a previous session alive.
+                let generation = state.authorization_generation;
+                desktop_sessions.publish(
+                    sender,
+                    context,
+                    &state.trusted_images,
+                    &mut display_authority,
+                    || {
+                        state.consent.observe(
+                            |_, _, _| crate::consent::Current {
+                                requester: None,
+                                presenter: None,
+                                input: None,
+                                session: None,
+                                policy_generation: generation,
+                                foreground: false,
+                            },
+                            |_, _| {},
+                        );
+                        if let Some(channel) = input_authority.as_mut() {
+                            let _ = channel.cancel();
+                        }
+                    },
+                )?;
+                Ok(())
+            })();
+            close_received_handles(&attached);
+            capability_reply(sender, result.err().map_or(0, error_status));
+            continue;
+        }
         #[cfg(mochios_consent_input_probe_306)]
         if opcode == crate::consent_input_probe::START {
             if slice.len() != 4
