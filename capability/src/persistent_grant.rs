@@ -66,6 +66,20 @@ pub(crate) fn install_posix_endpoint(
     Ok(())
 }
 
+/// Duplicate the already authenticated runtime endpoint while its owner is
+/// locked. Launch never substitutes an endpoint selected in request bytes.
+pub(crate) fn launch_endpoint() -> Result<platform::handle::Handle, mochi_user_syscall::SysError> {
+    with_client(|client| {
+        platform::handle::duplicate(
+            client.transport().endpoint(),
+            platform::handle::HANDLE_RIGHT_SEND
+                | platform::handle::HANDLE_RIGHT_DUPLICATE
+                | platform::handle::HANDLE_RIGHT_TRANSFER,
+        )
+        .map_err(ClientError::Transport)
+    })
+}
+
 pub(crate) fn requester_context(
     endpoint: u64,
 ) -> Result<crate::requester_context::RequesterContext, mochi_user_syscall::SysError> {

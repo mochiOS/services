@@ -9,6 +9,140 @@ mod image_catalog;
 #[path = "../../capability/src/native_app.rs"]
 mod production;
 
+#[allow(dead_code)]
+#[path = "../../capability/src/app_stdio.rs"]
+mod app_stdio;
+
+fn stdio_objects() -> [mochi_user_platform::ipc::IpcObjectHandle; 3] {
+    core::array::from_fn(|index| mochi_user_platform::ipc::IpcObjectHandle {
+        handle: 11 + index as u32,
+        reserved: 0,
+        rights: mnu_abi::HANDLE_RIGHT_WAIT
+            | mnu_abi::HANDLE_RIGHT_DUPLICATE
+            | mnu_abi::HANDLE_RIGHT_TRANSFER
+            | if index == 0 {
+                mnu_abi::HANDLE_RIGHT_READ
+            } else {
+                mnu_abi::HANDLE_RIGHT_WRITE
+            },
+    })
+}
+fn stdio_metadata() -> [u64; 3] {
+    core::array::from_fn(|index| {
+        mochios_posix_protocol::encode_inherited_fd_metadata(
+            mochios_posix_protocol::InheritedFdMetadata {
+                kind: if index == 0 {
+                    mochios_posix_protocol::INHERITED_FD_KIND_STREAM_READ
+                } else {
+                    mochios_posix_protocol::INHERITED_FD_KIND_STREAM_WRITE
+                },
+                open_flags: u32::from(index != 0),
+                descriptor_flags: mochios_posix_protocol::INHERITED_FD_DESCRIPTOR_CLOEXEC,
+            },
+        )
+        .unwrap()
+    })
+}
+
+#[test]
+fn stdio_remaps_only_attached_references_clears_cloexec_and_keeps_magic_looking_arguments_as_text()
+{
+    use mochios_posix_protocol as p;
+    let objects = stdio_objects();
+    let stdio = app_stdio::Stdio::new(&objects, stdio_metadata()).unwrap();
+    let argv = [
+        b"custom argv0".as_slice(),
+        b"__MNU_EXEC_INHERIT_HANDLE=1:999:1",
+        b"__MNU_EXEC_ENV=EXTRA=wrong",
+        b"",
+    ];
+    let bytes = production::metadata_for_vectors(
+        "/msh",
+        &argv,
+        &[b"ONLY=yes"],
+        73,
+        [7; 16],
+        Default::default(),
+        &stdio,
+    )
+    .unwrap();
+    let request = mnu_abi::process_create::decode(&bytes).unwrap();
+    let handles = request.handles().collect::<Vec<_>>();
+    assert_eq!(handles.len(), 4);
+    assert_eq!(
+        (handles[0].key, handles[0].source),
+        (p::CONTROL_HANDLE_KEY, 73)
+    );
+    let values = request.values().collect::<Vec<_>>();
+    assert_eq!(values.len(), 4);
+    assert!(values.contains(&mnu_abi::process_create::Value {
+        key: p::FD_TABLE_KEY,
+        value: p::FD_TABLE_VERSION
+    }));
+    for index in 0..3 {
+        assert_eq!(handles[index + 1].source, objects[index].handle);
+        assert_eq!(
+            handles[index + 1].key,
+            p::fd_handle_key(index as i32).unwrap()
+        );
+        assert_eq!(handles[index + 1].rights, objects[index].rights);
+        let encoded = values
+            .iter()
+            .find(|v| Some(v.key) == p::fd_metadata_key(index as i32))
+            .unwrap()
+            .value;
+        assert_eq!(
+            p::decode_inherited_fd_metadata(encoded)
+                .unwrap()
+                .descriptor_flags,
+            0
+        );
+    }
+    let mnu_abi::process_create::InitialState::Image(image) = request.startup else {
+        panic!("image");
+    };
+    let stack = image.stack();
+    let word =
+        |index| u64::from_le_bytes(stack[index * 8..index * 8 + 8].try_into().unwrap()) as usize;
+    assert_eq!(word(0), argv.len());
+    for (index, argument) in argv.iter().enumerate() {
+        let at = word(index + 1);
+        assert_eq!(&stack[at..at + argument.len()], *argument);
+        assert_eq!(stack[at + argument.len()], 0);
+    }
+    let at = word(argv.len() + 2);
+    assert!(stack[at..].starts_with(b"ONLY=yes\0"));
+}
+
+#[test]
+fn stdio_cannot_invent_rights_pseudo_descriptors_or_unknown_metadata() {
+    for case in 0..7 {
+        let mut objects = stdio_objects();
+        let mut metadata = stdio_metadata();
+        match case {
+            0 => objects[0].handle = 0,
+            1 => objects[1].reserved = 1,
+            2 => objects[0].rights &= !mnu_abi::HANDLE_RIGHT_TRANSFER,
+            3 => objects[1].rights &= !mnu_abi::HANDLE_RIGHT_WRITE,
+            4 => metadata[0] = 0,
+            5 => metadata[0] = p_metadata(mochios_posix_protocol::INHERITED_FD_KIND_STDIN, 0),
+            _ => metadata[0] = p_metadata(mochios_posix_protocol::INHERITED_FD_KIND_FILE, 2),
+        }
+        assert!(app_stdio::Stdio::new(&objects, metadata).is_err(), "{case}");
+    }
+    assert!(app_stdio::Stdio::new(&stdio_objects()[..2], stdio_metadata()).is_err());
+}
+fn p_metadata(kind: u8, flags: u32) -> u64 {
+    mochios_posix_protocol::encode_inherited_fd_metadata(
+        mochios_posix_protocol::InheritedFdMetadata {
+            kind,
+            open_flags: flags,
+            descriptor_flags: 0,
+        },
+    )
+    .unwrap()
+}
+
 // These tests exercise startup encoding only. The actual application launch
 // boundary, including package policy, is covered by the native IPC probe.
 mod resolver {

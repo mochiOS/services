@@ -13,7 +13,7 @@ fn invalid() -> Error {
 }
 
 /// Remote argv can provide environment values, but never source Handle numbers
-/// or authorization metadata. The sole inherited object is already attached,
+/// or authorization metadata. Inherited objects are explicit local references,
 /// authenticated and owned in this process's Handle table.
 pub(crate) fn metadata(
     path: &str,
@@ -52,25 +52,56 @@ fn metadata_impl<'a>(
         &app_image::Mechanisms<'a>,
     )>,
 ) -> Result<Vec<u8>, Error> {
+    let arguments = Arguments::legacy(path, items)?;
+    metadata_vectors(
+        path,
+        &arguments.arguments,
+        &arguments.environment,
+        endpoint,
+        random,
+        process,
+        mapped,
+        None,
+    )
+}
+
+/// Already separated argv/envp from the shared request. Arguments that happen
+/// to resemble the legacy metadata prefix remain ordinary argument bytes.
+pub(crate) fn metadata_for_vectors(
+    path: &str,
+    arguments: &[&[u8]],
+    environment: &[&[u8]],
+    endpoint: u32,
+    random: [u8; 16],
+    process: mochios_posix_client::process_image::Process<'_>,
+    stdio: &crate::app_stdio::Stdio,
+) -> Result<Vec<u8>, Error> {
+    metadata_vectors(
+        path,
+        arguments,
+        environment,
+        endpoint,
+        random,
+        process,
+        None,
+        Some(stdio),
+    )
+}
+
+fn metadata_vectors<'a>(
+    path: &str,
+    arguments: &[&[u8]],
+    environment: &[&[u8]],
+    endpoint: u32,
+    random: [u8; 16],
+    process: mochios_posix_client::process_image::Process<'_>,
+    mapped: Option<(
+        &mut mochios_posix_client::startup_metadata::Owner<app_image::Mechanisms<'a>>,
+        &app_image::Mechanisms<'a>,
+    )>,
+    stdio: Option<&crate::app_stdio::Stdio>,
+) -> Result<Vec<u8>, Error> {
     use mnu_abi::process_create::{self, HandleGrant};
-    let mut arguments = vec![path.as_bytes()];
-    let mut environment = Vec::new();
-    for item in items {
-        if item.as_bytes().contains(&0) {
-            return Err(invalid());
-        }
-        if let Some(entry) = item.strip_prefix(ENVIRONMENT_PREFIX) {
-            let (name, _) = entry.split_once('=').ok_or_else(invalid)?;
-            if name.is_empty() {
-                return Err(invalid());
-            }
-            environment.push(entry.as_bytes());
-        } else if item.starts_with("__MNU_EXEC_") {
-            return Err(invalid());
-        } else {
-            arguments.push(item.as_bytes());
-        }
-    }
     let mut startup = vec![0; process_create::MAX_REQUEST_BYTES];
     let length = if let Some((owner, mechanisms)) = mapped {
         let n = owner
@@ -112,19 +143,25 @@ fn metadata_impl<'a>(
     while !label.is_char_boundary(label_length) {
         label_length -= 1;
     }
+    let mut handles = vec![HandleGrant {
+        key: mochios_posix_protocol::CONTROL_HANDLE_KEY,
+        source: endpoint,
+        target: 0,
+        rights: mnu_abi::HANDLE_RIGHT_SEND
+            | mnu_abi::HANDLE_RIGHT_DUPLICATE
+            | mnu_abi::HANDLE_RIGHT_TRANSFER,
+    }];
+    let mut values = Vec::new();
+    if let Some(stdio) = stdio {
+        handles.extend(stdio.handles());
+        values.extend(stdio.values());
+    }
     let length = process_create::encode(
         path,
         &label[..label_length],
         &startup[..length],
-        &[HandleGrant {
-            key: mochios_posix_protocol::CONTROL_HANDLE_KEY,
-            source: endpoint,
-            target: 0,
-            rights: mnu_abi::HANDLE_RIGHT_SEND
-                | mnu_abi::HANDLE_RIGHT_DUPLICATE
-                | mnu_abi::HANDLE_RIGHT_TRANSFER,
-        }],
-        &[],
+        &handles,
+        &values,
         &mut result,
     )
     .map_err(|_| invalid())?;
@@ -139,18 +176,54 @@ impl Drop for Reference {
     }
 }
 
+pub(crate) struct Arguments<'a> {
+    pub path: &'a str,
+    pub arguments: Vec<&'a [u8]>,
+    pub environment: Vec<&'a [u8]>,
+}
+
+impl<'a> Arguments<'a> {
+    pub(crate) fn legacy(path: &'a str, items: &'a [String]) -> Result<Self, Error> {
+        let mut result = Self {
+            path,
+            arguments: vec![path.as_bytes()],
+            environment: Vec::new(),
+        };
+        for item in items {
+            if item.as_bytes().contains(&0) {
+                return Err(invalid());
+            }
+            if let Some(value) = item.strip_prefix(ENVIRONMENT_PREFIX) {
+                if value
+                    .split_once('=')
+                    .is_none_or(|(name, _)| name.is_empty())
+                {
+                    return Err(invalid());
+                }
+                result.environment.push(value.as_bytes());
+            } else if item.starts_with("__MNU_EXEC_") {
+                return Err(invalid());
+            } else {
+                result.arguments.push(item.as_bytes());
+            }
+        }
+        Ok(result)
+    }
+}
+
 pub(crate) fn launch(
     trusted_images: &crate::trusted_images::TrustedImages,
-    path: &str,
-    items: &[String],
+    arguments: &Arguments<'_>,
     endpoint: u32,
     sender: u64,
     expected_requester: u64,
     scope: ObjectHandleAttachment<u32>,
     verified: VerifiedManifest,
     capabilities: &[String],
+    stdio: Option<&crate::app_stdio::Stdio>,
     load_library: impl FnMut(&str) -> Result<VerifiedManifest, Error>,
 ) -> Result<u64, Error> {
+    let path = arguments.path;
     let mut random = [0; 16];
     if platform::syscall::call2(
         platform::syscall::SyscallNumber::RandomFill,
@@ -193,8 +266,9 @@ pub(crate) fn launch(
     let mut owner = Preparation::default();
     let prepared = if dynamic {
         let environment = |name: &str| {
-            items.iter().find_map(|item| {
-                item.strip_prefix(ENVIRONMENT_PREFIX)?
+            arguments.environment.iter().find_map(|value| {
+                let value = core::str::from_utf8(value).ok()?;
+                value
                     .strip_prefix(name)?
                     .strip_prefix('=')
                     .map(str::as_bytes)
@@ -222,9 +296,10 @@ pub(crate) fn launch(
         .unwrap_or(source.handle());
     let output = prepared.as_ref().map(|image| image.bytes).unwrap_or(&bytes);
     let mut metadata_owner = mochios_posix_client::startup_metadata::Owner::default();
-    let metadata = metadata_impl(
+    let metadata = metadata_vectors(
         path,
-        items,
+        &arguments.arguments,
+        &arguments.environment,
         endpoint,
         random,
         mochios_posix_client::process_image::Process {
@@ -235,12 +310,10 @@ pub(crate) fn launch(
                 .map(|image| image.lifecycle)
                 .unwrap_or(&[]),
             tls: prepared.as_ref().map(|image| image.tls).unwrap_or(&[]),
-            indirect: prepared
-                .as_ref()
-                .map(|image| image.indirect)
-                .unwrap_or(&[]),
+            indirect: prepared.as_ref().map(|image| image.indirect).unwrap_or(&[]),
         },
         Some((&mut metadata_owner, &mechanisms)),
+        stdio,
     )?;
     crate::resolver::authorize_spawn_image(
         0,

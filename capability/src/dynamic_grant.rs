@@ -21,19 +21,6 @@ pub(crate) fn is_trusted_workspace(
         .is_ok_and(|role| role == Some(crate::trusted_images::Role::Workspace))
 }
 
-/// Legacy scalar decisions carry no transaction or independent input evidence.
-/// Retire the synchronous exchange before enabling verified text frontends.
-pub(crate) fn prompt_shell_for_capability(
-    _shell_endpoint: u64,
-    _executable: &str,
-    _capability: &str,
-    _reason: &str,
-) -> Result<platform::capability::CapabilityDecision, mochi_user_syscall::SysError> {
-    Err(mochi_user_syscall::SysError::from_raw(
-        mochi_user_syscall::NativeError::Unsupported.into_raw() as i64,
-    ))
-}
-
 pub(crate) fn transfer_user_grant(
     requester_thread: u64,
     capability: &str,

@@ -134,6 +134,22 @@ pub(crate) fn serve_capability_requests(mut state: CapabilityServiceState) -> ! 
         } else {
             0
         };
+        #[cfg(mochios_verified_launch_probe_305)]
+        if opcode == u32::from_le_bytes(*b"MR05") {
+            let role = crate::consent_peer::capture(sender)
+                .and_then(|peer| state.trusted_images.role(&peer));
+            let status = if slice.len() == 4
+                && attached.count == 0
+                && matches!(role, Ok(Some(crate::trusted_images::Role::TextPrompt)))
+            {
+                0
+            } else {
+                mochi_user_syscall::EACCES
+            };
+            close_received_handles(&attached);
+            capability_reply(sender, status);
+            continue;
+        }
         if opcode == platform::capability::INSTALL_POSIX_ENDPOINT_OPCODE {
             let valid_attachment = attached.is_user_delivery()
                 && attached.count == 1
@@ -168,6 +184,46 @@ pub(crate) fn serve_capability_requests(mut state: CapabilityServiceState) -> ! 
                 );
             }
             capability_reply(sender, status);
+            continue;
+        }
+        if opcode == platform::capability::application_launch::OPCODE {
+            let result = (|| {
+                if !attached.is_user_delivery()
+                    || attached.count != 4
+                    || attached.handles[0].handle == 0
+                    || attached.handles[0].reserved != 0
+                    || attached.handles[0].rights
+                        != mochios_posix_protocol::read_scope::ATTACH_RIGHTS
+                {
+                    return Err(mochi_user_syscall::SysError::from_raw(
+                        mochi_user_syscall::EINVAL as i64,
+                    ));
+                }
+                let request =
+                    platform::capability::application_launch::decode(slice).map_err(|_| {
+                        mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64)
+                    })?;
+                let stdio =
+                    crate::app_stdio::Stdio::new(&attached.handles[1..4], request.stdio_metadata)?;
+                let endpoint = crate::persistent_grant::launch_endpoint()?;
+                let result = crate::app_spawn::spawn_application_with_stdio(
+                    &state.package_index,
+                    &state.app_prompt_policy,
+                    &state.trusted_images,
+                    sender,
+                    request,
+                    endpoint,
+                    mochios_posix_client::ObjectHandleAttachment {
+                        handle: attached.handles[0].handle,
+                        rights: attached.handles[0].rights,
+                    },
+                    &stdio,
+                );
+                let _ = platform::handle::close(endpoint);
+                result
+            })();
+            close_received_handles(&attached);
+            reply_spawn(sender, result);
             continue;
         }
         if opcode == SPAWN_APP_OPCODE {

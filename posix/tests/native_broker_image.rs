@@ -1,4 +1,5 @@
-//! Real legacy broker gate: trusted code, then same identity after image change.
+//! Diagnostic role gate: trusted code, then same identity after image change.
+//! Requires capability built with mochios_verified_launch_probe_305.
 #[cfg(not(target_os = "mochios"))]
 fn main() {
     eprintln!("broker-image: SKIP (requires mochiOS)");
@@ -39,9 +40,9 @@ mod native {
     fn gate() -> u64 {
         let service = p::process::find_by_name("capability.service").unwrap();
         let mut reply = [0; 8];
-        // An authenticated broker reaches parsing and gets EINVAL. An untrusted
-        // image is rejected with EACCES before parsing. This never requests a grant.
-        let request = p::capability::CAPABILITY_DECISION_OPCODE.to_le_bytes();
+        // Inspect the real role adapter without reviving the retired scalar
+        // approval protocol. This diagnostic operation never grants authority.
+        let request = u32::from_le_bytes(*b"MR05").to_le_bytes();
         let message = p::ipc::call(service, &request, &mut reply).unwrap();
         assert_eq!(message as u32, 8);
         u64::from_le_bytes(reply)
@@ -63,7 +64,7 @@ mod native {
             unsafe { _exit(0) }
         }
         assert_eq!(info.image_revision, 0);
-        assert_eq!(gate(), 22);
+        assert_eq!(gate(), 0);
         let client = Client::from_launch_context().unwrap();
         let mut bytes = std::fs::read("/system/bin/msh").unwrap();
         bytes.extend_from_slice(b"changed-broker-301");

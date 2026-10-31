@@ -4,9 +4,8 @@ use alloc::vec::Vec;
 
 use mochi_user_platform as platform;
 
-use crate::dynamic_grant::{is_trusted_prompt_broker, prompt_shell_for_capability};
 use crate::package_index::PackageIndex;
-use crate::persistent_grant::{append_persistent_grant, has_persistent_grant};
+use crate::persistent_grant::has_persistent_grant;
 use crate::policy::{AppPromptPolicy, needs_app_prompt};
 use crate::resolver::{CapabilityDenyReason, verified_manifest};
 
@@ -83,6 +82,81 @@ pub(crate) fn spawn_application_from_manifest(
         ));
     }
 
+    let mut spawn_items = Vec::new();
+    spawn_items.push(format!(
+        "{}MOCHI_EXECUTABLE_PATH={}",
+        ENVIRONMENT_PREFIX, entry_path
+    ));
+    spawn_items.push(format!(
+        "{}MOCHI_SHELL_ENDPOINT={}",
+        ENVIRONMENT_PREFIX, header.shell_endpoint
+    ));
+    spawn_items.push(format!(
+        "{}MOCHI_STDIO_ENDPOINT={}",
+        ENVIRONMENT_PREFIX, header.shell_endpoint
+    ));
+    spawn_items.push(format!(
+        "{}MOCHI_PROMPT_MODE={}",
+        ENVIRONMENT_PREFIX, "deny"
+    ));
+    spawn_items.extend(items[1..].iter().cloned());
+    let arguments = crate::native_app::Arguments::legacy(entry_path, &spawn_items)?;
+    spawn_authorized(
+        index,
+        policy,
+        trusted_images,
+        sender,
+        &arguments,
+        posix_endpoint,
+        scope,
+        None,
+    )
+}
+
+pub(crate) fn spawn_application_with_stdio(
+    index: &PackageIndex,
+    policy: &AppPromptPolicy,
+    trusted_images: &crate::trusted_images::TrustedImages,
+    sender: u64,
+    request: platform::capability::application_launch::Decoded<'_>,
+    posix_endpoint: platform::handle::Handle,
+    scope: mochios_posix_client::ObjectHandleAttachment<u32>,
+    stdio: &crate::app_stdio::Stdio,
+) -> Result<u64, mochi_user_syscall::SysError> {
+    let arguments = crate::native_app::Arguments {
+        path: request.path,
+        arguments: request.arguments.iter().map(str::as_bytes).collect(),
+        environment: request.environment.iter().map(str::as_bytes).collect(),
+    };
+    spawn_authorized(
+        index,
+        policy,
+        trusted_images,
+        sender,
+        &arguments,
+        posix_endpoint,
+        scope,
+        Some(stdio),
+    )
+}
+
+fn spawn_authorized(
+    index: &PackageIndex,
+    policy: &AppPromptPolicy,
+    trusted_images: &crate::trusted_images::TrustedImages,
+    sender: u64,
+    arguments: &crate::native_app::Arguments<'_>,
+    posix_endpoint: platform::handle::Handle,
+    scope: mochios_posix_client::ObjectHandleAttachment<u32>,
+    stdio: Option<&crate::app_stdio::Stdio>,
+) -> Result<u64, mochi_user_syscall::SysError> {
+    crate::persistent_grant::validate_posix_endpoint(posix_endpoint)?;
+    if index.duplicate || platform::capability::check_thread(sender, "process.spawn")? == 0 {
+        return Err(mochi_user_syscall::SysError::from_raw(
+            mochi_user_syscall::EACCES as i64,
+        ));
+    }
+    let entry_path = arguments.path;
     let manifest_record = index
         .by_binary
         .get(entry_path)
@@ -126,7 +200,6 @@ pub(crate) fn spawn_application_from_manifest(
     grant_context.developer_id_len = developer_id.len() as u16;
     grant_context.package_id[..package_id.len()].copy_from_slice(package_id);
     grant_context.developer_id[..developer_id.len()].copy_from_slice(developer_id);
-    let mut prompted = false;
     let mut user_allowed = Vec::new();
     for cap in &requested_caps {
         if platform::capability::capability_from_string(cap.as_str())
@@ -143,39 +216,11 @@ pub(crate) fn spawn_application_from_manifest(
             user_allowed.push(cap.clone());
             continue;
         }
-        prompted = true;
-        if header.interactive == 0 || header.shell_endpoint == 0 {
-            return Err(mochi_user_syscall::SysError::from_raw(
-                mochi_user_syscall::EACCES as i64,
-            ));
-        }
-        if !is_trusted_prompt_broker(trusted_images, header.shell_endpoint) {
-            return Err(mochi_user_syscall::SysError::from_raw(
-                mochi_user_syscall::EACCES as i64,
-            ));
-        }
-        let decision = prompt_shell_for_capability(
-            header.shell_endpoint,
-            entry_path,
-            cap,
-            "application launch",
-        )?;
-        match decision {
-            platform::capability::CapabilityDecision::AllowPersistently => {
-                append_persistent_grant(&grant_context, cap, None, false)?;
-            }
-            platform::capability::CapabilityDecision::AllowAllUserGrantable => {
-                append_persistent_grant(&grant_context, cap, None, true)?;
-            }
-            platform::capability::CapabilityDecision::AllowOnce
-            | platform::capability::CapabilityDecision::AllowForProcess => {}
-            platform::capability::CapabilityDecision::Deny => {
-                return Err(mochi_user_syscall::SysError::from_raw(
-                    mochi_user_syscall::EACCES as i64,
-                ));
-            }
-        }
-        user_allowed.push(cap.clone());
+        // The retired scalar prompt exchange cannot prove fresh user input.
+        // The asynchronous consent controller must own this continuation.
+        return Err(mochi_user_syscall::SysError::from_raw(
+            mochi_user_syscall::NativeError::Unsupported.into_raw() as i64,
+        ));
     }
     // A caller holding process.spawn delegates launch policy to this service;
     // it is not required to possess every capability of the application it
@@ -200,45 +245,16 @@ pub(crate) fn spawn_application_from_manifest(
         return Err(mochi_user_syscall::SysError::from_raw(errno as i64));
     }
     let caps = capability_decision.effective;
-    if prompted {
-        platform::logln!(
-            "capability.service: interactive app launch approved path={}",
-            entry_path
-        );
-    }
-    let mut spawn_items = Vec::new();
-    spawn_items.push(format!(
-        "{}MOCHI_EXECUTABLE_PATH={}",
-        ENVIRONMENT_PREFIX, entry_path
-    ));
-    spawn_items.push(format!(
-        "{}MOCHI_SHELL_ENDPOINT={}",
-        ENVIRONMENT_PREFIX, header.shell_endpoint
-    ));
-    spawn_items.push(format!(
-        "{}MOCHI_STDIO_ENDPOINT={}",
-        ENVIRONMENT_PREFIX, header.shell_endpoint
-    ));
-    spawn_items.push(format!(
-        "{}MOCHI_PROMPT_MODE={}",
-        ENVIRONMENT_PREFIX,
-        if header.interactive == 0 {
-            "deny"
-        } else {
-            "interactive"
-        }
-    ));
-    spawn_items.extend(items[1..].iter().cloned());
     crate::native_app::launch(
         trusted_images,
-        entry_path,
-        &spawn_items,
+        arguments,
         posix_endpoint,
         sender,
         requester_context.process_id,
         scope,
         verified,
         &caps,
+        stdio,
         |package_id| {
             let record = index.by_package.get(package_id).ok_or_else(|| {
                 mochi_user_syscall::SysError::from_raw(mochi_user_syscall::ENOENT as i64)
