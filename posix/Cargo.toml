@@ -50,6 +50,11 @@ path = "tests/native_terminal_input.rs"
 harness = false
 
 [[test]]
+name = "native_spawn_notifications"
+path = "tests/native_spawn_notifications.rs"
+harness = false
+
+[[test]]
 name = "native_verified_application"
 path = "tests/native_verified_application.rs"
 harness = false

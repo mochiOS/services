@@ -44,6 +44,12 @@ mod syscall{{
  }}
 }}
 fn syscall_errno(result:Result<u64,i32>)->Result<u64,i32>{{result}}
+// The stream transport is mocked here; its native notification behavior is
+// exercised against the production module in startup_stream_runtime.rs.
+mod startup_stream{{pub fn read(handle:u32,packet:&mut [u8])->Result<usize,i32>{{
+ super::syscall_errno(super::syscall::raw_syscall3(super::syscall::SyscallNumber::HandleRead,
+  u64::from(handle),packet.as_mut_ptr() as u64,packet.len() as u64)).map(|count|count as usize)
+}}}}
 #[path={:?}]mod callback_resources;
 #[path={:?}]mod io_resources;
 #[path={:?}]mod fork_policy;
