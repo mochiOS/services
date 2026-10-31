@@ -6,6 +6,8 @@ mod bootstrap;
 mod driver_controller;
 #[path="../../../service-manager/src/input_endpoint.rs"]
 mod input_endpoint;
+#[path="../../../service-manager/src/consent_input.rs"]
+mod consent_input;
 #[path="../../../service-manager/src/launch_arguments.rs"]
 mod launch_arguments;
 #[path="../../../service-manager/src/keychain_control.rs"]

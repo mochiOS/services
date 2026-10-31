@@ -14,6 +14,9 @@ use crate::spawn_support::errno;
 #[cfg(mochios_input_authority_probe_302)]
 #[path = "../../posix/tests/native_input_transport_manager.rs"]
 mod input_authority_probe;
+#[cfg(mochios_consent_input_probe_306)]
+#[path = "../../posix/tests/support/consent_input_manager_306.rs"]
+mod consent_input_probe;
 
 struct Runtime {
     logger_endpoint: u64,
@@ -810,7 +813,10 @@ impl BootstrapOperations for Runtime {
         let Some(process) = self.session_processes.get(&process_id) else {
             return false;
         };
-        self.wait_ready(ReadyService::Binder, process.watch_target())
+        let ready=self.wait_ready(ReadyService::Binder, process.watch_target());
+        #[cfg(mochios_consent_input_probe_306)]
+        if ready {consent_input_probe::run(self.raw_input.as_ref().expect("raw input ready").0);}
+        ready
     }
 
     fn wait_filesystem_ready(&mut self, process_id: u64) -> bool {
@@ -893,6 +899,10 @@ impl BootstrapOperations for Runtime {
         }
         match crate::input_endpoint::acquire(process.process_id()) {
             Ok(endpoint) => {
+                if let Err(error)=crate::consent_input::install() {
+                    platform::logln!("service-manager.service: consent input handoff failed: {error:?}");
+                    return false;
+                }
                 #[cfg(mochios_input_authority_probe_302)]
                 input_authority_probe::run(endpoint.0, self.posix_endpoint.unwrap());
                 self.raw_input = Some(endpoint);
