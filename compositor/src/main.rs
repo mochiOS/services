@@ -1,3 +1,6 @@
+// Render data only; no ViewKit runtime dependency is introduced.
+#[path = "../../../libraries/viewkit/src/theme/window_elevation.rs"]
+mod window_elevation;
 extern crate alloc;
 
 mod backdrop;

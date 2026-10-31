@@ -12,7 +12,7 @@ use crate::surface::{surface_extent, surface_index_by_handle};
 
 pub(crate) const WINDOW_CORNER_RADIUS: u32 = 14;
 pub(crate) const WINDOW_SHADOW_MARGIN: u32 = 20;
-pub(crate) const ACTIVE_WINDOW_BORDER_ALPHA: u8 = 31;
+pub(crate) const ACTIVE_WINDOW_BORDER_ALPHA: u8 = crate::window_elevation::BORDER_ALPHA;
 pub(crate) const MAX_WINDOW_TITLE_BYTES: usize = 64;
 
 #[derive(Clone, Copy, Default, PartialEq, Eq)]

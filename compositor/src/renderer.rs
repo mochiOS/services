@@ -628,35 +628,9 @@ pub(crate) fn composite_and_present(
     0
 }
 
-#[derive(Clone, Copy)]
-struct WindowShadow {
-    alpha: u8,
-    offset_y: i32,
-    blur_radius: u32,
-    spread: u32,
-}
-
-const INACTIVE_WINDOW_SHADOW: [WindowShadow; 1] = [WindowShadow {
-    alpha: 8,
-    offset_y: 2,
-    blur_radius: 5,
-    spread: 1,
-}];
-
-const ACTIVE_WINDOW_SHADOW: [WindowShadow; 2] = [
-    WindowShadow {
-        alpha: 20,
-        offset_y: 2,
-        blur_radius: 5,
-        spread: 0,
-    },
-    WindowShadow {
-        alpha: 28,
-        offset_y: 5,
-        blur_radius: 14,
-        spread: 0,
-    },
-];
+type WindowShadow = crate::window_elevation::Layer;
+const INACTIVE_WINDOW_SHADOW: [WindowShadow; 1] = crate::window_elevation::INACTIVE;
+const ACTIVE_WINDOW_SHADOW: [WindowShadow; 2] = crate::window_elevation::ACTIVE;
 
 fn draw_window_shadow(
     frame: &mut [u32],
@@ -942,6 +916,16 @@ fn blend_premultiplied_argb_over_xrgb(dst: u32, src: u32) -> u32 {
 #[cfg(test)]
 mod continuous_corner_tests {
     use super::*;
+
+    #[test]
+    fn shared_window_elevation_stays_within_existing_damage_bounds() {
+        let margin=crate::window::WINDOW_SHADOW_MARGIN;
+        for layer in ACTIVE_WINDOW_SHADOW.iter().chain(INACTIVE_WINDOW_SHADOW.iter()) {
+            assert!(layer.blur_radius + layer.spread + layer.offset_y.unsigned_abs() <= margin);
+        }
+        assert!(ACTIVE_WINDOW_SHADOW.iter().map(|layer| u32::from(layer.alpha)).sum::<u32>()
+            > INACTIVE_WINDOW_SHADOW.iter().map(|layer| u32::from(layer.alpha)).sum::<u32>());
+    }
     #[test]
     fn maximized_cpu_surface_coverage_fills_the_corner_pixel() {
         let mut window = Window::empty();
