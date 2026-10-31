@@ -1,4 +1,5 @@
 //! Exercise the actual driver, including failed child tools and atomic publication.
+use mochios_file_publication::PrivateDirectory;
 use mochios_linker_driver::{Options, run};
 use std::os::unix::{
     ffi::{OsStrExt, OsStringExt},
@@ -9,22 +10,20 @@ use std::{
     fs,
     path::{Path, PathBuf},
     process::Command,
-    sync::atomic::{AtomicU64, Ordering},
 };
 
-static NEXT: AtomicU64 = AtomicU64::new(0);
 struct Fixture {
     root: PathBuf,
+    _directory: PrivateDirectory,
 }
 impl Fixture {
     fn new() -> Self {
-        let root = std::env::temp_dir().join(format!(
-            "mochios-linker-test-{}-{}",
-            std::process::id(),
-            NEXT.fetch_add(1, Ordering::Relaxed)
-        ));
-        fs::create_dir(&root).unwrap();
-        let fixture = Self { root };
+        let directory =
+            PrivateDirectory::new_in(&std::env::temp_dir(), "mochios-linker-test").unwrap();
+        let fixture = Self {
+            root: directory.path().to_owned(),
+            _directory: directory,
+        };
         for directory in ["SDK with spaces/lib", "SDK with spaces/sysroot/lib"] {
             fs::create_dir_all(fixture.root.join(directory)).unwrap();
         }
@@ -105,11 +104,6 @@ impl Fixture {
                 .as_bytes()
                 .starts_with(b".mochios-ld-")
         }));
-    }
-}
-impl Drop for Fixture {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.root);
     }
 }
 fn quote(path: &Path) -> String {

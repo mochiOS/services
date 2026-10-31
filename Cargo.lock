@@ -1713,6 +1713,10 @@ version = "0.1.0"
 source = "git+https://github.com/mochiOS/syscalls#38b10ca1d8b95d8ad638e24a2f83adae6aa17034"
 
 [[package]]
+name = "mochios-file-publication"
+version = "0.1.0"
+
+[[package]]
 name = "mochios-filesystem-protocol"
 version = "0.1.0"
 
@@ -1740,6 +1744,7 @@ dependencies = [
 name = "mochios-linker-driver"
 version = "0.1.0"
 dependencies = [
+ "mochios-file-publication",
  "toml 0.8.23",
 ]
 
@@ -1775,6 +1780,7 @@ version = "0.1.0"
 name = "mochios-posix-client"
 version = "0.1.0"
 dependencies = [
+ "getrandom 0.2.17",
  "mnu-abi",
  "mochi-user-platform",
  "mochi-user-syscall",
@@ -2589,6 +2595,7 @@ dependencies = [
  "mochi-user-syscall",
  "mochios-capability-protocol",
  "mochios-certificate-database 0.1.0",
+ "mochios-file-publication",
  "mochios-filesystem-protocol",
  "mochios-linker-driver",
  "mochios-linux-gui-protocol",

@@ -24,6 +24,48 @@ struct Timespec {
     tv_nsec: CLong,
 }
 
+#[repr(C)]
+struct Timeval {
+    tv_sec: CLong,
+    tv_usec: CLong,
+}
+
+#[test]
+fn timeval_conversion_preserves_signed_seconds_and_has_no_sentinel_values() {
+    assert_eq!(input::read_timeval(std::ptr::null()), Ok(Update::now()));
+    let values = bytes((-1, 123_456), (2_147_483_648, 999_999));
+    assert_eq!(
+        input::read_timeval(values.as_ptr().cast()),
+        Ok(Update {
+            access: Change::Set {
+                seconds: -1,
+                nanoseconds: 123_456_000
+            },
+            modification: Change::Set {
+                seconds: 2_147_483_648,
+                nanoseconds: 999_999_000
+            },
+        })
+    );
+    for micros in [-2, -1, 1_000_000, i64::MAX] {
+        for values in [bytes((0, micros), (0, 0)), bytes((0, 0), (0, micros))] {
+            assert_eq!(input::read_timeval(values.as_ptr().cast()), Err(EINVAL));
+        }
+    }
+}
+
+#[test]
+fn timeval_snapshot_rejects_faults_in_either_array_element() {
+    for address in [1, usize::MAX, usize::MAX - 16] {
+        assert_eq!(input::read_timeval(address as *const Timeval), Err(EFAULT));
+    }
+    let values = bytes((0, 0), (0, 0));
+    let second = values.as_ptr() as usize + 16;
+    user_copy_native::DENIED.with_borrow_mut(|denied| *denied = Some(second..second + 16));
+    assert_eq!(input::read_timeval(values.as_ptr().cast()), Err(EFAULT));
+    user_copy_native::DENIED.with_borrow_mut(|denied| *denied = None);
+}
+
 fn bytes(first: (i64, i64), second: (i64, i64)) -> [u8; 32] {
     let mut bytes = [0; 32];
     for (field, value) in bytes
