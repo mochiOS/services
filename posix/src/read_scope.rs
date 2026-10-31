@@ -297,7 +297,7 @@ impl<H: Copy> Registry<H> {
                 {
                     return Err(protocol::STATUS_EAGAIN);
                 }
-                if self.next_id > i64::MAX as u64 {
+                if self.next_id >= crate::process_domain::ID_BASE {
                     return Err(STATUS_EOVERFLOW);
                 }
                 self.entries.try_reserve(1).map_err(|_| -12)?;

@@ -249,6 +249,7 @@ fn main() {
     let mut request_bytes = vec![0u8; protocol::MAX_MESSAGE_LEN];
     let mut response_bytes = vec![0u8; protocol::MAX_MESSAGE_LEN];
     let mut read_scopes = posix_service::read_scope::Registry::default();
+    let mut process_domains = posix_service::process_domain::Registry::default();
     loop {
         let mut service = service_state.lock().unwrap();
         let mut clock_failed = false;
@@ -453,10 +454,19 @@ fn main() {
         {
             // Only native final-reference delivery can retire a scope. A
             // regular IPC sender cannot forge a release by guessing its ID.
-            let result = read_scopes.release_native(
-                bytes, received_handles.delivery_flags, received_handles.count as usize,
-                &mut filesystem,
-            );
+            let domain = mnu_abi::provider::RequestHeader::decode(bytes).is_ok_and(|(header, _)| {
+                header.object_id >= posix_service::process_domain::ID_BASE
+            });
+            let result = if domain {
+                process_domains.release_native(
+                    bytes, received_handles.delivery_flags, received_handles.count as usize,
+                )
+            } else {
+                read_scopes.release_native(
+                    bytes, received_handles.delivery_flags, received_handles.count as usize,
+                    &mut filesystem,
+                )
+            };
             for attachment in received_handles.handles.iter().take(received_handles.count as usize) {
                 let _ = platform::handle::close(attachment.handle);
             }
@@ -1290,6 +1300,89 @@ fn main() {
                 Some(posix_service::open_request::finish(
                     opened_pty.unwrap(), validation, &mut filesystem,
                 ))
+            }
+            (Some(peer), Some((header, payload)), true)
+                if header.opcode == protocol::process_domain::OP_CREATE =>
+            {
+                let result = (|| {
+                    if header.flags != 0 || header.status != 0 || !payload.is_empty() {
+                        return Err(posix_service::STATUS_EINVAL);
+                    }
+                    let roots = attachments.iter().copied()
+                        .map(posix_service::process_domain_native::authenticate)
+                        .collect::<Result<Vec<_>, _>>()?;
+                    process_domains.create(
+                        &mut service, peer, &roots,
+                        |left, right| platform::handle::same_object(left, right)
+                            .map_err(|error| protocol::status::normalize_failure(error.raw())),
+                        |id| platform::handle::create_provider_object(
+                            endpoint_handle, id, protocol::process_domain::TOKEN_RIGHTS,
+                        ).map_err(|error| protocol::status::normalize_failure(error.raw())),
+                    )
+                })();
+                Some(match result {
+                    Ok(object) => posix_service::ObjectResponse {
+                        response: success_response(header.request_id), handles: vec![object],
+                    },
+                    Err(status) => posix_service::ObjectResponse {
+                        response: status_response(header.request_id, status), handles: Vec::new(),
+                    },
+                })
+            }
+            (Some(peer), Some((header, payload)), true)
+                if header.opcode == protocol::process_domain::OP_CONTAINS =>
+            {
+                let result = (|| {
+                    if header.flags != 0 || header.status != 0 || !payload.is_empty()
+                        || attachments.len() != 2
+                        || attachments[0].rights != protocol::process_domain::ATTACH_RIGHTS
+                    {
+                        return Err(posix_service::STATUS_EINVAL);
+                    }
+                    let id = platform::handle::identify_provider_object(attachments[0].handle)
+                        .map_err(|error| protocol::status::normalize_failure(error.raw()))?;
+                    let process = posix_service::process_domain_native::authenticate(attachments[1])?;
+                    process_domains.contains(
+                        &service, peer, id, process,
+                        |left, right| platform::handle::same_object(left, right)
+                            .map_err(|error| protocol::status::normalize_failure(error.raw())),
+                    )
+                })();
+                let response = match result {
+                    Ok(member) => {
+                        let mut response = success_response(header.request_id);
+                        response.payload = vec![u8::from(member)];
+                        response.header.payload_len = 1;
+                        response
+                    }
+                    Err(status) => status_response(header.request_id, status),
+                };
+                Some(posix_service::ObjectResponse { response, handles: Vec::new() })
+            }
+            (Some(peer), Some((header, payload)), true)
+                if header.opcode == protocol::process_domain::OP_SPAWN =>
+            {
+                let status = (|| {
+                    if header.flags != 0 || header.status != 0 || attachments.len() != 2
+                        || attachments[0].rights != protocol::process_domain::ATTACH_RIGHTS
+                    { return Err(posix_service::STATUS_EINVAL); }
+                    let id = platform::handle::identify_provider_object(attachments[0].handle)
+                        .map_err(|error| protocol::status::normalize_failure(error.raw()))?;
+                    let status = platform::process::handle_status(attachments[1].handle)
+                        .map_err(|error| process_control::lifecycle_failure(error.raw()))?;
+                    let child = posix_service::validate_fork_child(attachments[1], status)?;
+                    let mut groups = [0; protocol::MAX_SUPPLEMENTARY_GROUPS];
+                    let (uid, gid, count) = protocol::decode_spawn_credentials(payload, &mut groups)
+                        .map_err(|_| posix_service::STATUS_EINVAL)?;
+                    process_domains.adopt_spawned_child(
+                        &mut service, peer, id, child, uid, gid, &groups[..count], &mut filesystem,
+                    )
+                })();
+                if status.is_ok() { retained_handle = Some(attachments[1].handle); }
+                Some(posix_service::ObjectResponse {
+                    response: status_response(header.request_id, status.err().unwrap_or(0)),
+                    handles: Vec::new(),
+                })
             }
             (Some(peer), Some((header, payload)), true)
                 if header.opcode == protocol::OP_PROCESS_SESSION_INFO

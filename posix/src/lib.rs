@@ -58,6 +58,9 @@ pub mod mutation_admission;
 mod open_flags;
 pub mod open_request;
 pub mod read_scope;
+pub mod process_domain;
+#[cfg(target_os = "mochios")]
+pub mod process_domain_native;
 mod path_request;
 pub mod path_query;
 pub mod path_mutation;
@@ -901,6 +904,7 @@ pub struct PosixService<H: Copy = u32> {
     sessions: BTreeMap<u64, Session>,
     directories: BTreeMap<u64, SessionDirectories<H>>,
     processes: BTreeMap<u64, H>,
+    process_domains: BTreeMap<u64, process_domain::Membership>,
     parents: BTreeMap<u64, u64>,
     children: BTreeMap<u64, BTreeSet<u64>>,
     launch_creators: BTreeMap<u64, u64>,
@@ -951,6 +955,7 @@ impl PosixService<u32> {
             sessions: BTreeMap::new(),
             directories: BTreeMap::new(),
             processes: BTreeMap::new(),
+            process_domains: BTreeMap::new(),
             parents: BTreeMap::new(),
             children: BTreeMap::new(),
             launch_creators: BTreeMap::new(),
@@ -2444,6 +2449,7 @@ impl<H: Copy> PosixService<H> {
             }
         }
         self.parents.remove(&child_id);
+        self.process_domains.remove(&child_id);
         self.launch_creators.remove(&child_id);
         self.process_groups.remove(&child_id);
         let session_id = self.session_ids.remove(&child_id);
@@ -4004,6 +4010,9 @@ impl<H: Copy> PosixService<H> {
             | protocol::OP_TIMER_CREATE_PROCESS_CPU
             | protocol::OP_PROCESS_SPAWNED
             | protocol::OP_PROCESS_SESSION_INFO
+            | protocol::process_domain::OP_CREATE
+            | protocol::process_domain::OP_CONTAINS
+            | protocol::process_domain::OP_SPAWN
             | protocol::OP_PROCESS_LAUNCHED
             | protocol::OP_PROCESS_LAUNCH_ABORT
             | protocol::OP_PROCESS_TREE_TERMINATE

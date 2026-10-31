@@ -249,9 +249,13 @@ impl<H: Copy> PosixService<H> {
         {
             return Err(protocol::STATUS_ESRCH);
         }
+        let domains = process_domain::inherit(self.process_domains.get(&peer.process_id))?;
         let state = self.prepared_forks.swap_remove(index).1;
         let child = process.process_id;
         self.processes.insert(child, process.handle);
+        if !domains.is_empty() {
+            self.process_domains.insert(child, domains);
+        }
         self.sessions.insert(
             child,
             Session {
