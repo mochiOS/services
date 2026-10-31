@@ -66,7 +66,7 @@ mod platform {
         }
     }
 }
-fn install_posix_endpoint_at(_:u64,_:u32,_:u32)->Result<(),mochi_user_syscall::SysError>{
+fn install_posix_endpoint_at(_:u64,_:u32,_:u32,_:u64)->Result<(),mochi_user_syscall::SysError>{
     CALLS.set(CALLS.get()+1);
     INSTALL.get().map_err(mochi_user_syscall::SysError)
 }
@@ -80,7 +80,7 @@ use crate::{platform,mochi_user_syscall,install_posix_endpoint_at};
         "fn install_posix_endpoint_at(",
     ));
     program.push_str(r#"
-pub fn invoke()->Result<(),mochi_user_syscall::SysError>{install_posix_endpoint_for("package.service",1,8)}
+pub fn invoke()->Result<(),mochi_user_syscall::SysError>{install_posix_endpoint_for("package.service",1,8,4)}
 }
 fn main(){
     assert_eq!(implementation::invoke(),Ok(()));

@@ -43,9 +43,11 @@ fn install_posix_endpoint_for(
     service_name: &str,
     opcode: u32,
     endpoint: platform::handle::Handle,
+    endpoint_rights: u64,
 ) -> Result<(), mochi_user_syscall::SysError> {
-    let result = platform::process::find_by_name(service_name)
-        .and_then(|destination| install_posix_endpoint_at(destination, opcode, endpoint));
+    let result = platform::process::find_by_name(service_name).and_then(|destination| {
+        install_posix_endpoint_at(destination, opcode, endpoint, endpoint_rights)
+    });
     if let Err(error) = result {
         let _ = platform::logger::write_status_fmt(format_args!(
             "service-manager.service: POSIX endpoint handoff to {service_name} failed status={}\n",
@@ -59,6 +61,7 @@ fn install_posix_endpoint_at(
     destination: u64,
     opcode: u32,
     endpoint: platform::handle::Handle,
+    endpoint_rights: u64,
 ) -> Result<(), mochi_user_syscall::SysError> {
     if destination == 0 {
         return Err(sys_error(mochi_user_syscall::ENOENT));
@@ -98,7 +101,7 @@ fn install_posix_endpoint_at(
     let mut handles = platform::ipc::IpcObjectHandles::default();
     handles.count = 1;
     handles.handles[0].handle = endpoint;
-    handles.handles[0].rights = platform::handle::HANDLE_RIGHT_SEND;
+    handles.handles[0].rights = endpoint_rights;
     let message =
         platform::ipc::call_object_handles(destination, &request, &mut reply, &mut handles)?;
     if handles.count != 0 || (message & 0xffff_ffff) as usize != reply.len() {
@@ -119,21 +122,27 @@ pub(crate) fn install_early_posix_endpoints(
         CAPABILITY_SERVICE_NAME,
         platform::capability::INSTALL_POSIX_ENDPOINT_OPCODE,
         endpoint,
+        platform::handle::HANDLE_RIGHT_SEND
+            | platform::handle::HANDLE_RIGHT_DUPLICATE
+            | platform::handle::HANDLE_RIGHT_TRANSFER,
     )?;
     install_posix_endpoint_for(
         PACKAGE_SERVICE_NAME,
         mochios_package_protocol::INSTALL_POSIX_ENDPOINT_OPCODE,
         endpoint,
+        platform::handle::HANDLE_RIGHT_SEND,
     )?;
     install_posix_endpoint_for(
         SIGNATURE_SERVICE_NAME,
         mochios_signature_protocol::INSTALL_POSIX_ENDPOINT_OPCODE,
         endpoint,
+        platform::handle::HANDLE_RIGHT_SEND,
     )?;
     install_posix_endpoint_at(
         logger_endpoint,
         platform::logger::INSTALL_POSIX_ENDPOINT_OPCODE,
         endpoint,
+        platform::handle::HANDLE_RIGHT_SEND,
     )
 }
 
