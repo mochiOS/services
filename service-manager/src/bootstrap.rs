@@ -20,6 +20,9 @@ mod consent_input_probe;
 #[cfg(mochios_presentation_probe_307)]
 #[path = "../../posix/tests/support/presentation_manager_307.rs"]
 mod presentation_probe;
+#[cfg(mochios_process_domain_probe_308)]
+#[path = "../../posix/tests/support/process_domain_manager_308.rs"]
+mod process_domain_probe;
 
 struct Runtime {
     logger_endpoint: u64,
@@ -34,6 +37,7 @@ struct Runtime {
     posix_endpoint: Option<platform::handle::Handle>,
     raw_input: Option<crate::input_endpoint::Endpoint>,
     session_processes: alloc::collections::BTreeMap<u64, NativeProcess>,
+    consent_domain: Option<crate::consent_session::LaunchDomain>,
     unpublished_session_roots: alloc::vec::Vec<u64>,
     failed_session_cleanup: Option<PendingSessionCleanup>,
 }
@@ -54,6 +58,16 @@ struct PendingLogout {
 }
 
 impl Runtime {
+    fn prepare_consent_session(
+        &self,
+        epoch: &mut crate::consent_session::Epoch,
+        session: ActiveSession,
+    ) -> Result<(), mochi_user_syscall::SysError> {
+        let domain = self.consent_domain.as_ref()
+            .filter(|domain| domain.session() == session.id)
+            .ok_or_else(|| mochi_user_syscall::SysError::from_raw(-3))?;
+        epoch.prepare(session.id, domain)
+    }
     fn login_next_session(&mut self, previous: ActiveSession) -> Option<ActiveSession> {
         if self.failed_session_cleanup.is_some()
             || !self.unpublished_session_roots.is_empty()
@@ -167,6 +181,11 @@ impl Runtime {
         session_id: u64,
         target: Option<platform::service_ready::Target>,
     ) -> Result<u64, mochi_user_syscall::SysError> {
+        if self.consent_domain.as_ref().is_none_or(|domain| domain.session() != session_id) {
+            self.consent_domain = Some(crate::consent_session::LaunchDomain::create(
+                session_id, self.posix_endpoint.ok_or_else(|| mochi_user_syscall::SysError::from_raw(-3))?,
+            )?);
+        }
         let process = service_launcher::spawn_user_session(
             service,
             self.logger_endpoint,
@@ -174,6 +193,7 @@ impl Runtime {
             session_id,
             target,
             self.posix_endpoint,
+            self.consent_domain.as_ref().ok_or_else(|| mochi_user_syscall::SysError::from_raw(-3))?.attachment(),
         )?;
         let id = process.process_id();
         self.session_processes.insert(id, process);
@@ -195,6 +215,7 @@ impl Runtime {
             posix_endpoint: None,
             raw_input: None,
             session_processes: alloc::collections::BTreeMap::new(),
+            consent_domain: None,
             unpublished_session_roots: alloc::vec::Vec::new(),
             failed_session_cleanup: None,
         })
@@ -1192,8 +1213,22 @@ fn resident(
     let mut request_bytes = [0u8; 1024];
     let mut consent_session = crate::consent_session::Epoch::default();
     let initial_context = active_session.map_or((1, false), |session| (session.id, true));
-    if let Err(error) = consent_session.native(initial_context.0, initial_context.1) {
+    let initial_publication = (|| {
+        if let Some(session) = active_session {
+            runtime.as_ref().ok_or_else(|| mochi_user_syscall::SysError::from_raw(-3))?
+                .prepare_consent_session(&mut consent_session, session)?;
+        }
+        consent_session.native(initial_context.0, initial_context.1)
+    })();
+    if let Err(error) = initial_publication {
         platform::logln!("service-manager.service: consent session publication failed: {error:?}");
+    }
+    #[cfg(mochios_process_domain_probe_308)]
+    if let (Some(runtime), Some(session)) = (runtime.as_ref(), active_session) {
+        process_domain_probe::run(
+            runtime.consent_domain.as_ref().unwrap(),
+            runtime.session_processes.get(&session.workspace_pid).unwrap(),
+        );
     }
     #[cfg(mochios_presentation_probe_307)]
     if initial_context.1 {
@@ -1240,7 +1275,9 @@ fn resident(
                     // No authentication or new image may precede this gate.
                     active_session = runtime.login_next_session(previous);
                     if let Some(session) = active_session {
-                        if let Err(error) = consent_session.native(session.id, true) {
+                        let publication = runtime.prepare_consent_session(&mut consent_session, session)
+                            .and_then(|_| consent_session.native(session.id, true));
+                        if let Err(error) = publication {
                             platform::logln!("service-manager.service: consent session publication failed: {error:?}");
                         }
                     }

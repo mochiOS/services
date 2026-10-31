@@ -174,9 +174,28 @@ pub(crate) fn serve_capability_requests(mut state: CapabilityServiceState) -> ! 
             }
             continue;
         }
+        #[cfg(mochios_process_domain_probe_308)]
+        if opcode == u32::from_le_bytes(*b"DM08") {
+            let result = (|| {
+                if slice.len() != 4 || attached.count != 0 || !attached.is_user_delivery() {
+                    return Err(mochi_user_syscall::SysError::from_raw(-22));
+                }
+                let requester = crate::consent_peer::capture(sender)?;
+                let channel = display_authority.as_ref()
+                    .ok_or_else(|| mochi_user_syscall::SysError::from_raw(-13))?;
+                desktop_sessions.authenticate_member(channel, &requester)?;
+                if state.trusted_images.role(&requester)? != Some(crate::trusted_images::Role::TextPrompt) {
+                    return Err(mochi_user_syscall::SysError::from_raw(-13));
+                }
+                Ok(())
+            })();
+            close_received_handles(&attached);
+            capability_reply(sender, result.err().map_or(0, error_status));
+            continue;
+        }
         if opcode == platform::capability::presentation::SESSION_OPCODE {
             let result = (|| {
-                if attached.count != 0 || !attached.is_user_delivery() {
+                if !attached.is_user_delivery() {
                     return Err(mochi_user_syscall::SysError::from_raw(
                         mochi_user_syscall::EACCES as i64,
                     ));
@@ -185,12 +204,26 @@ pub(crate) fn serve_capability_requests(mut state: CapabilityServiceState) -> ! 
                     platform::capability::presentation::decode_session(slice).map_err(|_| {
                         mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64)
                     })?;
+                let domain = if context.active {
+                    if attached.count != 1 || attached.handles[0].handle == 0
+                        || attached.handles[0].reserved != 0
+                        || attached.handles[0].rights != platform::handle::HANDLE_RIGHT_TRANSFER
+                    { return Err(mochi_user_syscall::SysError::from_raw(-22)); }
+                    let domain = crate::consent_presentation::DomainReference(attached.handles[0].handle);
+                    attached.handles[0] = Default::default();
+                    attached.count = 0;
+                    Some(domain)
+                } else {
+                    if attached.count != 0 { return Err(mochi_user_syscall::SysError::from_raw(-22)); }
+                    None
+                };
                 // Revoke pending observations before any remote publication.
                 // No renderer reply can keep a previous session alive.
                 let generation = state.authorization_generation;
                 desktop_sessions.publish(
                     sender,
                     context,
+                    domain,
                     &state.trusted_images,
                     &mut display_authority,
                     || {

@@ -325,6 +325,7 @@ pub(crate) fn spawn_user_session(
     session_id: u64,
     ready_target: Option<platform::service_ready::Target>,
     posix_endpoint: Option<platform::handle::Handle>,
+    domain: mochios_posix_client::ObjectHandleAttachment<u32>,
 ) -> Result<NativeProcess, mochi_user_syscall::SysError> {
     let ready_target = ready_target.map(|target| ReadyTarget {
         endpoint: target.endpoint,
@@ -349,7 +350,7 @@ pub(crate) fn spawn_user_session(
     let endpoint = posix_endpoint
         .filter(|endpoint| *endpoint != 0)
         .ok_or_else(|| sys_error(mochi_user_syscall::EINVAL))?;
-    spawn_native_session(fixed_service_spec(service), &arguments, identity, endpoint)
+    spawn_native_session(fixed_service_spec(service), &arguments, identity, endpoint, domain)
 }
 
 fn spawn_native_session(
@@ -357,6 +358,7 @@ fn spawn_native_session(
     arguments: &[String],
     identity: platform::service_ready::SessionIdentity,
     endpoint: platform::handle::Handle,
+    domain: mochios_posix_client::ObjectHandleAttachment<u32>,
 ) -> Result<NativeProcess, mochi_user_syscall::SysError> {
     if has_failed_launch_cleanup() {
         return Err(sys_error(mochi_user_syscall::EAGAIN));
@@ -396,7 +398,8 @@ fn spawn_native_session(
             &metadata,
             |handle| {
                 client
-                    .register_spawned_child(
+                    .register_spawned_child_in_domain(
+                        domain,
                         ObjectHandleAttachment {
                             handle,
                             rights: mnu_abi::HANDLE_RIGHT_WAIT | mnu_abi::HANDLE_RIGHT_SIGNAL,

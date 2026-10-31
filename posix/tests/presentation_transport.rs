@@ -17,6 +17,7 @@ struct State {
 thread_local! {static STATE:RefCell<State>=RefCell::new(State::default());}
 mod handle {
     pub const HANDLE_RIGHT_WAIT: u64 = mnu_abi::HANDLE_RIGHT_WAIT;
+    pub const HANDLE_RIGHT_TRANSFER: u64 = mnu_abi::HANDLE_RIGHT_TRANSFER;
     pub fn close(value: u32) -> super::syscall::SysResult<()> {
         super::STATE.with_borrow_mut(|s| s.closed.push(value));
         Ok(())
@@ -41,7 +42,11 @@ mod ipc {
         }
         if bytes.len() == w::SESSION_BYTES {
             w::decode_session(bytes).unwrap();
-            assert_eq!(handles.count, 0);
+            if handles.count != 0 {
+                assert_eq!(handles.count, 1);
+                assert_eq!(handles.handles[0].handle, 7);
+                assert_eq!(handles.handles[0].rights, handle::HANDLE_RIGHT_TRANSFER);
+            }
             reply.copy_from_slice(
                 &(if mode == 7 {
                     13u64
@@ -178,4 +183,54 @@ fn bad_envelopes_errors_and_duplicate_owned_references_cannot_consume_borrowed_h
         }
         STATE.with_borrow(|s| assert!(s.closed.is_empty()));
     }
+}
+
+#[test]
+fn session_domain_attachment_is_borrowed_and_only_transfer_is_delegated() {
+    for mode in 0..=8 {
+        STATE.with_borrow_mut(|s| {
+            *s = State {
+                mode,
+                ..State::default()
+            }
+        });
+        let result = production::session_with_domain(
+            88,
+            context(),
+            Some(ipc::IpcObjectHandle {
+                handle: 7,
+                reserved: 0,
+                rights: handle::HANDLE_RIGHT_TRANSFER,
+            }),
+        );
+        assert_eq!(result.is_ok(), mode == 0);
+        STATE.with_borrow(|s| {
+            assert_eq!(
+                s.closed,
+                if mode == 2 || mode == 3 {
+                    vec![67]
+                } else {
+                    vec![]
+                }
+            )
+        });
+    }
+    STATE.with_borrow_mut(|s| *s = State::default());
+    assert!(production::session_with_domain(88, context(), None).is_err());
+    assert!(
+        production::session_with_domain(
+            88,
+            w::Context {
+                active: false,
+                ..context()
+            },
+            Some(ipc::IpcObjectHandle {
+                handle: 7,
+                reserved: 0,
+                rights: handle::HANDLE_RIGHT_TRANSFER,
+            })
+        )
+        .is_err()
+    );
+    STATE.with_borrow(|s| assert_eq!(s.calls, 0));
 }
