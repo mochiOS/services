@@ -32,6 +32,15 @@ fn denied() -> syscall::SysError {
     syscall::SysError::from_raw(syscall::EACCES as i64)
 }
 
+fn executable_package(manifest: &package::PackageManifest) -> bool {
+    // Standalone commands use binary packages (historically without a kind).
+    // The selected binary must still explicitly declare application below.
+    matches!(
+        manifest.package_kind.as_deref(),
+        None | Some("binary" | "application")
+    )
+}
+
 fn absolute(path: &str) -> bool {
     path.starts_with('/')
         && !path.contains(['\0', '\\'])
@@ -110,7 +119,8 @@ pub(crate) fn validate_declared_root(
         return Ok(());
     }
     let expected = image(manifest, binary)?;
-    if expected.size != bytes.len() as u64 || expected.digest != <[u8; 32]>::from(Sha256::digest(bytes))
+    if expected.size != bytes.len() as u64
+        || expected.digest != <[u8; 32]>::from(Sha256::digest(bytes))
     {
         return Err(denied());
     }
@@ -155,7 +165,7 @@ impl Catalog {
         if binary.file.is_some() || !manifest.files.is_empty() {
             return Self::new(verified, root_path);
         }
-        if manifest.package_kind.as_deref() != Some("application")
+        if !executable_package(manifest)
             || binary.kind.as_deref() != Some("application")
             || !absolute(root_path)
             || !manifest.library_dependencies.is_empty()
@@ -194,7 +204,7 @@ impl Catalog {
         mut load: impl FnMut(&str) -> Result<VerifiedManifest, syscall::SysError>,
     ) -> Result<Self, syscall::SysError> {
         let manifest = &verified.manifest;
-        if manifest.package_kind.as_deref() != Some("application") {
+        if !executable_package(manifest) {
             return Err(denied());
         }
         let binary = manifest.binary(root_path).ok_or_else(denied)?;

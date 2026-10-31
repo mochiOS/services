@@ -126,7 +126,12 @@ fn modified_truncated_and_appended_bytes_are_rejected_for_every_input() {
     for (source, expected) in [
         (Source::Root, ROOT),
         (dependency(LIB.as_bytes()), LIBRARY),
-        (Source::Interpreter { path: LIB.as_bytes() }, LIBRARY),
+        (
+            Source::Interpreter {
+                path: LIB.as_bytes(),
+            },
+            LIBRARY,
+        ),
     ] {
         let mut modified = expected.to_vec();
         modified[0] ^= 1;
@@ -346,4 +351,63 @@ fn static_installed_path_policy_cannot_approve_a_dynamic_or_unbound_modern_packa
     install(&original.replace("file = \"root\"", ""));
     let snapshot = resolver::verified_manifest(MANIFEST, read_file).unwrap();
     assert!(image_catalog::Catalog::for_static(snapshot, APP, &bytes).is_err());
+}
+
+#[test]
+fn installed_commands_use_their_verified_manifest_and_exact_captured_bytes() {
+    let path = "/system/bin/msh";
+    let installed = include_str!("../../../../binaries/msh/manifest.toml");
+    let mut bytes = vec![0; 120];
+    bytes[..7].copy_from_slice(&[0x7f, b'E', b'L', b'F', 2, 1, 1]);
+    bytes[16..18].copy_from_slice(&2u16.to_le_bytes());
+    bytes[32..40].copy_from_slice(&64u64.to_le_bytes());
+    bytes[54..56].copy_from_slice(&56u16.to_le_bytes());
+    bytes[56..58].copy_from_slice(&1u16.to_le_bytes());
+    bytes[64..68].copy_from_slice(&1u32.to_le_bytes());
+    for kind in [None, Some("binary"), Some("service"), Some("unknown")] {
+        let text = match kind {
+            None => installed.to_owned(),
+            Some(kind) => {
+                installed.replacen("[package]", &format!("[package]\nkind = \"{kind}\""), 1)
+            }
+        };
+        install(&text);
+        let snapshot = resolver::verified_manifest(MANIFEST, read_file).unwrap();
+        let approved = image_catalog::Catalog::for_static(snapshot, path, &bytes);
+        if matches!(kind, None | Some("binary")) {
+            let approved = approved.unwrap();
+            assert!(approved.validate(Source::Root, &bytes).is_ok());
+            let mut changed = bytes.clone();
+            changed[100] ^= 1;
+            assert!(approved.validate(Source::Root, &changed).is_err());
+        } else {
+            assert!(approved.is_err());
+        }
+    }
+    install(&installed.replace("kind = \"application\"", "kind = \"service\""));
+    let snapshot = resolver::verified_manifest(MANIFEST, read_file).unwrap();
+    assert!(image_catalog::Catalog::for_static(snapshot, path, &bytes).is_err());
+}
+
+#[test]
+fn file_bound_commands_keep_root_and_dependency_digest_checks() {
+    let text = manifest()
+        .replacen("kind = \"application\"", "kind = \"binary\"", 1)
+        .replace(APP, "/bin/entry.elf")
+        .replace(LIB, "/bin/lib/library.so");
+    install(&text);
+    let snapshot = resolver::verified_manifest(MANIFEST, read_file).unwrap();
+    let approved = image_catalog::Catalog::new(snapshot, "/bin/entry.elf").unwrap();
+    assert!(approved.validate(Source::Root, ROOT).is_ok());
+    assert!(approved.validate(Source::Root, b"replaced").is_err());
+    assert!(
+        approved
+            .validate(dependency(b"/bin/lib/library.so"), LIBRARY)
+            .is_ok()
+    );
+    assert!(
+        approved
+            .validate(dependency(b"/bin/lib/library.so"), ROOT)
+            .is_err()
+    );
 }
