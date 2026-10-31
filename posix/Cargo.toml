@@ -45,6 +45,11 @@ ext4plus = { git = "https://github.com/arihant2math/ext4plus", rev = "382b9e0a65
 path = "src/lib.rs"
 
 [[test]]
+name = "native_terminal_input"
+path = "tests/native_terminal_input.rs"
+harness = false
+
+[[test]]
 name = "native_verified_application"
 path = "tests/native_verified_application.rs"
 harness = false
