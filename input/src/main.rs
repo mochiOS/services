@@ -2,6 +2,8 @@ use std::fs;
 
 use input::ime;
 mod raw_input;
+mod physical_input;
+mod consent_input;
 use mochi_user_platform as platform;
 
 const SETTINGS_PATH: &str = "/var/config/input/settings.conf";
@@ -697,6 +699,7 @@ fn main() {
     let mut mouse = MouseState::default();
     let input_preferences = InputPreferences::load();
     let mut subscribers = [0u64; MAX_SUBSCRIBERS];
+    let mut consent_input = consent_input::Authority::default();
     eprintln!("input.service: notifying READY");
     if platform::service_ready::notify(ready_target, 0).is_err() {
         platform::logln!("input.service: ready notification failed");
@@ -718,6 +721,7 @@ fn main() {
                         &subscribers,
                         input_preferences,
                     );
+                    consent_input.pointer(mouse.buttons);
                     pointer_received = true;
                 }
                 Ok(None) => {}
@@ -777,6 +781,14 @@ fn main() {
             continue;
         }
 
+        if len >= 4 && buf[..4] == platform::capability::input_authority::CONTROL_OPCODE.to_le_bytes() {
+            let reply = consent_input.control(sender, &buf[..len]);
+            if platform::ipc::reply(sender, &reply).is_err() {
+                consent_input.reply_failed(sender);
+            }
+            continue;
+        }
+
         if ime::is_convert_request(&buf[..len]) {
             let response = input_method.handle(&buf[..len]);
             let _ = platform::ipc::reply(sender, &response);
@@ -809,15 +821,18 @@ fn main() {
         };
         match packet {
             raw_input::Packet::Keyboard { byte, synthetic } => {
+                consent_input.keyboard(byte, synthetic);
                 process_keyboard_byte(
                     byte, synthetic, &mut keyboard, &subscribers, &mut input_method,
                 );
             }
             raw_input::Packet::Mouse(packet) => {
                 process_mouse_packet(&packet, &mut mouse, &subscribers, input_preferences);
+                consent_input.pointer(mouse.buttons);
             }
             raw_input::Packet::Absolute(packet) => {
                 process_absolute_pointer(&packet, &mut mouse, &subscribers);
+                consent_input.pointer(mouse.buttons);
             }
         }
         let _ = platform::ipc::reply(sender, &[0]);
