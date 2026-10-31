@@ -11,6 +11,10 @@ use crate::session::ActiveSession;
 use crate::session_teardown::{SessionTeardown, TeardownError, terminate_owned_root};
 use crate::spawn_support::errno;
 
+#[cfg(mochios_input_authority_probe_302)]
+#[path = "../../posix/tests/native_input_transport_manager.rs"]
+mod input_authority_probe;
+
 struct Runtime {
     logger_endpoint: u64,
     driver_controller: DriverController,
@@ -22,6 +26,7 @@ struct Runtime {
     keychain: Option<NativeProcess>,
     filesystem_endpoint: Option<platform::handle::Handle>,
     posix_endpoint: Option<platform::handle::Handle>,
+    raw_input: Option<crate::input_endpoint::Endpoint>,
     session_processes: alloc::collections::BTreeMap<u64, NativeProcess>,
     unpublished_session_roots: alloc::vec::Vec<u64>,
     failed_session_cleanup: Option<PendingSessionCleanup>,
@@ -182,6 +187,7 @@ impl Runtime {
             keychain: None,
             filesystem_endpoint: None,
             posix_endpoint: None,
+            raw_input: None,
             session_processes: alloc::collections::BTreeMap::new(),
             unpublished_session_roots: alloc::vec::Vec::new(),
             failed_session_cleanup: None,
@@ -882,7 +888,21 @@ impl BootstrapOperations for Runtime {
     }
 
     fn wait_input_ready(&mut self, process: &Self::InputProcess) -> bool {
-        self.wait_ready(ReadyService::Input, process.watch_target())
+        if !self.wait_ready(ReadyService::Input, process.watch_target()) {
+            return false;
+        }
+        match crate::input_endpoint::acquire(process.process_id()) {
+            Ok(endpoint) => {
+                #[cfg(mochios_input_authority_probe_302)]
+                input_authority_probe::run(endpoint.0, self.posix_endpoint.unwrap());
+                self.raw_input = Some(endpoint);
+                true
+            }
+            Err(error) => {
+                platform::logln!("service-manager.service: raw input handoff failed: {error:?}");
+                false
+            }
+        }
     }
 
     fn wait_user_ready(&mut self, process: &Self::UserProcess) -> bool {
@@ -956,7 +976,10 @@ impl BootstrapOperations for Runtime {
     }
 
     fn start_discovery(&mut self) -> bool {
-        match self.driver_controller.start_discovery() {
+        let Some(raw_input) = self.raw_input.as_ref() else {
+            return false;
+        };
+        match self.driver_controller.start_discovery(raw_input.0) {
             Ok(()) => {
                 platform::logln!("service-manager.service: driver discovery requested");
                 true

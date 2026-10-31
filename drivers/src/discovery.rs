@@ -8,6 +8,7 @@ fn maybe_spawn_bundle(
     bundle_root: &str,
     logger_endpoint: u64,
     posix_endpoint: platform::handle::Handle,
+    raw_input: platform::handle::Handle,
     started_drivers: &mut driver_registry::StartedDrivers,
 ) {
     let Some(bundle) = driver_manifest::load(bundle_root) else {
@@ -67,6 +68,7 @@ fn maybe_spawn_bundle(
         None,
         logger_endpoint,
         posix_endpoint,
+        raw_input,
         |process| started_drivers.retain_failed(process),
     ) {
         Ok(process) => {
@@ -83,6 +85,7 @@ fn maybe_spawn_bundle(
 pub(crate) fn run(
     logger_endpoint: u64,
     posix_endpoint: platform::handle::Handle,
+    raw_input: platform::handle::Handle,
     started_drivers: &mut driver_registry::StartedDrivers,
     mut progress: impl FnMut(),
 ) -> DiscoveryResult {
@@ -94,6 +97,7 @@ pub(crate) fn run(
                 bundle_root,
                 logger_endpoint,
                 posix_endpoint,
+                raw_input,
                 started_drivers,
             );
             progress();

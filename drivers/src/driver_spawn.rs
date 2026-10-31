@@ -49,6 +49,7 @@ pub(crate) fn spawn(
     args: Option<&[u8]>,
     logger_endpoint: u64,
     posix_endpoint: platform::handle::Handle,
+    raw_input: platform::handle::Handle,
     rollback: impl FnOnce(DriverProcess),
 ) -> Result<DriverProcess, platform::syscall::SysError> {
     let mut arguments = Vec::new();
@@ -76,10 +77,6 @@ pub(crate) fn spawn(
         .find(|part| part.ends_with(".driver"))
         .or_else(|| entry_path.rsplit('/').next())
         .ok_or_else(|| sys_error(mochi_user_syscall::EINVAL))?;
-    let metadata = mochios_posix_client::launch_arguments::encode_native_launch(
-        entry_path, label, &arguments, random,
-    )
-    .map_err(|_| sys_error(mochi_user_syscall::EINVAL))?;
     let client = Client::new(SyscallEndpointTransport::new(posix_endpoint));
     client.register_session().map_err(client_error)?;
     let image = client
@@ -93,7 +90,26 @@ pub(crate) fn spawn(
     let result = (|| {
         // Keep the driver's unprivileged execution class. Authorization binds
         // the actual image digest; legacy identity strings never become argv.
-        resolve_execution_security(entry_path, platform::service::ExecutionClass::Unprivileged)?;
+        let capabilities = resolve_execution_security(
+            entry_path,
+            platform::service::ExecutionClass::Unprivileged,
+        )?;
+        if capabilities.split(|byte| *byte == 0).any(|name| {
+            matches!(name, b"device.input" | b"input.keyboard" | b"input.pointer")
+        }) {
+            // Input authority follows the verified launch capabilities, never
+            // an argv flag or a driver basename. Children cannot redelegate it.
+            arguments.push(alloc::format!(
+                "{}{}:{raw_input}:{}",
+                mochios_posix_client::launch_arguments::INHERITED_HANDLE_PREFIX,
+                platform::input::RAW_INPUT_HANDLE_KEY,
+                mnu_abi::HANDLE_RIGHT_SEND,
+            ));
+        }
+        let metadata = mochios_posix_client::launch_arguments::encode_native_launch(
+            entry_path, label, &arguments, random,
+        )
+        .map_err(|_| sys_error(mochi_user_syscall::EINVAL))?;
         let (handle, process_id) = mochios_posix_client::process_creation::create_with_rollback(
             || platform::process::create_stopped(image.handle, &metadata),
             |handle| {

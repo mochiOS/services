@@ -140,3 +140,8 @@ harness = false
 name = "native_broker_image"
 path = "tests/native_broker_image.rs"
 harness = false
+
+[[test]]
+name = "native_input_transport"
+path = "tests/native_input_transport.rs"
+harness = false

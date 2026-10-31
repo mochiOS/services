@@ -162,7 +162,7 @@ impl DriverController {
         self.session.accept_hello(&buffer[..length])
     }
 
-    pub(crate) fn start_discovery(&mut self) -> Result<(), DriverControlError> {
+    pub(crate) fn start_discovery(&mut self, raw_input: u32) -> Result<(), DriverControlError> {
         let response_endpoint = platform::ipc::create()
             .map_err(|error| DriverControlError::Ipc(error.raw().unsigned_abs()))?;
         let request_id = platform::service_ready::generate_token()
@@ -174,7 +174,14 @@ impl DriverController {
         let length = request
             .encode(&mut buffer)
             .map_err(DriverControlError::Encode)?;
-        platform::ipc::send(control_endpoint, &buffer[..length])
+        let mut handles = platform::ipc::IpcObjectHandles::default();
+        handles.count = 1;
+        handles.handles[0] = platform::ipc::IpcObjectHandle {
+            handle: raw_input,
+            reserved: 0,
+            rights: crate::input_endpoint::RIGHTS,
+        };
+        platform::ipc::send_object_handles(control_endpoint, &buffer[..length], &handles)
             .map(|_| ())
             .map_err(|error| DriverControlError::Ipc(error.raw().unsigned_abs()))
     }

@@ -95,7 +95,7 @@ fn driver_owners_survive_discovery_and_pending_cleanup_is_retried_while_idle() {
     assert!(registry < worker[registry..].find("loop {").unwrap() + registry);
     assert!(worker.contains("started_drivers.retry_failed(posix_endpoint)"));
     assert!(worker.contains("if started_drivers.has_failed_cleanup()"));
-    assert!(worker.contains("platform::ipc::try_wait(&mut buffer)"));
+    assert!(worker.contains("platform::ipc::try_wait_object_handles(&mut buffer, &mut attached.0)"));
     let discovery = include_str!("../../drivers/src/discovery.rs");
     assert!(!discovery.contains("let mut started_drivers ="));
     assert!(discovery.contains("started_drivers.retain_failed(process)"));

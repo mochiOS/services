@@ -1,6 +1,7 @@
 use std::fs;
 
 use input::ime;
+mod raw_input;
 use mochi_user_platform as platform;
 
 const SETTINGS_PATH: &str = "/var/config/input/settings.conf";
@@ -572,6 +573,7 @@ fn process_absolute_pointer(
 
 fn process_keyboard_byte(
     byte: u8,
+    synthetic: bool,
     state: &mut KeyboardState,
     subscribers: &[u64; MAX_SUBSCRIBERS],
     input_method: &mut ime::InputMethod,
@@ -619,7 +621,8 @@ fn process_keyboard_byte(
 
     let event = encode_input_event(
         EVENT_KIND_KEY,
-        if is_break { FLAG_RELEASE } else { FLAG_PRESS },
+        (if is_break { FLAG_RELEASE } else { FLAG_PRESS })
+            | if synthetic { FLAG_SYNTHETIC } else { 0 },
         keycode,
         0,
         codepoint,
@@ -673,6 +676,11 @@ fn main() {
         platform::process::exit(1);
     }
 
+    let raw_endpoint = platform::ipc::create_handle().unwrap_or_else(|_| {
+        let _ = platform::service_ready::notify(ready_target, 1);
+        platform::process::exit(1)
+    });
+
     eprintln!("input.service: loading IME dictionary");
     let mut keyboard = KeyboardState::default();
     let mut input_method = ime::InputMethod::open_system_dictionary();
@@ -718,10 +726,11 @@ fn main() {
         }
         let buf = input_wait_buf();
         buf.fill(0);
+        let mut attached = platform::ipc::IpcObjectHandles::default();
         let message = if hardware_input {
-            platform::ipc::try_wait(buf)
+            platform::ipc::try_wait_object_handles(buf, &mut attached)
         } else {
-            platform::ipc::wait(endpoint, buf)
+            platform::ipc::wait_object_handles(endpoint, buf, &mut attached)
         };
         let Ok(msg) = message else {
             if hardware_input && !pointer_received {
@@ -734,7 +743,37 @@ fn main() {
         let sender = msg >> 32;
         let len = (msg & 0xffff_ffff) as usize;
         if len == 0 || len > buf.len() {
+            raw_input::close_handles(&attached);
             let _ = platform::ipc::reply(sender, &[0]);
+            continue;
+        }
+
+        if !attached.is_user_delivery() || attached.count != 0 {
+            raw_input::close_handles(&attached);
+            let _ = platform::ipc::reply(sender, &22u64.to_le_bytes());
+            continue;
+        }
+
+        if len >= 4 && buf[..4] == platform::input::RAW_ENDPOINT_OPCODE.to_le_bytes() {
+            let status = if buf[..len] != platform::input::RAW_ENDPOINT_REQUEST {
+                22u64
+            } else if platform::capability::check_thread(sender, "capabilities.manage") != Ok(1) {
+                13
+            } else {
+                0
+            };
+            let mut reply = platform::ipc::IpcObjectHandles::default();
+            if status == 0 {
+                reply.count = 1;
+                reply.handles[0] = platform::ipc::IpcObjectHandle {
+                    handle: raw_endpoint,
+                    reserved: 0,
+                    rights: platform::handle::HANDLE_RIGHT_SEND
+                        | platform::handle::HANDLE_RIGHT_DUPLICATE
+                        | platform::handle::HANDLE_RIGHT_TRANSFER,
+                };
+            }
+            let _ = platform::ipc::reply_object_handles(sender, &status.to_le_bytes(), &reply);
             continue;
         }
 
@@ -764,18 +803,21 @@ fn main() {
             continue;
         }
 
-        if len >= 8 {
-            match buf[0] {
-                platform::input::RAW_KIND_KEYBOARD => {
-                    process_keyboard_byte(buf[4], &mut keyboard, &subscribers, &mut input_method);
-                }
-                platform::input::RAW_KIND_MOUSE_PACKET => {
-                    process_mouse_packet(&buf[4..8], &mut mouse, &subscribers, input_preferences);
-                }
-                platform::input::RAW_KIND_POINTER_ABSOLUTE => {
-                    process_absolute_pointer(&buf[4..len], &mut mouse, &subscribers);
-                }
-                _ => {}
+        let Some(packet) = raw_input::decode(&buf[..len], &attached) else {
+            let _ = platform::ipc::reply(sender, &13u64.to_le_bytes());
+            continue;
+        };
+        match packet {
+            raw_input::Packet::Keyboard { byte, synthetic } => {
+                process_keyboard_byte(
+                    byte, synthetic, &mut keyboard, &subscribers, &mut input_method,
+                );
+            }
+            raw_input::Packet::Mouse(packet) => {
+                process_mouse_packet(&packet, &mut mouse, &subscribers, input_preferences);
+            }
+            raw_input::Packet::Absolute(packet) => {
+                process_absolute_pointer(&packet, &mut mouse, &subscribers);
             }
         }
         let _ = platform::ipc::reply(sender, &[0]);

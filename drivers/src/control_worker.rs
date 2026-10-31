@@ -61,10 +61,11 @@ pub(crate) fn run(config: DriverManagerConfig) -> ! {
     let mut buffer = [0u8; CONTROL_BUFFER_LEN];
     loop {
         started_drivers.retry_failed(posix_endpoint);
+        let mut attached = ReceivedHandles(platform::ipc::IpcObjectHandles::default());
         let incoming = if started_drivers.has_failed_cleanup() {
-            platform::ipc::try_wait(&mut buffer)
+            platform::ipc::try_wait_object_handles(&mut buffer, &mut attached.0)
         } else {
-            platform::ipc::wait(control_endpoint, &mut buffer)
+            platform::ipc::wait_object_handles(control_endpoint, &mut buffer, &mut attached.0)
         };
         let message = match incoming {
             Ok(message) => message,
@@ -73,7 +74,7 @@ pub(crate) fn run(config: DriverManagerConfig) -> ! {
                 continue;
             }
         };
-        if !is_manager_request(message >> 32) {
+        if !attached.0.is_user_delivery() || !is_manager_request(message >> 32) {
             continue;
         }
         let len = (message & 0xffff_ffff) as usize;
@@ -87,12 +88,17 @@ pub(crate) fn run(config: DriverManagerConfig) -> ! {
                 message,
             } => send_complete(response_endpoint, message),
             ControlAction::Run(pending) => {
-                let result = discovery::run(
-                    logger_endpoint,
-                    posix_endpoint,
-                    &mut started_drivers,
-                    || drain_running_requests(&mut controller),
-                );
+                let result = if let Some(raw_input) = attached.raw_input() {
+                    discovery::run(
+                        logger_endpoint,
+                        posix_endpoint,
+                        raw_input,
+                        &mut started_drivers,
+                        || drain_running_requests(&mut controller),
+                    )
+                } else {
+                    mochios_driver_control_protocol::DiscoveryResult { status: -13 }
+                };
                 drain_running_requests(&mut controller);
                 if let ControlAction::Reply {
                     response_endpoint,
@@ -151,7 +157,8 @@ fn is_manager_request(sender: u64) -> bool {
 fn drain_running_requests(controller: &mut DiscoveryController) {
     let mut buffer = [0u8; CONTROL_BUFFER_LEN];
     loop {
-        let message = match platform::ipc::try_wait(&mut buffer) {
+        let mut attached = ReceivedHandles(platform::ipc::IpcObjectHandles::default());
+        let message = match platform::ipc::try_wait_object_handles(&mut buffer, &mut attached.0) {
             Ok(message) => message,
             Err(err)
                 if err.native_error() == Some(mochi_user_syscall::NativeError::NotReady) =>
@@ -160,7 +167,7 @@ fn drain_running_requests(controller: &mut DiscoveryController) {
             }
             Err(_) => return,
         };
-        if !is_manager_request(message >> 32) {
+        if !attached.0.is_user_delivery() || !is_manager_request(message >> 32) {
             continue;
         }
         let len = (message & 0xffff_ffff) as usize;
@@ -190,6 +197,33 @@ fn log_send_error(operation: &str, error: SendError) {
         }
         SendError::Ipc(errno) => {
             platform::logln!("drivers.service: {} failed errno={}", operation, errno)
+        }
+    }
+}
+
+// The request owns received references until discovery has finished creating
+// children. Every malformed, unauthorized and duplicate request also drops them.
+struct ReceivedHandles(platform::ipc::IpcObjectHandles);
+impl ReceivedHandles {
+    fn raw_input(&self) -> Option<u32> {
+        let expected = platform::handle::HANDLE_RIGHT_SEND
+            | platform::handle::HANDLE_RIGHT_DUPLICATE
+            | platform::handle::HANDLE_RIGHT_TRANSFER;
+        let entry = self.0.handles[0];
+        (self.0.is_user_delivery()
+            && self.0.count == 1
+            && entry.handle != 0
+            && entry.reserved == 0
+            && entry.rights == expected)
+            .then_some(entry.handle)
+    }
+}
+impl Drop for ReceivedHandles {
+    fn drop(&mut self) {
+        for entry in self.0.handles.iter().take(self.0.count as usize) {
+            if entry.handle != 0 {
+                let _ = platform::handle::close(entry.handle);
+            }
         }
     }
 }

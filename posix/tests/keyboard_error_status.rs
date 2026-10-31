@@ -18,12 +18,13 @@ mod platform {
     probe::constants(
         &mut program,
         include_str!("../../../user/crates/platform/src/lib.rs"),
-        &["RAW_KIND_KEYBOARD"],
+        &["RAW_KIND_KEYBOARD", "RAW_FLAG_SYNTHETIC"],
     );
     program.push_str(r#"
     }
     pub mod ipc {
-        pub fn send(endpoint:u64,bytes:&[u8])->Result<u64,crate::SysError>{
+        #[derive(Default)] pub struct IpcObjectHandles;
+        pub fn send_object_handles(endpoint:u64,bytes:&[u8],_:&IpcObjectHandles)->Result<u64,crate::SysError>{
             assert_eq!(endpoint,41);
             crate::STATE.with_borrow_mut(|s|{s.packets.push(bytes.to_vec());s.replies.pop_front().expect("extra send")})
         }
@@ -49,6 +50,9 @@ fn main(){
         let mut endpoint=41;send_keyboard_byte(&mut endpoint,0x9e);assert_eq!(endpoint,0);
         STATE.with_borrow(|s|{assert_eq!(s.yields,0);assert_eq!(s.packets.len(),1);assert!(s.replies.is_empty());});
     }
+    STATE.set(State{replies:vec![Ok(1)].into(),..State::default()});
+    let mut endpoint=41;send_serial_byte(&mut endpoint,0x15);
+    STATE.with_borrow(|s|assert_eq!(s.packets,[vec![platform::input::RAW_KIND_KEYBOARD,platform::input::RAW_FLAG_SYNTHETIC,0,0,0x15,0,0,0]]));
     STATE.set(State::default());let mut endpoint=0;send_keyboard_byte(&mut endpoint,0x1e);
     STATE.with_borrow(|s|assert!(s.packets.is_empty()));
 }

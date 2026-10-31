@@ -4,6 +4,8 @@ extern crate alloc;
 mod bootstrap;
 #[path="../../../service-manager/src/driver_controller.rs"]
 mod driver_controller;
+#[path="../../../service-manager/src/input_endpoint.rs"]
+mod input_endpoint;
 #[path="../../../service-manager/src/launch_arguments.rs"]
 mod launch_arguments;
 #[path="../../../service-manager/src/keychain_control.rs"]
