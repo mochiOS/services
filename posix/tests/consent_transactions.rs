@@ -1,5 +1,7 @@
 #[path = "../../capability/src/consent.rs"]
 mod consent;
+#[path = "../../input/src/physical_input.rs"]
+mod physical_input;
 use consent::*;
 use mochi_user_platform::capability::consent::{Choice, Choices, Correlation, Feedback};
 
@@ -161,6 +163,34 @@ fn guessing_a_serial_or_echoing_y_is_not_evidence() {
     assert_eq!(f.allow(22), Err(Error::MissingPresence));
     f.event(23, Transition::PhysicalPress).unwrap();
     assert!(matches!(f.allow(23), Ok(Outcome::Approved(_))));
+}
+
+#[test]
+fn actual_seat_decoder_does_not_turn_typematic_or_synthetic_y_into_a_fresh_confirmation() {
+    let mut f = Fixture::new();
+    let mut seat = physical_input::Seat::default();
+    seat.keyboard(0x15, false);
+    f.feedback(Feedback::Presented).unwrap();
+    f.controller
+        .arm(
+            f.input.source,
+            f.offer.correlation,
+            f.input,
+            seat.serial(),
+            seat.all_released(),
+            100,
+        )
+        .unwrap();
+    for (byte, synthetic) in [(0x15, false), (0x95, true), (0x15, true), (0x95, false)] {
+        let observed = seat.keyboard(byte, synthetic).unwrap();
+        f.event(observed.serial, observed.transition.into())
+            .unwrap();
+        assert_eq!(f.allow(observed.serial), Err(Error::MissingPresence));
+    }
+    let observed = seat.keyboard(0x15, false).unwrap();
+    f.event(observed.serial, observed.transition.into())
+        .unwrap();
+    assert!(matches!(f.allow(observed.serial), Ok(Outcome::Approved(_))));
 }
 
 #[test]
@@ -823,9 +853,12 @@ fn ticket_counter_exhaustion_never_wraps_or_reuses_a_ticket() {
         r#"
 extern crate self as mochi_user_platform;
 #[path={:?}]pub mod wire;
-pub mod capability{{pub use crate::wire as consent;}}
+pub use wire as consent;
+#[path={:?}]pub mod input_authority;
+pub mod capability{{pub use crate::wire as consent;pub use crate::input_authority;}}
 "#,
-        root.join("user/crates/capability-protocol/src/consent.rs")
+        root.join("user/crates/capability-protocol/src/consent.rs"),
+        root.join("user/crates/capability-protocol/src/input_authority.rs")
     );
     for line in include_str!("../../capability/src/consent.rs").lines() {
         if !line.starts_with("//!") {

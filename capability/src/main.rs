@@ -14,6 +14,10 @@ mod bootstrap_file;
 mod dynamic_grant;
 mod consent;
 mod consent_peer;
+mod consent_input;
+#[cfg(mochios_consent_input_probe_306)]
+#[path = "../../posix/tests/support/consent_input_broker_306.rs"]
+mod consent_input_probe;
 mod trusted_images;
 mod package_index;
 mod package_walk;

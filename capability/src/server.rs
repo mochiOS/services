@@ -117,6 +117,9 @@ pub(crate) fn serve_capability_requests(mut state: CapabilityServiceState) -> ! 
     };
     platform::logln!("capability.service: ready");
     let mut buf = [0u8; 1024];
+    let mut input_authority: Option<crate::consent_input::Channel> = None;
+    #[cfg(mochios_consent_input_probe_306)]
+    let mut input_probe: Option<crate::consent_input_probe::Probe> = None;
     loop {
         let mut attached = platform::ipc::IpcObjectHandles::default();
         let msg = match platform::ipc::wait_object_handles(endpoint, &mut buf, &mut attached) {
@@ -134,6 +137,95 @@ pub(crate) fn serve_capability_requests(mut state: CapabilityServiceState) -> ! 
         } else {
             0
         };
+        #[cfg(mochios_consent_input_probe_306)]
+        if opcode == crate::consent_input_probe::START {
+            if slice.len() != 4
+                || attached.count != 0
+                || !attached.is_user_delivery()
+                || platform::capability::check_thread(sender, "capabilities.manage") != Ok(1)
+            {
+                close_received_handles(&attached);
+                capability_reply(sender, 13);
+                continue;
+            }
+            let (probe, event) = crate::consent_input_probe::Probe::start(
+                sender,
+                &mut state.consent,
+                input_authority.as_mut().expect("installed input authority"),
+            )
+            .expect("native consent input probe start");
+            input_probe = Some(probe);
+            let _ = platform::ipc::reply(
+                sender,
+                &platform::capability::input_authority::encode_event(event).unwrap(),
+            );
+            continue;
+        }
+        if opcode == platform::capability::input_authority::INSTALL_OPCODE {
+            let result = (|| {
+                if slice.len() != 4
+                    || attached.count != 0
+                    || !attached.is_user_delivery()
+                    || platform::capability::check_thread(sender, "capabilities.manage") != Ok(1)
+                    || state.consent.len() != 0
+                {
+                    return Err(mochi_user_syscall::SysError::from_raw(
+                        mochi_user_syscall::EACCES as i64,
+                    ));
+                }
+                if let Some(channel) = &input_authority {
+                    channel.current()?;
+                } else {
+                    input_authority = Some(crate::consent_input::Channel::connect(
+                        &state.trusted_images,
+                    )?);
+                }
+                Ok(())
+            })();
+            close_received_handles(&attached);
+            capability_reply(sender, result.err().map_or(0, error_status));
+            continue;
+        }
+        if opcode == platform::capability::input_authority::EVENT_OPCODE {
+            let result = (|| {
+                if attached.count != 0 || !attached.is_user_delivery() {
+                    return Err(mochi_user_syscall::SysError::from_raw(
+                        mochi_user_syscall::EACCES as i64,
+                    ));
+                }
+                let channel = input_authority.as_mut().ok_or_else(|| {
+                    mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EACCES as i64)
+                })?;
+                let event = channel.receive(sender, slice)?;
+                let transition = event.observation.transition.into();
+                state
+                    .consent
+                    .input(
+                        channel.route().source,
+                        event.correlation,
+                        channel.route(),
+                        event.observation.serial,
+                        transition,
+                        platform::time::monotonic_nanoseconds()?,
+                    )
+                    .map_err(|_| {
+                        mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EACCES as i64)
+                    })?;
+                #[cfg(mochios_consent_input_probe_306)]
+                if let Some(probe) = input_probe.as_mut() {
+                    if probe
+                        .observe(event, &mut state.consent, channel)
+                        .expect("native input evidence checks")
+                    {
+                        input_probe = None;
+                    }
+                }
+                Ok(())
+            })();
+            close_received_handles(&attached);
+            capability_reply(sender, result.err().map_or(0, error_status));
+            continue;
+        }
         #[cfg(mochios_verified_launch_probe_305)]
         if opcode == u32::from_le_bytes(*b"MR05") {
             let role = crate::consent_peer::capture(sender)

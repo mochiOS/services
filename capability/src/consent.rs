@@ -94,6 +94,20 @@ pub(crate) enum Transition {
     PhysicalPress,
     Repeat,
     Synthetic,
+    Release,
+}
+
+impl From<mochi_user_platform::capability::input_authority::Transition> for Transition {
+    fn from(value: mochi_user_platform::capability::input_authority::Transition) -> Self {
+        use mochi_user_platform::capability::input_authority::Transition as T;
+        match value {
+            T::AllReleased => Self::AllReleased,
+            T::PhysicalPress => Self::PhysicalPress,
+            T::Repeat => Self::Repeat,
+            T::Synthetic => Self::Synthetic,
+            T::Release => Self::Release,
+        }
+    }
 }
 
 /// A decision at an observed point, not a kernel permit or grant. Native
@@ -404,7 +418,7 @@ impl Controller {
                 }
                 presence.released = false;
             }
-            Transition::Repeat | Transition::Synthetic => {}
+            Transition::Repeat | Transition::Synthetic | Transition::Release => {}
         }
         pending.stage = Stage::Armed(presence);
         self.pending[index] = Some(pending);
