@@ -60,16 +60,9 @@ fn main(){
 }
 
 #[test]
-fn both_grant_paths_validate_resources_before_transfer_and_dynamic_persistence() {
-    let dynamic = include_str!("../../capability/src/dynamic_grant.rs")
-        .split("pub(crate) fn authorize_dynamic_capability(")
-        .nth(1)
-        .unwrap();
-    let validation = dynamic
-        .find("validate_grant_resource(capability, resource)?")
-        .unwrap();
-    assert!(validation < dynamic.find("append_persistent_grant(").unwrap());
-    assert!(validation < dynamic.find("transfer_user_grant(").unwrap());
+fn retired_dynamic_decisions_cannot_bypass_persistent_resource_validation() {
+    let dynamic = include_str!("../../capability/src/dynamic_grant.rs");
+    assert!(!dynamic.contains("fn authorize_dynamic_capability("));
     let persistent = include_str!("../../capability/src/persistent_grant.rs")
         .split("pub(crate) fn authorize_persistent_capability(")
         .nth(1)

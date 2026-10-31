@@ -5,7 +5,6 @@ use mochi_user_platform as platform;
 use sha2::{Digest, Sha256};
 
 use crate::app_spawn::{SPAWN_APP_OPCODE, spawn_application_from_manifest};
-use crate::dynamic_grant::{authorize_dynamic_capability, is_trusted_prompt_broker};
 use crate::persistent_grant::{
     authorize_persistent_capability, has_persistent_grant, install_posix_endpoint,
 };
@@ -41,13 +40,6 @@ fn close_received_handles(handles: &platform::ipc::IpcObjectHandles) {
             let _ = platform::handle::close(attached.handle);
         }
     }
-}
-
-fn parse_decision_request(
-    buf: &[u8],
-) -> Result<platform::capability::CapabilityDecisionRequest, mochi_user_syscall::SysError> {
-    platform::capability::decode_decision_request(buf)
-        .map_err(|_| mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64))
 }
 
 fn reply_capabilities(sender: u64, result: Result<Vec<String>, mochi_user_syscall::SysError>) {
@@ -456,22 +448,12 @@ pub(crate) fn serve_capability_requests(mut state: CapabilityServiceState) -> ! 
             continue;
         }
         if opcode == platform::capability::CAPABILITY_DECISION_OPCODE {
-            let status = if !is_trusted_prompt_broker(&state.trusted_images, sender) {
-                mochi_user_syscall::EACCES
-            } else {
-                parse_decision_request(slice)
-                    .and_then(|decision| {
-                        authorize_dynamic_capability(
-                            &state.package_index,
-                            decision.decision,
-                            decision.reserved,
-                            &decision.request,
-                        )
-                    })
-                    .map(|_| REPLY_OK)
-                    .unwrap_or_else(error_status)
-            };
-            capability_reply(sender, status);
+            // An authenticated presenter is not evidence of a fresh user act.
+            // Only the transaction/input-authority controller may authorize it.
+            capability_reply(
+                sender,
+                mochi_user_syscall::NativeError::Unsupported.into_raw(),
+            );
             continue;
         }
         if opcode == platform::capability::CAPABILITY_PERSISTENT_QUERY_OPCODE {
