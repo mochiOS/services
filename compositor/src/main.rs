@@ -13,6 +13,8 @@ mod geometry;
 mod gpu_compositor;
 mod input;
 mod protocol;
+mod presentation;
+mod presentation_native;
 mod received_buffer;
 mod renderer;
 mod server;

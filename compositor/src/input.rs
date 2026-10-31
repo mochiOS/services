@@ -437,6 +437,7 @@ pub(crate) fn update_keyboard_focus(
     if *keyboard_focus == next {
         return;
     }
+    crate::presentation_native::focus_changed();
     if let Some(index) = *keyboard_focus {
         if let Some(surface) = surfaces.get(index)
             && surface.live

@@ -507,6 +507,15 @@ fn present(state: &mut CompositorState, damage: Option<Rect>) -> u32 {
         damage,
     );
     if status == 0 {
+        if damage.is_none() {
+            state.presentation.full_presented(
+                &state.clients,
+                &state.surfaces,
+                state.keyboard_focus,
+                state.display_width,
+                state.display_height,
+            );
+        }
         state.fps_overlay.mark_drawn(fps);
         if let Ok(now) = platform::time::monotonic_milliseconds() {
             state.fps_overlay.presented(now);
@@ -603,6 +612,15 @@ pub(crate) fn run() -> ! {
     let mut pending_buf = [0u8; 4128];
     let mut frame = PendingPresent::default();
     loop {
+        if state.presentation.observe(
+            &state.clients,
+            &state.surfaces,
+            state.keyboard_focus,
+            state.display_width,
+            state.display_height,
+        ) {
+            frame.queue(None, false);
+        }
         // Reply before scanout, but bound batching by both time and count.
         if frame.damage.is_some() {
             if frame.due() {
@@ -637,6 +655,24 @@ pub(crate) fn run() -> ! {
         let sender = msg >> 32;
         frame.messages = frame.messages.saturating_add(1);
         let len = (msg & 0xffff_ffff) as usize;
+        if len <= buf.len() && len >= 4 {
+            let opcode = u32::from_le_bytes(buf[..4].try_into().unwrap());
+            if opcode == platform::capability::presentation::SESSION_OPCODE {
+                let status = state.presentation.session(sender, &buf[..len], &handles)
+                    .err().unwrap_or(0);
+                let _ = platform::ipc::reply(sender, &u64::from(status).to_le_bytes());
+                continue;
+            }
+            if opcode == platform::capability::presentation::CONTROL_OPCODE {
+                let reply = state.presentation.control(
+                    sender, &buf[..len], &mut handles,
+                    &state.clients, &state.surfaces, state.keyboard_focus,
+                    state.display_width, state.display_height,
+                );
+                let _ = platform::ipc::reply(sender, &reply);
+                continue;
+            }
+        }
         if len <= buf.len() && buf[..len].starts_with(&ReadOnlyOffer::MAGIC) {
             let client = client_id_for_sender(
                 &mut state.clients, sender, &mut state.next_client_id,

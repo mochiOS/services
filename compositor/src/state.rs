@@ -82,6 +82,7 @@ pub(crate) struct CompositorState {
     pub(crate) input_subscribed: bool,
     pub(crate) renderer_caps: u32,
     pub(crate) context_menu: ContextMenuBroker,
+    pub(crate) presentation: crate::presentation_native::Authority,
 }
 
 impl CompositorState {
@@ -127,6 +128,7 @@ impl CompositorState {
             input_subscribed,
             renderer_caps,
             context_menu: ContextMenuBroker::default(),
+            presentation: Default::default(),
         }
     }
 }
