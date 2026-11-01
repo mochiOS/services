@@ -484,4 +484,145 @@ mod tests {
         tampered[record.signature_file_offset] ^= 1;
         assert!(verify_image(&tampered, Some(&resolver), &limits).is_err());
     }
+
+    fn manifest_section(bytes: &[u8]) -> Section {
+        let elf = parse_elf(bytes).unwrap();
+        *elf.sections
+            .iter()
+            .find(|s| section_name(&elf, **s).unwrap() == b".mochios.manifest")
+            .unwrap()
+    }
+
+    const DECLARATION: &str = "[package]\nid = \"org.example.main\"\nname = \"main\"\nversion = \"1\"\n[[binary]]\npath = \"main\"\nrequires = [\"net.connect\"]\n";
+
+    #[test]
+    fn embedded_manifest_is_borrowed_from_the_same_verified_snapshot() {
+        let unsigned = fixture();
+        let embedded = embed_manifest(&unsigned, DECLARATION).unwrap();
+        assert_eq!(&embedded[0x80..0x84], &unsigned[0x80..0x84]);
+        assert_eq!(&embedded[16..40], &unsigned[16..40]);
+        let signed = sign_adhoc(&embedded).unwrap();
+        let section = manifest_section(&signed);
+        let evidence = verify_image(&signed, None, &VerificationLimits::default()).unwrap();
+        assert_eq!(evidence.manifest(), Some(DECLARATION));
+        assert_eq!(
+            evidence.manifest().unwrap().as_ptr(),
+            signed[section.offset + 16..].as_ptr()
+        );
+        assert!(
+            verify_image(
+                &sign_adhoc(&unsigned).unwrap(),
+                None,
+                &VerificationLimits::default()
+            )
+            .unwrap()
+            .manifest()
+            .is_none()
+        );
+        assert!(embed_manifest(&embedded, DECLARATION).is_err());
+        assert!(embed_manifest(&signed, DECLARATION).is_err());
+    }
+
+    #[test]
+    fn embedded_capability_changes_invalidate_adhoc_and_keyed_integrity() {
+        let embedded = embed_manifest(&fixture(), DECLARATION).unwrap();
+        let key = SigningKey::from_bytes(&[31; 32]);
+        let resolver = Resolver(key.verifying_key());
+        for (mut signed, resolver) in [
+            (sign_adhoc(&embedded).unwrap(), None),
+            (
+                sign_ed25519(&embedded, &key).unwrap(),
+                Some(&resolver as &dyn PublicKeyResolver),
+            ),
+        ] {
+            assert_eq!(
+                verify_image(&signed, resolver, &VerificationLimits::default())
+                    .unwrap()
+                    .manifest(),
+                Some(DECLARATION)
+            );
+            let section = manifest_section(&signed);
+            let offset = signed[section.offset..section.offset + section.size]
+                .windows(b"net.connect".len())
+                .position(|s| s == b"net.connect")
+                .unwrap();
+            signed[section.offset + offset] = b'x';
+            assert!(verify_image(&signed, resolver, &VerificationLimits::default()).is_err());
+        }
+    }
+
+    #[test]
+    fn manifest_envelope_and_text_are_bounded_and_fail_closed() {
+        assert!(embed_manifest(&fixture(), "").is_err());
+        assert!(embed_manifest(&fixture(), "x\0y").is_err());
+        assert!(embed_manifest(&fixture(), &"x".repeat(MAX_MANIFEST_LEN + 1)).is_err());
+        let at_limit = embed_manifest(&fixture(), &"x".repeat(MAX_MANIFEST_LEN)).unwrap();
+        assert_eq!(
+            verify_image(
+                &sign_adhoc(&at_limit).unwrap(),
+                None,
+                &VerificationLimits::default()
+            )
+            .unwrap()
+            .manifest()
+            .unwrap()
+            .len(),
+            MAX_MANIFEST_LEN
+        );
+        let signed = sign_adhoc(&embed_manifest(&fixture(), DECLARATION).unwrap()).unwrap();
+        let section = manifest_section(&signed);
+        for (offset, byte) in [(0, 0), (8, 2), (10, 2), (12, 1), (16, 0), (16, 255)] {
+            let mut invalid = signed.clone();
+            invalid[section.offset + offset] = byte;
+            // Even an AdHoc writer recomputing the digest cannot bypass the
+            // shared envelope checks or make tools and broker disagree.
+            refresh_adhoc(&mut invalid);
+            assert!(verify_image(&invalid, None, &VerificationLimits::default()).is_err());
+            assert!(verify(&invalid, None).is_err());
+        }
+    }
+
+    #[test]
+    fn manifest_rejects_duplicate_loaded_or_aliased_sections() {
+        let embedded = embed_manifest(&fixture(), DECLARATION).unwrap();
+        let section = manifest_section(&embedded);
+        let duplicate = append_section(
+            &parse_elf(&embedded).unwrap(),
+            b".mochios.manifest",
+            1,
+            &embedded[section.offset..section.offset + section.size],
+        )
+        .unwrap();
+        assert!(sign_adhoc(&duplicate).is_err());
+        for (offset, value) in [(4, 7u64), (8, 2), (16, 0x1000), (40, 1), (48, 1), (56, 1)] {
+            let mut invalid = embedded.clone();
+            if offset == 4 {
+                put_u32(&mut invalid, section.raw_offset + offset, value as u32);
+            } else {
+                put_u64(&mut invalid, section.raw_offset + offset, value);
+            }
+            assert!(sign_adhoc(&invalid).is_err());
+        }
+        let mut loaded = embedded.clone();
+        put_u64(&mut loaded, 32, 64);
+        put_u16(&mut loaded, 54, 56);
+        put_u16(&mut loaded, 56, 1);
+        put_u32(&mut loaded, 64, PT_LOAD);
+        put_u64(&mut loaded, 72, section.offset as u64);
+        put_u64(&mut loaded, 96, section.size as u64);
+        put_u64(&mut loaded, 104, section.size as u64);
+        assert!(sign_adhoc(&loaded).is_err());
+        // Another ordinary section must not provide a second interpretation
+        // of the same declaration bytes, even if both headers are signed.
+        let elf = parse_elf(&embedded).unwrap();
+        let other = elf
+            .sections
+            .iter()
+            .find(|s| section_name(&elf, **s).unwrap() == b".text")
+            .unwrap();
+        let mut alias = embedded.clone();
+        put_u64(&mut alias, other.raw_offset + 24, section.offset as u64);
+        put_u64(&mut alias, other.raw_offset + 32, section.size as u64);
+        assert!(sign_adhoc(&alias).is_err());
+    }
 }

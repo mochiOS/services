@@ -293,6 +293,45 @@ fn keyed_signing_uses_only_the_explicit_key_and_public_key() {
 }
 
 #[test]
+fn manifest_is_consumed_by_the_signer_and_cannot_replace_its_input() {
+    let f = Fixture::new();
+    let manifest = f.root.join("manifest with spaces.toml");
+    fs::write(&manifest, "[[binary]]\nrequires = [\"net.connect\"]\n").unwrap();
+    let mut options = f.options(&["input.o"]);
+    options.manifest = Some(manifest.clone());
+    run(options).unwrap();
+    let calls = fs::read_to_string(f.root.join("msign-arguments")).unwrap();
+    assert!(calls.contains(&format!("\n--manifest\n{}\n", manifest.display())));
+    assert!(
+        !f.lld_arguments()
+            .iter()
+            .any(|s| s == "--manifest" || s == manifest.to_str().unwrap())
+    );
+    f.assert_clean();
+
+    let f = Fixture::new();
+    let alias = f.root.join("manifest.toml");
+    fs::hard_link(f.output(), &alias).unwrap();
+    let mut options = f.options(&["input.o"]);
+    options.manifest = Some(alias);
+    assert!(run(options).unwrap_err().message.contains("manifest"));
+    assert!(!f.root.join("lld-arguments").exists());
+    f.assert_unchanged();
+    assert_eq!(
+        parse(&["--manifest=manifest.toml", "input.o"]).manifest,
+        Some(PathBuf::from("manifest.toml"))
+    );
+    for words in [
+        vec!["--manifest"],
+        vec!["--manifest="],
+        vec!["--manifest", "manifest.toml", "--no-sign"],
+        vec!["--manifest", "manifest.toml", "-r"],
+    ] {
+        assert!(Options::parse(words.into_iter().map(OsString::from)).is_err());
+    }
+}
+
+#[test]
 fn unsigned_and_relocatable_outputs_never_invoke_msign() {
     let f = Fixture::new();
     fs::remove_file(f.root.join("msign")).unwrap();
@@ -446,6 +485,10 @@ fn real_lld_and_msign_link_sign_verify_and_reject_tampering() {
     ];
     options.lld = Some(lld);
     options.msign = Some(msign.clone());
+    let manifest = f.root.join("manifest.toml");
+    let declaration = "[package]\nid = \"org.example.main\"\nname = \"main\"\nversion = \"1\"\n[[binary]]\npath = \"main\"\nrequires = [\"net.connect\"]\n";
+    fs::write(&manifest, declaration).unwrap();
+    options.manifest = Some(manifest);
     run(options).unwrap();
     assert!(
         Command::new(&msign)
@@ -456,6 +499,8 @@ fn real_lld_and_msign_link_sign_verify_and_reject_tampering() {
             .success()
     );
     let mut image = fs::read(f.output()).unwrap();
+    let evidence = mochios_elf_signature::verify_image(&image, None, &Default::default()).unwrap();
+    assert_eq!(evidence.manifest(), Some(declaration));
     let entry = u64::from_le_bytes(image[24..32].try_into().unwrap());
     let phoff = u64::from_le_bytes(image[32..40].try_into().unwrap()) as usize;
     let size = u16::from_le_bytes(image[54..56].try_into().unwrap()) as usize;

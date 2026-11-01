@@ -205,6 +205,42 @@ fn signed_ram_uses_the_broker_measured_full_digest_with_no_new_grants() {
 }
 
 #[test]
+fn embedded_declarations_are_measured_but_never_treated_as_issued_grants() {
+    let declaration = "[[binary]]\nrequires = [\"capabilities.manage\"]\n";
+    let embedded =
+        mochios_elf_signature::embed_manifest(&fixture::unsigned(), declaration).unwrap();
+    let signed = sign_adhoc(&embedded).unwrap();
+    let digest = Sha256::digest(&signed)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect::<String>();
+    let (request, attached) = setup(signed.clone());
+    signed_image::authorize(77, &request, &attached).unwrap();
+    STATE.with_borrow(|s| {
+        assert_eq!(s.issued.len(), 1);
+        let fields = std::str::from_utf8(&s.issued[0].2).unwrap();
+        assert!(fields.contains(&digest));
+        assert!(!fields.contains("capabilities.manage"));
+    });
+    // The existing explicit inheritance mode grants no new authority. A later
+    // declaration/consent policy cannot substitute a sidecar after this check.
+    let mut changed = signed;
+    let position = changed
+        .windows(declaration.len())
+        .position(|b| b == declaration.as_bytes())
+        .unwrap();
+    changed[position] ^= 1;
+    let (request, attached) = setup(changed);
+    assert_eq!(
+        signed_image::authorize(77, &request, &attached)
+            .unwrap_err()
+            .raw(),
+        EACCES as i64
+    );
+    no_issue();
+}
+
+#[test]
 fn unsigned_tampered_and_key_mismatched_images_never_receive_a_permit() {
     let unsigned = fixture::unsigned();
     let signed = sign_adhoc(&unsigned).unwrap();
