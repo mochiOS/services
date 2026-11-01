@@ -110,8 +110,9 @@ mod shell{use crate::{syscall,sys_error_to_io,io};
     program.push_str(probe::between(
         shell,
         "fn ipc_try_wait(",
-        "fn wait_foreground_child(",
+        "\n}\n",
     ));
+    program.push_str("\n}\n");
     program.push_str(r#"
 pub fn run()->io::Result<Option<u64>>{ipc_try_wait(&mut[0;32])}
 }
