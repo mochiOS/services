@@ -1,6 +1,45 @@
 extern crate alloc;
 use mnu_abi::status::Error as NativeError;
 
+#[test]
+fn large_sparse_objects_keep_the_creators_extent_ceiling() {
+    let maximum_pages = 65536;
+    let ceiling = maximum_pages * 4096;
+    let memory = shared_memory::SharedMemory::new_resizable(ceiling, maximum_pages).unwrap();
+    assert_eq!(memory.length(), ceiling);
+    // Exercise bytes beyond the old 16 MiB default without allocating the
+    // whole logical object. The storage and frame mechanism is production code.
+    let offset = 32 * 1024 * 1024 - 3;
+    let data = b"large-native-memory";
+    assert_eq!(memory.write_at(offset, data).unwrap(), data.len());
+    let mut output = [0; 19];
+    assert_eq!(memory.read_at(offset, &mut output).unwrap(), data.len());
+    assert_eq!(&output, data);
+    assert!(matches!(
+        shared_memory::SharedMemory::new_resizable(ceiling + 1, maximum_pages),
+        Err(NativeError::ResourceUnavailable)
+    ));
+    assert_eq!(
+        memory.resize_with(ceiling + 1, |_, _| panic!(
+            "invalid size must not revoke mappings"
+        )),
+        Err(NativeError::ResourceUnavailable)
+    );
+    assert_eq!(memory.length(), ceiling);
+    // A separate small allocation remains limited by its original bound;
+    // another object's larger capacity grants it no additional authority.
+    let small = shared_memory::SharedMemory::new_resizable(4096, 1).unwrap();
+    assert_eq!(small.length(), 4096);
+    assert_eq!(
+        small.resize_with(4097, |_, _| panic!("creator ceiling must survive resize")),
+        Err(NativeError::ResourceUnavailable)
+    );
+    assert!(matches!(
+        small.write_at(4096, &[1]),
+        Err(NativeError::InvalidArgument)
+    ));
+}
+
 #[path = "../../../core/src/mem/byte_extent.rs"]
 mod byte_extent;
 

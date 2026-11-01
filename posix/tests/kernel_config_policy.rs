@@ -153,3 +153,37 @@ fn absent_invalid_or_unrecognized_configuration_keeps_native_defaults() {
         expected.ipc.mailbox_cap
     );
 }
+
+#[test]
+fn memory_object_extent_is_an_explicit_bounded_native_setting() {
+    let defaults = config::KernelConfig::default();
+    assert_eq!(defaults.memory.max_object_pages * 4096, 256 * 1024 * 1024);
+    let mut settings = defaults;
+    for (value, expected) in [("4096", 4096), ("0x10000", 65536)] {
+        config::apply(&mut settings, "memory.max_object_pages", value);
+        assert_eq!(settings.memory.max_object_pages, expected);
+    }
+    for invalid in ["0", "-1", "invalid", "18446744073709551615"] {
+        config::apply(&mut settings, "memory.max_object_pages", invalid);
+        assert_eq!(settings.memory.max_object_pages, 65536);
+    }
+    let loaded = config::load(&module(b"memory.max_object_pages=8192\n"));
+    assert_eq!(loaded.memory.max_object_pages, 8192);
+    // The retired name never represented native mapping admission. Keep the
+    // per-object size check separate from address-space or resident accounting.
+    let task = include_str!("../../../core/src/task/process.rs");
+    assert!(!task.contains("max_mapped_pages"));
+    assert!(
+        task.contains("max_memory_object_pages: crate::config::kernel().memory.max_object_pages")
+    );
+    let create = include_str!("../../../core/src/syscall/handle.rs")
+        .split("pub fn memory_object_create(")
+        .nth(1)
+        .unwrap()
+        .split("pub fn memory_object_length(")
+        .next()
+        .unwrap();
+    assert!(create.contains("process.resource_limits().max_memory_object_pages"));
+    assert!(create.contains("SharedMemory::new_resizable(length, maximum_pages)"));
+    assert!(create.contains("SharedMemory::new(length, maximum_pages)"));
+}
