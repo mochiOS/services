@@ -56,12 +56,15 @@ struct State {
 thread_local! {static STATE:RefCell<State>=RefCell::new(State::default());static DEFER:Cell<u32>=const{Cell::new(0)};}
 #[path = "../../../user/crates/newlib-runtime/src/exec_image.rs"]
 mod exec_image;
-#[path = "support/scoped_preparation.rs"]
-mod scoped_preparation;
-#[path = "support/interpreter_preparation.rs"]
-mod interpreter_preparation;
 #[path = "../../../user/crates/newlib-runtime/src/exec_inputs.rs"]
 mod exec_inputs;
+#[path = "support/interpreter_preparation.rs"]
+mod interpreter_preparation;
+#[path = "support/scoped_preparation.rs"]
+mod scoped_preparation;
+#[path = "../../../user/crates/newlib-runtime/src/vector_buffer.rs"]
+mod vector_buffer;
+use vector_buffer::VectorBuffer;
 #[path = "../../../user/crates/newlib-runtime/src/exec_handle.rs"]
 mod implementation;
 #[path = "../../../user/crates/newlib-runtime/src/user_copy.rs"]
@@ -2121,6 +2124,27 @@ fn static_fixed_image_keeps_the_original_native_exec_path() {
     );
     let bytes = std::fs::read(output).unwrap();
     assert_eq!(u16::from_le_bytes(bytes[16..18].try_into().unwrap()), 2);
+    let mut large = bytes.clone();
+    large.resize(2 * 1024 * 1024 + 31, 0x5a);
+    reset(0);
+    STATE.with_borrow_mut(|s| {
+        s.bytes = large.clone();
+        s.bulk_reads = true;
+    });
+    assert_eq!(
+        implementation::replace(0, ptr::null(), ptr::null(), &table()),
+        Err(ENOEXEC)
+    );
+    STATE.with_borrow(|s| {
+        assert_eq!(s.entered, 1);
+        assert!(s.prepared.is_empty() && s.library_paths.is_empty());
+        // The broker compares SHA-256 of all source bytes, including the
+        // nonloaded suffix. Static images must use the bulk path as well.
+        assert_eq!(s.bytes, large);
+        assert_eq!(s.source_max_request, mnu_abi::provider::MAX_SHARED_READ_LEN);
+        assert!(s.source_reads < 20, "source reads={}", s.source_reads);
+        assert!(!s.closed.contains(&19));
+    });
     for stride in [56usize, 64] {
         let mut source = bytes.clone();
         if stride != 56 {
