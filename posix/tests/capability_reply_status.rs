@@ -11,7 +11,11 @@ fn capability_replies_translate_errors_and_preserve_success_payloads() {
         &include_str!("../../../user/crates/capability-protocol/src/lib.rs")
             .strip_prefix("#![cfg_attr(not(feature = \"std\"), no_std)]\n")
             .unwrap()
-            .replace("#[cfg(feature = \"alloc\")]\n", ""),
+            .replace("#[cfg(feature = \"alloc\")]\n", "")
+            .lines()
+            .filter(|line| !(line.starts_with("pub mod ") && line.ends_with(';')))
+            .collect::<Vec<_>>()
+            .join("\n"),
     );
     program.push_str("}\nmod wire_status {\n");
     program.push_str(
