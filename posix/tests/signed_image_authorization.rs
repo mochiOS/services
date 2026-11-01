@@ -1,19 +1,44 @@
 //! Actual broker admission and shared signature verifier, with native RAM and
 //! authorization mechanisms replaced by observable, fault-injectable adapters.
 extern crate alloc;
+extern crate mochi_user_platform as platform_real;
 extern crate self as mochi_user_platform;
 use mochi_user_syscall::{EACCES, NativeError, SysError};
 use mochios_capability_protocol::{ProtocolError, signed_image as wire};
 use mochios_elf_signature::{sign_adhoc, sign_ed25519};
+pub use platform_real::{logln, package};
 use sha2::{Digest, Sha256};
 use std::cell::RefCell;
 
 #[path = "support/signed_elf.rs"]
 mod fixture;
-#[path = "../../capability/src/object_image.rs"]
-mod object_image;
+#[allow(dead_code)]
+#[path = "../../capability/src/resolver.rs"]
+mod resolver;
 #[path = "../../capability/src/signed_image.rs"]
 mod signed_image;
+#[path = "../../capability/src/standalone_image.rs"]
+mod standalone_image;
+
+pub mod syscall {
+    pub use mochi_user_syscall::*;
+}
+mod policy {
+    pub fn is_known_capability(name: &str) -> bool {
+        mnu_abi::capability::metadata(name).is_some()
+    }
+}
+mod package_index {
+    use super::*;
+    pub struct PackageRecord {
+        pub manifest: package::PackageManifest,
+        pub manifest_path: String,
+    }
+    pub struct PackageIndex {
+        pub duplicate: bool,
+        pub by_binary: std::collections::BTreeMap<String, PackageRecord>,
+    }
+}
 
 #[derive(Default)]
 struct State {
@@ -84,6 +109,7 @@ pub mod handle {
     }
 }
 pub mod service {
+    pub use crate::platform_real::service::ExecutionClass;
     pub fn authorize_exec_for_requester(
         sender: u64,
         key: &str,
@@ -160,7 +186,8 @@ fn wire_is_bounded_versioned_and_accepts_no_ambient_authority() {
         }
         for (offset, value, error) in [
             (0, 0, ProtocolError::UnknownOpcode),
-            (4, 2, ProtocolError::UnsupportedVersion),
+            (4, 1, ProtocolError::UnsupportedVersion),
+            (4, 3, ProtocolError::UnsupportedVersion),
             (16, 2, ProtocolError::InvalidField),
             (20, 1, ProtocolError::InvalidField),
         ] {
@@ -186,7 +213,7 @@ fn wire_is_bounded_versioned_and_accepts_no_ambient_authority() {
 }
 
 #[test]
-fn signed_ram_uses_the_broker_measured_full_digest_with_no_new_grants() {
+fn signed_ram_gets_a_separate_development_identity_and_no_inherited_grants() {
     let signed = sign_adhoc(&fixture::unsigned()).unwrap();
     let raw: [u8; 32] = Sha256::digest(&signed).into();
     let (request, attached) = setup(signed);
@@ -200,13 +227,23 @@ fn signed_ram_uses_the_broker_measured_full_digest_with_no_new_grants() {
         assert_eq!((*sender, identity.as_str()), (77, "opaque:signed"));
         let hex = raw.iter().map(|v| format!("{v:02x}")).collect::<String>();
         use mnu_abi::exec::*;
-        assert_eq!(fields, format!("{EXEC_AUTHORIZATION_KIND_PREFIX}{EXEC_AUTHORIZATION_KIND_IMAGE_REPLACE_INHERIT}\0{EXEC_AUTHORIZATION_CLASS_PREFIX}unprivileged\0{EXECUTABLE_DIGEST_PREFIX}{hex}\0\0").as_bytes());
+        let fields: Vec<_> = fields.split(|b| *b == 0).filter(|s| !s.is_empty()).map(|s| std::str::from_utf8(s).unwrap()).collect();
+        assert_eq!(fields.len(), 7);
+        for expected in [
+            format!("{APPLICATION_PACKAGE_ID_PREFIX}local.elf.{hex}"),
+            format!("{APPLICATION_DEVELOPER_ID_PREFIX}org.mochios.local"),
+            format!("{APPLICATION_SUBJECT_KEY_ID_PREFIX}{}", "0".repeat(64)),
+            format!("{APPLICATION_PROVENANCE_PREFIX}development"),
+            format!("{EXEC_AUTHORIZATION_KIND_PREFIX}{EXEC_AUTHORIZATION_KIND_IMAGE_REPLACE}"),
+            format!("{EXEC_AUTHORIZATION_CLASS_PREFIX}unprivileged"),
+            format!("{EXECUTABLE_DIGEST_PREFIX}{hex}"),
+        ] { assert!(fields.contains(&expected.as_str()), "missing field: {expected}"); }
     });
 }
 
 #[test]
-fn embedded_declarations_are_measured_but_never_treated_as_issued_grants() {
-    let declaration = "[[binary]]\nrequires = [\"capabilities.manage\"]\n";
+fn embedded_identity_claims_cannot_impersonate_an_installed_package() {
+    let declaration = "[package]\nid='org.mochios.msh'\nname='msh'\nversion='1'\nvendor='org.mochios.system'\nprovenance='built-in'\n[[binary]]\npath='/system/bin/msh'\nrequires=[]\n";
     let embedded =
         mochios_elf_signature::embed_manifest(&fixture::unsigned(), declaration).unwrap();
     let signed = sign_adhoc(&embedded).unwrap();
@@ -220,10 +257,12 @@ fn embedded_declarations_are_measured_but_never_treated_as_issued_grants() {
         assert_eq!(s.issued.len(), 1);
         let fields = std::str::from_utf8(&s.issued[0].2).unwrap();
         assert!(fields.contains(&digest));
-        assert!(!fields.contains("capabilities.manage"));
+        assert!(fields.contains("local.elf."));
+        assert!(!fields.contains("org.mochios.msh"));
+        assert!(!fields.contains("org.mochios.system"));
+        assert!(!fields.contains("built-in"));
     });
-    // The existing explicit inheritance mode grants no new authority. A later
-    // declaration/consent policy cannot substitute a sidecar after this check.
+    // The declaration is selected from the same verified source, never a sidecar.
     let mut changed = signed;
     let position = changed
         .windows(declaration.len())
@@ -238,6 +277,100 @@ fn embedded_declarations_are_measured_but_never_treated_as_issued_grants() {
         EACCES as i64
     );
     no_issue();
+}
+
+fn declared(binary: &str) -> Vec<u8> {
+    let text = format!("[package]\nid='org.example.main'\nname='main'\nversion='1'\n{binary}");
+    sign_adhoc(&mochios_elf_signature::embed_manifest(&fixture::unsigned(), &text).unwrap())
+        .unwrap()
+}
+
+#[test]
+fn every_canonical_capability_is_classified_and_never_granted_by_inheritance() {
+    use mnu_abi::capability::{CAPABILITIES, CapabilityClassification};
+    for metadata in CAPABILITIES {
+        let signed = declared(&format!(
+            "[[binary]]\npath='main'\nrequires=['{}']\n",
+            metadata.name
+        ));
+        let (request, attached) = setup(signed.clone());
+        let result = signed_image::authorize(77, &request, &attached);
+        if metadata.classification == CapabilityClassification::UserGrantable {
+            let evidence =
+                mochios_elf_signature::verify_image(&signed, None, &Default::default()).unwrap();
+            let selection = standalone_image::select(&evidence).unwrap();
+            assert_eq!(selection.requested, [metadata.name]);
+            assert_eq!(
+                result,
+                Err(SysError::from(NativeError::Unsupported.into_raw()))
+            );
+        } else {
+            assert_eq!(
+                result,
+                Err(SysError::from_raw(EACCES as i64)),
+                "{}",
+                metadata.name
+            );
+        }
+        no_issue();
+    }
+    let (request, attached) = setup(declared(
+        "[[binary]]\npath='main'\nrequires=['unknown.capability']\n",
+    ));
+    assert_eq!(
+        signed_image::authorize(77, &request, &attached),
+        Err(SysError::from_raw(mochi_user_syscall::EINVAL as i64))
+    );
+    no_issue();
+}
+
+#[test]
+fn ambiguous_invalid_and_non_application_declarations_cannot_select_an_empty_grant_set() {
+    for binary in [
+        "",
+        "[[binary]]\npath='one'\nrequires=[]\n[[binary]]\npath='two'\nrequires=['net.connect']\n",
+        "[[binary]]\npath='main'\nrequires='net.connect'\n",
+        "[[binary]]\npath='main'\nrequires=[]\nkind='service'\n",
+        "[[binary]]\npath='main'\nrequires=[]\nkind='driver'\n",
+        "[[binary]]\npath='main'\nrequires=[]\ncapability_profile='system'\n",
+        "[[binary]]\npath='main'\nrequires=['net.connect','net.connect']\n",
+    ] {
+        let (request, attached) = setup(declared(binary));
+        assert!(
+            signed_image::authorize(77, &request, &attached).is_err(),
+            "{binary}"
+        );
+        no_issue();
+    }
+}
+
+#[test]
+fn verified_key_and_full_source_digest_determine_identity_without_developer_trust() {
+    let key = ed25519_dalek::SigningKey::from_bytes(&[7; 32]);
+    let unsigned = fixture::unsigned();
+    let mut previous = String::new();
+    for extra in [b"one".as_slice(), b"two".as_slice()] {
+        let mut source = unsigned.clone();
+        source.extend_from_slice(extra);
+        let signed = sign_ed25519(&source, &key).unwrap();
+        let public = key.verifying_key().to_bytes();
+        let resolver = mochios_elf_signature::SuppliedPublicKey::new(&public).unwrap();
+        let image =
+            mochios_elf_signature::verify_image(&signed, Some(&resolver), &Default::default())
+                .unwrap();
+        let selection = standalone_image::select(&image).unwrap();
+        assert_eq!(
+            selection.identity.subject_key_id,
+            image.signature().key_id.unwrap()
+        );
+        assert_eq!(
+            selection.identity.provenance,
+            mochios_signature_protocol::InstallProvenance::Development
+        );
+        assert_eq!(selection.identity.developer_id, "org.mochios.local");
+        assert_ne!(selection.identity.package_id, previous);
+        previous = selection.identity.package_id;
+    }
 }
 
 #[test]

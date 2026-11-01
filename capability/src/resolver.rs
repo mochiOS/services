@@ -419,12 +419,32 @@ pub(crate) fn authorize_spawn_image(
     execution_class: platform::service::ExecutionClass,
     executable: &[u8],
 ) -> Result<(), mochi_user_syscall::SysError> {
+    authorize_image_digest(
+        requester,
+        path,
+        identity,
+        capabilities,
+        execution_class,
+        &Sha256::digest(executable).into(),
+        mnu_abi::exec::EXEC_AUTHORIZATION_KIND_SPAWN,
+    )
+}
+
+/// Publish a measured image under policy-selected identity and grants. Native
+/// replacement independently enforces attenuation and the commit-time digest.
+pub(crate) fn authorize_image_digest(
+    requester: u64,
+    key: &str,
+    identity: &ApplicationIdentity,
+    capabilities: &[String],
+    execution_class: platform::service::ExecutionClass,
+    digest: &[u8; 32],
+    kind: &str,
+) -> Result<(), mochi_user_syscall::SysError> {
     use mnu_abi::exec::{
-        EXEC_AUTHORIZATION_CLASS_PREFIX, EXEC_AUTHORIZATION_KIND_PREFIX,
-        EXEC_AUTHORIZATION_KIND_SPAWN, EXECUTABLE_DIGEST_PREFIX,
+        EXEC_AUTHORIZATION_CLASS_PREFIX, EXEC_AUTHORIZATION_KIND_PREFIX, EXECUTABLE_DIGEST_PREFIX,
     };
 
-    let digest = Sha256::digest(executable);
     let mut digest_hex = String::with_capacity(64);
     for byte in digest {
         use core::fmt::Write;
@@ -434,7 +454,7 @@ pub(crate) fn authorize_spawn_image(
     encode_identity_args(identity, &mut authorization);
     authorization.push(alloc::format!("{EXECUTABLE_DIGEST_PREFIX}{digest_hex}"));
     authorization.push(alloc::format!(
-        "{EXEC_AUTHORIZATION_KIND_PREFIX}{EXEC_AUTHORIZATION_KIND_SPAWN}"
+        "{EXEC_AUTHORIZATION_KIND_PREFIX}{kind}"
     ));
     authorization.push(alloc::format!(
         "{EXEC_AUTHORIZATION_CLASS_PREFIX}{}",
@@ -446,7 +466,7 @@ pub(crate) fn authorize_spawn_image(
     let identity_nul = encode_authorization_args(&authorization)?;
     platform::service::authorize_exec_for_requester(
         requester,
-        path,
+        key,
         &identity_nul,
         &encode_nul_list(capabilities),
     )

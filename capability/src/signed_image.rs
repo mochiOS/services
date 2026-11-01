@@ -82,9 +82,5 @@ pub(crate) fn authorize(
     if key.is_some() && evidence.signature().kind != SignatureKind::Ed25519 {
         return Err(SysError::from_raw(EACCES as i64));
     }
-    crate::object_image::authorize_inherited_digest(
-        sender,
-        request.identity,
-        evidence.source_digest(),
-    )
+    crate::standalone_image::select(&evidence)?.authorize(sender, request.identity)
 }
