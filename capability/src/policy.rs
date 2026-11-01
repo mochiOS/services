@@ -1,7 +1,5 @@
 use alloc::collections::BTreeSet;
-use alloc::format;
-use alloc::string::{String, ToString};
-use alloc::vec::Vec;
+use alloc::string::String;
 
 use mochi_user_platform as platform;
 
@@ -14,111 +12,47 @@ pub(crate) struct AppPromptPolicy {
     interactive: BTreeSet<String>,
 }
 
-fn parse_toml_string_array(value: &str) -> Option<Vec<String>> {
-    let value = value.trim();
-    let inner = value.strip_prefix('[')?.strip_suffix(']')?.trim();
-    if inner.is_empty() {
-        return Some(Vec::new());
-    }
-    let mut out = Vec::new();
-    for item in inner.split(',') {
-        let trimmed = item.trim();
-        let unquoted = trimmed.strip_prefix('"')?.strip_suffix('"')?;
-        out.push(unquoted.to_string());
-    }
-    Some(out)
-}
-
-pub(crate) fn load_app_prompt_policy(index: &PackageIndex) -> AppPromptPolicy {
-    let Some(record) = index.by_package.get(CAPABILITY_PACKAGE_ID) else {
-        return AppPromptPolicy::default();
-    };
-    let Ok(bytes) = crate::bootstrap_file::read_file(&record.manifest_path) else {
-        return AppPromptPolicy::default();
-    };
-    parse_app_prompt_policy(&bytes)
+pub(crate) fn load_app_prompt_policy(
+    index: &PackageIndex,
+) -> Result<AppPromptPolicy, mochi_user_syscall::SysError> {
+    parse_app_prompt_policy(index, crate::bootstrap_file::read_file)
 }
 
 pub(crate) fn load_runtime_app_prompt_policy(
     index: &PackageIndex,
 ) -> Result<AppPromptPolicy, mochi_user_syscall::SysError> {
-    let Some(record) = index.by_package.get(CAPABILITY_PACKAGE_ID) else {
-        return Ok(AppPromptPolicy::default());
-    };
-    let bytes = crate::persistent_grant::read_file(&record.manifest_path)?;
-    Ok(parse_app_prompt_policy(&bytes))
+    parse_app_prompt_policy(index, crate::persistent_grant::read_file)
 }
 
-fn parse_app_prompt_policy(bytes: &[u8]) -> AppPromptPolicy {
-    let Ok(text) = core::str::from_utf8(&bytes) else {
-        return AppPromptPolicy::default();
-    };
-
-    let mut policy = AppPromptPolicy::default();
-    let mut section = "";
-    let mut collecting = false;
-    let mut array_body = String::new();
-    for raw in text.lines() {
-        let line = raw.split('#').next().unwrap_or("").trim();
-        if line.is_empty() {
-            continue;
-        }
-        if line.starts_with('[') && line.ends_with(']') {
-            section = &line[1..line.len() - 1];
-            collecting = false;
-            array_body.clear();
-            continue;
-        }
-        if collecting {
-            if let Some(end) = line.find(']') {
-                if !array_body.is_empty() {
-                    array_body.push(' ');
-                }
-                array_body.push_str(line[..end].trim());
-                if let Some(items) = parse_toml_string_array(&format!("[{}]", array_body)) {
-                    for item in items {
-                        if platform::capability::capability_from_string(item.as_str())
-                            == platform::capability::CapabilityClass::UserGrantable
-                        {
-                            policy.interactive.insert(item);
-                        }
-                    }
-                }
-                collecting = false;
-                array_body.clear();
-                continue;
-            }
-            if !array_body.is_empty() {
-                array_body.push(' ');
-            }
-            array_body.push_str(line);
-            continue;
-        }
-        let Some((key, value)) = line.split_once('=') else {
-            continue;
-        };
-        if section != "prompt" || key.trim() != "interactive_capabilities" {
-            continue;
-        }
-        let value = value.trim();
-        if value.contains(']') {
-            if let Some(items) = parse_toml_string_array(value) {
-                for item in items {
-                    if platform::capability::capability_from_string(item.as_str())
-                        == platform::capability::CapabilityClass::UserGrantable
-                    {
-                        policy.interactive.insert(item);
-                    }
-                }
-            }
-        } else if let Some(start) = value.find('[') {
-            collecting = true;
-            array_body.clear();
-            array_body.push_str(value[start + 1..].trim());
-        }
+fn parse_app_prompt_policy(
+    index: &PackageIndex,
+    read: crate::resolver::FileReader,
+) -> Result<AppPromptPolicy, mochi_user_syscall::SysError> {
+    use mochi_user_syscall::{EACCES, EINVAL, ENOENT, SysError};
+    use mochios_signature_protocol::InstallProvenance;
+    let record = index
+        .by_package
+        .get(CAPABILITY_PACKAGE_ID)
+        .ok_or_else(|| SysError::from_raw(ENOENT as i64))?;
+    let verified = crate::resolver::verified_manifest(&record.manifest_path, read)?;
+    let identity = verified.identity;
+    if identity.package_id != CAPABILITY_PACKAGE_ID
+        || identity.developer_id != "org.mochios.system"
+        || identity.provenance != InstallProvenance::BuiltIn
+        || identity.subject_key_id != [0; 32]
+    {
+        return Err(SysError::from_raw(EACCES as i64));
     }
-
-    policy
+    let mut policy = AppPromptPolicy::default();
+    for capability in verified.manifest.interactive_capabilities {
+        if platform::capability::capability_from_string(&capability)
+            != platform::capability::CapabilityClass::UserGrantable
+        {
+            return Err(SysError::from_raw(EINVAL as i64));
+        }
+        policy.interactive.insert(capability);
+    }
+    Ok(policy)
 }
 
 pub(crate) fn needs_app_prompt(policy: &AppPromptPolicy, capability: &str) -> bool {

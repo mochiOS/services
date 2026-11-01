@@ -20,7 +20,7 @@ impl CapabilityServiceState {
                 mochios_posix_protocol::STATUS_EEXIST as i64,
             ));
         }
-        let app_prompt_policy = load_app_prompt_policy(&package_index);
+        let app_prompt_policy = load_app_prompt_policy(&package_index)?;
         let trusted_images = crate::trusted_images::TrustedImages::bootstrap(
             &package_index,
             crate::bootstrap_file::read_file,

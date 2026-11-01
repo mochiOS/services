@@ -57,8 +57,11 @@ mod policy {
     pub(crate) struct AppPromptPolicy {
         pub(crate) generation: u64,
     }
-    pub(crate) fn load_app_prompt_policy(_: &PackageIndex) -> AppPromptPolicy {
-        AppPromptPolicy { generation: 2 }
+    pub(crate) fn load_app_prompt_policy(_: &PackageIndex) -> Result<AppPromptPolicy, SysError> {
+        if let Some(error) = POLICY_ERROR.get() {
+            return Err(error);
+        }
+        Ok(AppPromptPolicy { generation: 2 })
     }
     pub(crate) fn load_runtime_app_prompt_policy(
         index: &PackageIndex,
@@ -96,6 +99,19 @@ fn initial_index_failure_and_duplicate_index_do_not_publish_service_state() {
     }
     INDEX_ERROR.set(None);
     DUPLICATE.set(false);
+    assert!(state::CapabilityServiceState::new().is_ok());
+}
+
+#[test]
+fn initial_policy_read_failure_does_not_publish_service_state() {
+    INDEX_ERROR.set(None);
+    DUPLICATE.set(false);
+    for error in [syscall::ENOENT, syscall::EACCES, syscall::EIO] {
+        let error = SysError::from_raw(error as i64);
+        POLICY_ERROR.set(Some(error));
+        assert_eq!(state::CapabilityServiceState::new().err(), Some(error));
+    }
+    POLICY_ERROR.set(None);
     assert!(state::CapabilityServiceState::new().is_ok());
 }
 
@@ -161,7 +177,8 @@ fn runtime_manifest_and_policy_readers_have_no_legacy_file_fallback() {
         .split("\nfn parse_app_prompt_policy")
         .next()
         .unwrap();
-    assert!(runtime.contains("crate::persistent_grant::read_file(&record.manifest_path)?"));
+    assert!(runtime.contains("crate::persistent_grant::read_file"));
+    assert!(policy.contains("crate::resolver::verified_manifest"));
     assert!(!runtime.contains("platform::file::"));
 }
 
