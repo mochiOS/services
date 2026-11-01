@@ -37,6 +37,7 @@ thread_local!{{
     static FAIL_AFTER:Cell<usize>=const{{Cell::new(0)}};
     static MODE:Cell<u8>=const{{Cell::new(0)}};
     static INLINE_CALLS:Cell<usize>=const{{Cell::new(0)}};
+    static POSITION:Cell<Option<u64>>=const{{Cell::new(None)}};
 }}
 struct Allocator;
 unsafe impl std::alloc::GlobalAlloc for Allocator{{
@@ -85,7 +86,8 @@ mod mem{{pub mod vm_object{{
         assert!(!crate::LOCKED.replace(true));Ok(Guard)
     }}
     pub fn overlay_provider_range(_: &crate::ProviderObject,identity:u64,start:u64,_:&mut[u8])->Result<(),u64>{{
-        assert!(crate::LOCKED.get());assert_eq!((identity,start),(77,100));
+        assert!(crate::LOCKED.get());assert_eq!(identity,77);
+        assert_eq!(start,crate::POSITION.get().map_or(100,|offset|offset+(crate::CALLS.get()-1)as u64*crate::provider::MAX_SHARED_READ_LEN as u64));
         if crate::CALLS.get()-1>=crate::FAIL_AFTER.get()&&crate::OVERLAY_ERROR.get()!=0{{Err(crate::OVERLAY_ERROR.get())}}else{{Ok(())}}
     }}
 }}}}
@@ -99,15 +101,17 @@ mod syscall{{
     }}
     pub mod ipc{{pub fn call_provider_with_handle_from_kernel(endpoint:u64,request:&[u8],reply:&mut[u8],handle:crate::ObjectHandle,rights:crate::HandleRights)->Result<usize,u64>{{
         use crate::*;assert!(LOCKED.get());assert!(LIVE.get());assert_eq!((endpoint,handle.0,rights.0),(99,17,67));
-        let (request,data)=provider::RequestHeader::decode(request).unwrap();assert!(data.is_empty());
-        assert_eq!((request.opcode,request.object_id,request.basis),(provider::OP_READ_SHARED,41,0));
+        let (request,data)=provider::RequestHeader::decode(request).unwrap();
         let call=CALLS.get();CALLS.set(call+1);
+        let source=POSITION.get().map(|offset|offset+call as u64*provider::MAX_SHARED_READ_LEN as u64);
+        assert_eq!((request.opcode,request.object_id,request.basis),(if source.is_some(){{provider::OP_READ_AT_SHARED}}else{{provider::OP_READ_SHARED}},41,0));
+        if let Some(source)=source{{assert_eq!(data,source.to_le_bytes());}}else{{assert!(data.is_empty());}}
         if call>=FAIL_AFTER.get()&&IPC_ERROR.get()!=0{{return Err(IPC_ERROR.get());}}
         if MODE.get()==1{{return Ok(reply.len()+1);}}
         let status=if call>=FAIL_AFTER.get(){{WIRE_ERROR.get()}}else{{0}};
         let decline=matches!(MODE.get(),9|11|12)&&call>=FAIL_AFTER.get();
         let count=if decline||MODE.get()==10{{0}}else{{match MODE.get(){{4=>request.length as u64+1,6=>2,_=>request.length as u64}}}};
-        let position=100u64.to_le_bytes();let payload=if status!=0||decline{{&[][..]}}else{{&position[..]}};
+        let position=(source.unwrap_or(100)+u64::from(MODE.get()==13)).to_le_bytes();let payload=if status!=0||decline{{&[][..]}}else{{&position[..]}};
         let length=provider::ResponseHeader{{opcode:if MODE.get()==12{{provider::OP_MEMORY_OBJECT}}else{{request.opcode}},object_id:if matches!(MODE.get(),2|11){{42}}else{{41}},
             status,value:if status!=0{{0}}else{{count}},data_length:payload.len()as u32}}.encode(payload,reply).unwrap();
         if MODE.get()==3{{reply[0]^=1;}}if MODE.get()==5{{reply[32]=0;}}Ok(length)
@@ -134,9 +138,10 @@ mod syscall{{
     ));
     program.push_str(r#"
 fn reset(){assert!(!LIVE.get());assert!(!LOCKED.get());CLOSES.set(0);CALLS.set(0);COPIES.set(0);INLINE_CALLS.set(0);
+    POSITION.set(None);
     CREATE_ERROR.set(0);LOOKUP_ERROR.set(None);LOCK_ERROR.set(None);COPY_ERROR.set(None);
     IPC_ERROR.set(0);MEMORY_ERROR.set(0);OVERLAY_ERROR.set(0);WIRE_ERROR.set(0);MODE.set(0);FAIL_AFTER.set(0);}
-fn outcome(pointer:u64,length:usize)->Option<u64>{let result=provider_read_shared(&ProviderObject{object_id:41},77,pointer,length);
+fn outcome(pointer:u64,length:usize)->Option<u64>{let owner=ProviderObject{object_id:41};let result=if let Some(offset)=POSITION.get(){provider_read_shared_at(&owner,77,pointer,length,offset)}else{provider_read_shared(&owner,77,pointer,length)};
     assert!(!LIVE.get());assert!(!LOCKED.get());assert_eq!(CLOSES.get(),usize::from(CREATE_ERROR.get()==0));result}
 fn run(pointer:u64,length:usize)->u64{outcome(pointer,length).expect("not an inline decline")}
 fn read(length:usize)->u64{provider_read(&ProviderObject{object_id:41},1,length as u64)}
@@ -181,6 +186,21 @@ fn main(){
         reset();WIRE_ERROR.set(status);FAIL_AFTER.set(1);assert_eq!(read(chunk+8),chunk as u64);assert_eq!(INLINE_CALLS.get(),0);
     }
     reset();IPC_ERROR.set(Error::NotReady.into_raw());assert_eq!(read(8192),Error::NotReady.into_raw());assert_eq!(INLINE_CALLS.get(),0);
+    // Positioned chunks keep source positions independent of shared-memory
+    // offsets and validate the returned position before exposing any bytes.
+    for offset in [0,41,u64::MAX-(chunk+3)as u64]{
+        reset();POSITION.set(Some(offset));assert_eq!(run(1,chunk+3),(chunk+3)as u64);
+        assert_eq!((CALLS.get(),COPIES.get()),(2,2));
+    }
+    reset();POSITION.set(Some(41));MODE.set(13);assert_eq!(run(1,8),Error::BackingFailure.into_raw());assert_eq!(COPIES.get(),0);
+    reset();POSITION.set(Some(41));MODE.set(9);assert_eq!(outcome(1,8),None);assert_eq!((CALLS.get(),COPIES.get()),(1,0));
+    reset();POSITION.set(Some(41));MODE.set(9);FAIL_AFTER.set(1);assert_eq!(outcome(1,chunk+1),Some(chunk as u64));assert_eq!(CALLS.get(),2);
+    for error in [Error::NotReady.into_raw(),(-38i64)as u64,Error::AccessDenied.into_raw()]{
+        reset();POSITION.set(Some(41));IPC_ERROR.set(error);assert_eq!(run(1,8),error);assert_eq!(CALLS.get(),1);
+        reset();POSITION.set(Some(41));IPC_ERROR.set(error);FAIL_AFTER.set(1);assert_eq!(run(1,chunk+1),chunk as u64);assert_eq!(CALLS.get(),2);
+    }
+    reset();assert_eq!(provider_read_shared_at(&ProviderObject{object_id:41},77,1,8,u64::MAX),Some(Error::LimitExceeded.into_raw()));
+    assert_eq!((CALLS.get(),CLOSES.get(),COPIES.get()),(0,0,0));assert!(!LIVE.get());
 }
 "#);
     probe::run(&program);

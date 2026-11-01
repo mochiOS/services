@@ -8,7 +8,7 @@ fn main() {
 #[cfg(target_os = "mochios")]
 fn main() {
     use mochios_file_publication::PrivateDirectory;
-    use std::{fs, path::Path, process::Command};
+    use std::{fs, path::Path, process::Command, time::Instant};
 
     const BIN: &str = "/system/tests/posix/clang315/sdk/bin";
     const SOURCE: &str = r#"
@@ -22,6 +22,7 @@ int main(void) { puts("clang-driver315"); return 37; }
 "#;
 
     unsafe { libc::alarm(900) };
+    let began = Instant::now();
     let directory = PrivateDirectory::new_in(Path::new("/tmp"), "clang-driver315").unwrap();
     let command = |tool: &str| {
         let mut command = Command::new(format!("{BIN}/{tool}"));
@@ -41,8 +42,13 @@ int main(void) { puts("clang-driver315"); return 37; }
     assert!(target.status.success());
     assert_eq!(target.stdout, b"x86_64-unknown-mochios\n");
     println!("native-clang-driver-315: PASS default mochiOS target");
+    println!(
+        "native-clang-driver-315: target elapsed {} ms",
+        began.elapsed().as_millis()
+    );
 
     fs::write(directory.path().join("main.c"), SOURCE).unwrap();
+    let compilation = Instant::now();
     let output = command("clang")
         .args(["main.c", "-o", "main"])
         .output()
@@ -65,6 +71,10 @@ int main(void) { puts("clang-driver315"); return 37; }
     );
     assert!(String::from_utf8_lossy(&verified.stdout).contains("valid AdHoc ELF signature"));
     println!("native-clang-driver-315: PASS clang main.c -o main with automatic signing");
+    println!(
+        "native-clang-driver-315: compile/link/sign/verify elapsed {} ms",
+        compilation.elapsed().as_millis()
+    );
     let executed = Command::new("./main")
         .current_dir(directory.path())
         .output()
@@ -74,10 +84,14 @@ int main(void) { puts("clang-driver315"); return 37; }
     println!("native-clang-driver-315: PASS ./main stdout and exit37");
 
     let previous = fs::read(directory.path().join("main")).unwrap();
-    for source in [
-        "int main(void) { this is invalid C; }\n",
-        "extern int absent_symbol(void); int main(void) { return absent_symbol(); }\n",
+    for (stage, source) in [
+        ("compile failure", "int main(void) { this is invalid C; }\n"),
+        (
+            "link failure",
+            "extern int absent_symbol(void); int main(void) { return absent_symbol(); }\n",
+        ),
     ] {
+        println!("native-clang-driver-315: checking {stage}");
         fs::write(directory.path().join("main.c"), source).unwrap();
         let failed = command("clang")
             .args(["main.c", "-o", "main"])
@@ -102,4 +116,8 @@ int main(void) { puts("clang-driver315"); return 37; }
     unsafe { libc::alarm(0) };
     drop(directory);
     println!("native-clang-driver-315: PASS cleanup");
+    println!(
+        "native-clang-driver-315: total elapsed {} ms",
+        began.elapsed().as_millis()
+    );
 }

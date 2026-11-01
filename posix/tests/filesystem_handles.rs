@@ -1965,6 +1965,113 @@ fn bulk_read_into_exceeds_inline_ipc_limit_and_advances_one_description() {
 }
 
 #[test]
+fn positioned_bulk_reads_preserve_cursor_and_retained_inode_after_name_replacement() {
+    let mut filesystem = test_filesystem();
+    let header = protocol::Header {
+        opcode: protocol::OP_OPEN_AT,
+        flags: protocol::OPEN_AT_READ | protocol::OPEN_AT_WRITE | protocol::OPEN_AT_CREATE,
+        mode: 0o600,
+        ..Default::default()
+    };
+    let opened = filesystem
+        .open_at(
+            header,
+            b"/positioned-bulk",
+            PathAnchors::default(),
+            root_credentials(),
+        )
+        .unwrap()
+        .header
+        .open_id;
+    let mut contents: Vec<u8> = (0..mnu_abi::provider::MAX_SHARED_READ_LEN + 16384 + 83)
+        .map(|i| (i % 251) as u8)
+        .collect();
+    for chunk in contents.chunks(4096) {
+        assert_eq!(
+            filesystem.provider_write(opened, chunk).unwrap(),
+            chunk.len()
+        );
+    }
+    assert_eq!(
+        filesystem.provider_seek(opened, 113, HANDLE_SEEK_START),
+        Ok(113)
+    );
+    let mut output = vec![0xa5; mnu_abi::provider::MAX_SHARED_READ_LEN];
+    assert_eq!(
+        filesystem.provider_read_at_into(opened, 4093, &mut output),
+        Ok(output.len())
+    );
+    assert_eq!(output, contents[4093..4093 + output.len()]);
+    assert_eq!(
+        filesystem.provider_seek(opened, 0, mnu_abi::HANDLE_SEEK_CURRENT),
+        Ok(113)
+    );
+
+    assert_eq!(
+        filesystem.provider_write_at(opened, 4093, b"updated"),
+        Ok(7)
+    );
+    contents[4093..4100].copy_from_slice(b"updated");
+    filesystem
+        .unlink_at(
+            protocol::Header {
+                opcode: protocol::OP_UNLINK_AT,
+                ..Default::default()
+            },
+            b"/positioned-bulk",
+            PathAnchors::default(),
+            root_credentials(),
+        )
+        .unwrap();
+    let replacement = filesystem
+        .open_at(
+            header,
+            b"/positioned-bulk",
+            PathAnchors::default(),
+            root_credentials(),
+        )
+        .unwrap()
+        .header
+        .open_id;
+    filesystem
+        .provider_write(replacement, b"replacement")
+        .unwrap();
+    assert_eq!(
+        filesystem.provider_read_at_into(opened, 4093, &mut output),
+        Ok(output.len())
+    );
+    assert_eq!(output, contents[4093..4093 + output.len()]);
+    output.fill(0xa5);
+    assert_eq!(
+        filesystem.provider_read_at_into(opened, (contents.len() - 31) as u64, &mut output),
+        Ok(31)
+    );
+    assert_eq!(&output[..31], &contents[contents.len() - 31..]);
+    assert!(output[31..].iter().all(|byte| *byte == 0xa5));
+    output.fill(0xa5);
+    assert_eq!(
+        filesystem.provider_read_at_into(opened, contents.len() as u64, &mut output),
+        Ok(0)
+    );
+    assert!(output.iter().all(|byte| *byte == 0xa5));
+    assert_eq!(
+        filesystem.provider_seek(opened, 0, mnu_abi::HANDLE_SEEK_CURRENT),
+        Ok(113)
+    );
+    let mut oversized = vec![0; mnu_abi::provider::MAX_SHARED_READ_LEN + 1];
+    assert_eq!(
+        filesystem.provider_read_at_into(opened, 0, &mut oversized),
+        Err(22)
+    );
+    assert_eq!(
+        filesystem.provider_read_at_into(u64::MAX, 0, &mut output),
+        Err(9)
+    );
+    filesystem.provider_close(opened).unwrap();
+    filesystem.provider_close(replacement).unwrap();
+}
+
+#[test]
 fn duplicated_open_descriptions_share_mutable_status_flags() {
     let mut filesystem = test_filesystem();
     let opened = filesystem

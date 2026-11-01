@@ -1828,18 +1828,31 @@ impl FilesystemService {
         offset: u64,
         length: usize,
     ) -> Result<Vec<u8>, i32> {
+        let mut payload = vec![0u8; length.min(mnu_abi::provider::MAX_DATA_LEN)];
+        let done = self.provider_read_at_into(open_id, offset, &mut payload)?;
+        payload.truncate(done);
+        Ok(payload)
+    }
+
+    /// Retained-object positioned I/O; the shared description cursor is intact.
+    pub fn provider_read_at_into(
+        &mut self,
+        open_id: u64,
+        offset: u64,
+        output: &mut [u8],
+    ) -> Result<usize, i32> {
+        if output.len() > mnu_abi::provider::MAX_SHARED_READ_LEN {
+            return Err(EINVAL);
+        }
         if let Some(open) = self.opens.device(open_id) {
-            open.null()?.read_at(&mut [], offset)?;
-            return Ok(Vec::new());
+            return open.null()?.read_at(output, offset);
         }
         let open = self.opens.get_mut(&open_id).ok_or(EBADF)?;
         refresh_provider_file(open)?;
         let file = open.file.as_mut().ok_or(EISDIR)?;
-        let mut payload = vec![0u8; length.min(mnu_abi::provider::MAX_DATA_LEN)];
-        let done = data_reads::read(file, &open.filesystem, self.clock, offset, &mut payload)?;
+        let done = data_reads::read(file, &open.filesystem, self.clock, offset, output)?;
         open.inode = file.inode().clone();
-        payload.truncate(done);
-        Ok(payload)
+        Ok(done)
     }
 
     pub fn provider_write_at(

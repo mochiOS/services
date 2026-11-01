@@ -20,13 +20,14 @@ use std::sync::atomic::{{AtomicBool,AtomicU64,Ordering}};
 thread_local!{{
     static CALLS:Cell<usize>=const{{Cell::new(0)}};
     static IDENTITY:Cell<u64>=const{{Cell::new(0)}};
+    static FEATURES:Cell<Option<u64>>=const{{Cell::new(None)}};
     static STATUS:Cell<i64>=const{{Cell::new(0)}};
     static FAILURE:Cell<u64>=const{{Cell::new(0)}};
     static MALFORMED:Cell<bool>=const{{Cell::new(false)}};
 }}
 struct ProviderObject{{
     endpoint_thread_id:u64,endpoint_slot:u16,endpoint_generation:u64,object_id:u64,
-    memory_identity:AtomicU64,memory_identity_unavailable:AtomicBool,
+    memory_identity:AtomicU64,memory_features:AtomicU64,memory_identity_unavailable:AtomicBool,
 }}
 "#,
         status = root.join("core/crates/abi/src/status.rs"),
@@ -59,9 +60,11 @@ mod syscall{pub mod ipc{
         assert_eq!((request.opcode,request.object_id),(provider::OP_MEMORY_OBJECT,41));assert!(data.is_empty());
         if FAILURE.get()!=0{return Err(FAILURE.get());}
         if MALFORMED.get(){return Ok(reply.len()+1);}
+        let features=FEATURES.get().unwrap_or(0).to_le_bytes();
+        let payload=if STATUS.get()==0&&FEATURES.get().is_some(){&features[..]}else{&[]};
         provider::ResponseHeader{opcode:request.opcode,object_id:41,status:STATUS.get(),
-            value:if STATUS.get()==0{IDENTITY.get()}else{0},data_length:0}
-            .encode(&[],reply).map_err(|_|status::Error::BackingFailure.into_raw())
+            value:if STATUS.get()==0{IDENTITY.get()}else{0},data_length:payload.len()as u32}
+            .encode(payload,reply).map_err(|_|status::Error::BackingFailure.into_raw())
     }
 }}
 "#);
@@ -78,7 +81,7 @@ mod syscall{pub mod ipc{
     ));
     program.push_str(r#"
 fn object()->ProviderObject{ProviderObject{endpoint_thread_id:17,endpoint_slot:2,endpoint_generation:3,object_id:41,
-    memory_identity:AtomicU64::new(0),memory_identity_unavailable:AtomicBool::new(false)}}
+    memory_identity:AtomicU64::new(0),memory_features:AtomicU64::new(0),memory_identity_unavailable:AtomicBool::new(false)}}
 fn main(){
     for identity in [0,1,u64::MAX]{
         let owner=object();IDENTITY.set(identity);let before=CALLS.get();
@@ -88,7 +91,14 @@ fn main(){
         }
         assert_eq!(CALLS.get(),before+1);
         assert_eq!(owner.memory_identity_unavailable(),identity==0);
+        assert_eq!(owner.memory_features(),0);
     }
+    let owner=object();IDENTITY.set(77);FEATURES.set(Some(provider::MEMORY_FEATURE_READ_AT_SHARED));
+    let before=CALLS.get();assert_eq!(provider_cache_identity(&owner),Ok(Some(77)));
+    assert_eq!(owner.memory_features(),provider::MEMORY_FEATURE_READ_AT_SHARED);
+    FEATURES.set(Some(0));assert_eq!(provider_memory_object(&owner),Ok(77));
+    assert_eq!(owner.memory_features(),provider::MEMORY_FEATURE_READ_AT_SHARED);assert_eq!(CALLS.get(),before+1);
+    FEATURES.set(None);
     for status in [-95,-38,-13,-11,-4095]{
         let owner=object();STATUS.set(status);let before=CALLS.get();
         assert_eq!(provider_cache_identity(&owner),Err(status as u64));

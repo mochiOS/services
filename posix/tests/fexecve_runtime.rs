@@ -32,6 +32,9 @@ struct FdObject {
 struct State {
     failure: u8,
     reads: usize,
+    bulk_reads: bool,
+    source_reads: usize,
+    source_max_request: usize,
     opened: usize,
     path: Vec<u8>,
     open_rights: Option<u64>,
@@ -328,6 +331,10 @@ mod syscall {
         assert_eq!(super::DEFER.get(), 0);
         super::STATE.with_borrow_mut(|s| {
             s.reads += 1;
+            if h == 19 {
+                s.source_reads += 1;
+                s.source_max_request = s.source_max_request.max(len as usize);
+            }
             if s.failure == 2 {
                 return Err(super::EIO);
             }
@@ -348,7 +355,8 @@ mod syscall {
                 &s.libraries[(h - 200) as usize].1
             };
             let start = (offset as usize).min(bytes.len());
-            let count = (bytes.len() - start).min(len as usize).min(17);
+            let count = (bytes.len() - start).min(len as usize)
+                .min(if s.bulk_reads { usize::MAX } else { 17 });
             unsafe {
                 std::ptr::copy_nonoverlapping(bytes[start..].as_ptr(), p as *mut u8, count);
             }
@@ -1441,6 +1449,35 @@ fn dependency_capture_uses_readable_regular_handles_and_preserves_all_failure_ow
     STATE.with_borrow(|s| {
         assert!(s.prepared.is_empty());
         assert_eq!(s.entered, 0);
+    });
+}
+
+#[test]
+fn large_image_capture_uses_bounded_bulk_requests_and_preserves_exact_input_bytes() {
+    let (mut bytes, mut library) = dependency_fixture(&[], &[]);
+    // Real linked images with additional nonloaded bytes; capture must still
+    // authenticate every byte instead of just the loaded segments.
+    bytes.resize(2 * 1024 * 1024 + 31, 0x5a);
+    library.resize(256 * 1024 + 19, 0xa5);
+    reset(0);
+    STATE.with_borrow_mut(|s| {
+        s.bytes = bytes.clone();
+        s.libraries = vec![(b"/usr/lib/libscope.so".to_vec(), library.clone())];
+        s.bulk_reads = true;
+    });
+    // The test backend stops at the actual image-replacement boundary.
+    assert_eq!(
+        implementation::replace(0, ptr::null(), ptr::null(), &table()),
+        Err(ENOEXEC)
+    );
+    STATE.with_borrow(|s| {
+        assert_eq!(s.entered, 1);
+        assert_eq!(s.bytes, bytes);
+        assert_eq!(s.libraries[0].1, library);
+        assert_eq!(s.source_max_request, mnu_abi::provider::MAX_SHARED_READ_LEN);
+        assert!(s.source_reads < 100, "source reads={}", s.source_reads);
+        assert!(!s.closed.contains(&19));
+        assert_eq!(s.closed.iter().filter(|handle| **handle == 200).count(), 1);
     });
 }
 

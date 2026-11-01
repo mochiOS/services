@@ -1232,7 +1232,12 @@ fn handle_provider_request(
                 .provider_byte_length(header.object_id)
                 .map(|length| (8, length.to_le_bytes().to_vec()))
         }
-        provider::OP_READ_SHARED => read_provider_shared(service, header, attached, buffer),
+        provider::OP_READ_SHARED => read_provider_shared(service, header, attached, buffer, None),
+        provider::OP_READ_AT_SHARED => payload
+            .try_into()
+            .map(u64::from_le_bytes)
+            .map_err(|_| 22)
+            .and_then(|offset| read_provider_shared(service, header, attached, buffer, Some(offset))),
         provider::OP_READ => service
             .provider_read(header.object_id, header.length as usize)
             .map(|data| (data.len() as u64, data)),
@@ -1261,7 +1266,12 @@ fn handle_provider_request(
             .map(|_| (0, Vec::new())),
         provider::OP_MEMORY_OBJECT => service
             .provider_memory_object(header.object_id)
-            .map(|identity| (identity, Vec::new())),
+            .map(|identity| {
+                let features = if identity == 0 { Vec::new() } else {
+                    provider::MEMORY_FEATURE_READ_AT_SHARED.to_le_bytes().to_vec()
+                };
+                (identity, features)
+            }),
         provider::OP_SEEK => service
             .provider_seek(header.object_id, header.argument, header.basis)
             .map(|offset| (offset, Vec::new())),
@@ -1288,6 +1298,7 @@ fn read_provider_shared(
     header: mnu_abi::provider::RequestHeader,
     attached: &mochi_user_platform::ipc::IpcObjectHandles,
     buffer: &mut filesystem_service::provider_buffer::ProviderReadBuffer,
+    position: Option<u64>,
 ) -> Result<(u64, Vec<u8>), i32> {
     use mochi_user_platform::{handle, memory};
     if attached.count != 1 || attached.delivery_flags != mnu_abi::IPC_DELIVERY_NATIVE_OBJECT {
@@ -1306,7 +1317,14 @@ fn read_provider_shared(
         return Err(22);
     }
     let output = buffer.get(header.length as usize)?;
-    let (count, start) = service.provider_read_into(header.object_id, output)?;
+    let (count, start) = if let Some(position) = position {
+        (
+            service.provider_read_at_into(header.object_id, position, output)?,
+            position,
+        )
+    } else {
+        service.provider_read_into(header.object_id, output)?
+    };
     // Native positioned I/O already supports anonymous VM objects. Avoid a
     // temporary address-space mapping and one user fault per destination page.
     filesystem_service::provider_buffer::publish_native(

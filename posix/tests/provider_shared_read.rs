@@ -110,3 +110,129 @@ fn empty_success_declines_transport_but_does_not_encode_eof_or_a_byte_count() {
         Err(DecodeError::InvalidFields)
     );
 }
+
+#[test]
+fn positioned_shared_reads_keep_source_and_destination_offsets_separate() {
+    let request = RequestHeader {
+        opcode: OP_READ_AT_SHARED,
+        object_id: 19,
+        argument: 0,
+        basis: 4096,
+        length: MAX_SHARED_READ_LEN as u32,
+        data_length: 8,
+    };
+    let source = (u64::MAX - MAX_SHARED_READ_LEN as u64).to_le_bytes();
+    let mut wire = [0; REQUEST_HEADER_LEN + 8];
+    request.encode(&source, &mut wire).unwrap();
+    assert_eq!(RequestHeader::decode(&wire), Ok((request, &source[..])));
+    for bad in [
+        RequestHeader {
+            length: 0,
+            ..request
+        },
+        RequestHeader {
+            length: request.length + 1,
+            ..request
+        },
+        RequestHeader {
+            basis: u64::MAX,
+            ..request
+        },
+        RequestHeader {
+            argument: 1,
+            ..request
+        },
+    ] {
+        assert_eq!(
+            bad.encode(&source, &mut wire),
+            Err(DecodeError::InvalidFields)
+        );
+    }
+    assert_eq!(
+        request.encode(&u64::MAX.to_le_bytes(), &mut wire),
+        Err(DecodeError::InvalidFields)
+    );
+    assert_eq!(
+        request.encode(&source[..7], &mut wire),
+        Err(DecodeError::InvalidFields)
+    );
+    request.encode(&source, &mut wire).unwrap();
+    wire[REQUEST_HEADER_LEN..].copy_from_slice(&u64::MAX.to_le_bytes());
+    assert_eq!(
+        RequestHeader::decode(&wire),
+        Err(DecodeError::InvalidFields)
+    );
+
+    let reply = ResponseHeader {
+        opcode: OP_READ_AT_SHARED,
+        object_id: request.object_id,
+        status: 0,
+        value: 0,
+        data_length: 8,
+    };
+    let mut wire = [0; RESPONSE_HEADER_LEN + 8];
+    reply.encode(&source, &mut wire).unwrap();
+    assert_eq!(ResponseHeader::decode(&wire), Ok((reply, &source[..])));
+    let declined = ResponseHeader {
+        data_length: 0,
+        ..reply
+    };
+    let count = declined.encode(&[], &mut wire).unwrap();
+    assert_eq!(
+        ResponseHeader::decode(&wire[..count]),
+        Ok((declined, &[][..]))
+    );
+}
+
+#[test]
+fn backing_features_are_explicit_bounded_and_not_inferred_from_errors() {
+    let mut wire = [0; RESPONSE_HEADER_LEN + 8];
+    let base = ResponseHeader {
+        opcode: OP_MEMORY_OBJECT,
+        object_id: 7,
+        status: 0,
+        value: 33,
+        data_length: 0,
+    };
+    let count = base.encode(&[], &mut wire).unwrap();
+    assert_eq!(ResponseHeader::decode(&wire[..count]), Ok((base, &[][..])));
+    assert_eq!(memory_features(33, &[]), Ok(0));
+    let extended = ResponseHeader {
+        data_length: 8,
+        ..base
+    };
+    let features = MEMORY_FEATURE_READ_AT_SHARED.to_le_bytes();
+    extended.encode(&features, &mut wire).unwrap();
+    assert_eq!(ResponseHeader::decode(&wire), Ok((extended, &features[..])));
+    assert_eq!(
+        memory_features(33, &features),
+        Ok(MEMORY_FEATURE_READ_AT_SHARED)
+    );
+    assert_eq!(
+        ResponseHeader {
+            value: 0,
+            ..extended
+        }
+        .encode(&features, &mut wire),
+        Err(DecodeError::InvalidFields)
+    );
+    assert_eq!(
+        extended.encode(&u64::MAX.to_le_bytes(), &mut wire),
+        Err(DecodeError::InvalidFields)
+    );
+    extended.encode(&features, &mut wire).unwrap();
+    wire[RESPONSE_HEADER_LEN..].copy_from_slice(&u64::MAX.to_le_bytes());
+    assert_eq!(
+        ResponseHeader::decode(&wire),
+        Err(DecodeError::InvalidFields)
+    );
+    assert_eq!(
+        ResponseHeader {
+            status: -11,
+            value: 0,
+            ..extended
+        }
+        .encode(&features, &mut wire),
+        Err(DecodeError::InvalidFields)
+    );
+}

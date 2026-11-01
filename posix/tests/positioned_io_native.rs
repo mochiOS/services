@@ -17,7 +17,7 @@ extern crate self as mnu_abi;
 use status::Error;
 use std::cell::{{Cell,RefCell}};
 const SUCCESS:u64=0;
-pub mod provider{{pub const MAX_DATA_LEN:usize={capacity};}}
+pub mod provider{{pub const MAX_DATA_LEN:usize={capacity};pub const MEMORY_FEATURE_READ_AT_SHARED:u64=1;}}
 thread_local!{{
     static WRITE:Cell<bool>=const{{Cell::new(false)}};
     static LOCKED:Cell<bool>=const{{Cell::new(false)}};
@@ -30,6 +30,9 @@ thread_local!{{
     static FAIL_AFTER:Cell<usize>=const{{Cell::new(0)}};
     static SHORT:Cell<Option<usize>>=const{{Cell::new(None)}};
     static IDENTITY:Cell<bool>=const{{Cell::new(true)}};
+    static FEATURES:Cell<bool>=const{{Cell::new(false)}};
+    static SHARED_CALLS:Cell<usize>=const{{Cell::new(0)}};
+    static SHARED_RESULT:Cell<Option<u64>>=const{{Cell::new(None)}};
     static COPIES:Cell<usize>=const{{Cell::new(0)}};
     static BACKENDS:Cell<usize>=const{{Cell::new(0)}};
     static OVERLAYS:Cell<usize>=const{{Cell::new(0)}};
@@ -48,6 +51,11 @@ unsafe impl std::alloc::GlobalAlloc for Allocator{{
 #[derive(Debug,PartialEq)]struct HandleRights(bool);
 impl HandleRights{{const READ:Self=Self(false);const WRITE:Self=Self(true);}}
 struct ProviderObject;struct Memory;struct Snapshot;
+impl ProviderObject{{fn memory_features(&self)->u64{{u64::from(FEATURES.get())}}}}
+fn provider_read_shared_at(_: &ProviderObject,identity:u64,_:u64,length:usize,_:u64)->Option<u64>{{
+    assert!(!WRITE.get());assert_eq!(identity,99);assert!(length>provider::MAX_DATA_LEN);
+    SHARED_CALLS.set(SHARED_CALLS.get()+1);SHARED_RESULT.get()
+}}
 enum KernelObject{{Provider(ProviderObject),VmObject(Memory),HandleSnapshot(Snapshot),Completion(Snapshot),Other}}
 fn object_native(raw:u64,right:HandleRights)->Result<KernelObject,Error>{{
     assert_eq!(right,HandleRights(WRITE.get()));
@@ -117,12 +125,25 @@ fn reset(write:bool){
     assert!(!LOCKED.get());WRITE.set(write);ADMISSION.set(None);CACHE_ERROR.set(0);LOCK_ERROR.set(None);
     BACKEND_ERROR.set(0);COPY_ERROR.set(None);FAIL_AFTER.set(0);SHORT.set(None);IDENTITY.set(true);
     COPIES.set(0);BACKENDS.set(0);OVERLAYS.set(0);UPDATES.set(0);POSITIONS.with_borrow_mut(Vec::clear);
+    FEATURES.set(false);SHARED_CALLS.set(0);SHARED_RESULT.set(None);
 }
 fn invoke(raw:u64,pointer:u64,length:u64,offset:u64)->u64{
     if WRITE.get(){write_at(raw,pointer,length,offset)}else{read_at(raw,pointer,length,offset)}
 }
 fn main(){
     let chunk=provider::MAX_DATA_LEN as u64;
+    for result in [chunk+1,Error::NotReady.into_raw(),(-5i64)as u64]{
+        reset(false);FEATURES.set(true);SHARED_RESULT.set(Some(result));
+        assert_eq!(invoke(2,4096,chunk+1,81),result);
+        assert_eq!((SHARED_CALLS.get(),BACKENDS.get(),COPIES.get()),(1,0,0));
+    }
+    reset(false);FEATURES.set(true);assert_eq!(invoke(2,4096,chunk+1,81),chunk+1);
+    assert_eq!((SHARED_CALLS.get(),BACKENDS.get()),(1,2));
+    reset(false);FEATURES.set(true);IDENTITY.set(false);assert_eq!(invoke(2,4096,chunk+1,81),chunk+1);
+    assert_eq!((SHARED_CALLS.get(),BACKENDS.get()),(0,2));
+    for (write,length,offset) in [(false,chunk,0),(true,chunk+1,81),(false,1,u64::MAX)]{
+        reset(write);FEATURES.set(true);let _=invoke(2,4096,length,offset);assert_eq!(SHARED_CALLS.get(),0);
+    }
     for write in [false,true]{
         for raw in [1,2,3,5].into_iter().filter(|raw|!write||![3,5].contains(raw)){
             reset(write);assert_eq!(invoke(raw,4096,chunk+3,81),chunk+3);
