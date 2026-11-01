@@ -19,6 +19,7 @@ mochios-posix-protocol = { git = "https://github.com/mochiOS/syscalls", package 
 mochios-posix-client = { git = "https://github.com/mochiOS/syscalls", package = "mochios-posix-client", default-features = false, features = ["syscall-endpoint"] }
 
 [dev-dependencies]
+mochios-elf-signature = { path = "../../user/crates/elf-signature" }
 anyhow = { version = "1", default-features = false }
 ed25519-dalek = { version = "2", default-features = false, features = ["alloc"] }
 mochios-file-publication = { path = "../../tools/devkit/crates/file-publication" }
@@ -66,6 +67,11 @@ harness = false
 [[test]]
 name = "native_clang_driver"
 path = "tests/native_clang_driver.rs"
+harness = false
+
+[[test]]
+name = "native_signed_image"
+path = "tests/native_signed_image.rs"
 harness = false
 
 [[test]]

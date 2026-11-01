@@ -13,6 +13,7 @@ mochios-posix-client = { git = "https://github.com/mochiOS/syscalls", package = 
 mochios-posix-protocol = { git = "https://github.com/mochiOS/syscalls", package = "mochios-posix-protocol" }
 mochios-filesystem-protocol = { git = "https://github.com/mochiOS/syscalls", package = "mochios-filesystem-protocol" }
 sha2 = { version = "0.10", default-features = false }
+mochios-elf-signature = { path = "../../user/crates/elf-signature" }
 
 [build-dependencies]
 

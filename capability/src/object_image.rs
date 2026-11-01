@@ -25,6 +25,16 @@ pub(crate) fn authorize(
     // The caller chooses bytes within its own security domain; its digest is
     // not a signer assertion. Native replacement verifies the actual bytes
     // before committing, and this mode cannot add identity or grant authority.
+    authorize_inherited_digest(sender, identity, &digest)
+}
+
+/// Shared publication boundary. Callers establish the measurement and admission
+/// policy; native replacement rechecks actual bytes and inherited authority.
+pub(crate) fn authorize_inherited_digest(
+    sender: u64,
+    identity: &str,
+    digest: &[u8; 32],
+) -> Result<(), SysError> {
     use mnu_abi::exec::{
         EXEC_AUTHORIZATION_CLASS_PREFIX, EXEC_AUTHORIZATION_KIND_IMAGE_REPLACE_INHERIT,
         EXEC_AUTHORIZATION_KIND_PREFIX, EXECUTABLE_DIGEST_PREFIX,
