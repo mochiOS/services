@@ -134,6 +134,7 @@ pub(crate) struct GpuSurfaceState {
 
 #[derive(Clone)]
 pub(crate) struct Surface {
+    pub(crate) input_regions: Vec<Rect>,
     pub(crate) live: bool,
     pub(crate) owner: ClientId,
     pub(crate) owner_process: u64,
@@ -175,6 +176,7 @@ pub(crate) struct Surface {
 impl Surface {
     pub(crate) fn empty() -> Self {
         Self {
+            input_regions: Vec::new(),
             live: false,
             owner: ClientId(0),
             owner_process: 0,
@@ -1555,6 +1557,44 @@ pub(crate) fn handle_request(
         OP_SET_POSITION => {
             put_u32(&mut reply, 0, errno_status(mochi_user_syscall::EACCES));
         }
+        OP_SET_INPUT_REGIONS => {
+            let token = read_u64(request, 4).unwrap_or(0);
+            let count = read_u32(request, 12).unwrap_or(u32::MAX) as usize;
+            if count > 32 || request.len() != 16 + count * 16 {
+                put_u32(&mut reply, 0, errno_status(mochi_user_syscall::EINVAL));
+                return reply;
+            }
+            let Some(index) = surface_index_for(
+                surfaces,
+                client,
+                SurfaceHandle(token),
+                SurfaceRights::COMMIT,
+            ) else {
+                put_u32(&mut reply, 0, errno_status(mochi_user_syscall::EACCES));
+                return reply;
+            };
+            let mut regions = Vec::with_capacity(count);
+            for i in 0..count {
+                let offset = 16 + i * 16;
+                let region = Rect {
+                    x: read_u32(request, offset).unwrap() as i32,
+                    y: read_u32(request, offset + 4).unwrap() as i32,
+                    width: read_u32(request, offset + 8).unwrap(),
+                    height: read_u32(request, offset + 12).unwrap(),
+                };
+                if region.width == 0
+                    || region.height == 0
+                    || region.width > MAX_DIMENSION
+                    || region.height > MAX_DIMENSION
+                {
+                    put_u32(&mut reply, 0, errno_status(mochi_user_syscall::EINVAL));
+                    return reply;
+                }
+                regions.push(region);
+            }
+            surfaces[index].input_regions = regions;
+            put_u32(&mut reply, 0, 0);
+        }
         OP_SET_TITLE => {
             let token = read_u64(request, 4).unwrap_or(0);
             let title_len = read_u32(request, 12).unwrap_or(u32::MAX) as usize;
@@ -1641,7 +1681,75 @@ pub(crate) fn handle_request(
 
 #[cfg(test)]
 mod tests {
-    use super::{SurfaceRole, takes_keyboard_focus_on_create};
+    use super::*;
+
+    #[test]
+    fn input_regions_require_surface_ownership_and_commit_rights_and_validate_atomically() {
+        let mut surface = Surface::empty();
+        surface.live = true;
+        surface.owner = ClientId(1);
+        surface.handle = SurfaceHandle(42);
+        surface.token = 42;
+        surface.rights = SurfaceRights::COMMIT;
+        let mut request = Vec::new();
+        request.extend_from_slice(&OP_SET_INPUT_REGIONS.to_le_bytes());
+        request.extend_from_slice(&42u64.to_le_bytes());
+        request.extend_from_slice(&1u32.to_le_bytes());
+        for value in [1000u32, 0, 280, 44] {
+            request.extend_from_slice(&value.to_le_bytes());
+        }
+        let call = |surface: &mut Surface, client, request: &[u8]| {
+            handle_request(
+                &mut [],
+                core::slice::from_mut(surface),
+                &mut [],
+                &mut 0,
+                &mut 0,
+                &mut 0,
+                &mut None,
+                &mut None,
+                client,
+                0,
+                request,
+                &mut false,
+                &mut None,
+            )
+        };
+        assert_eq!(
+            read_u32(&call(&mut surface, ClientId(2), &request), 0),
+            Some(errno_status(mochi_user_syscall::EACCES))
+        );
+        assert!(surface.input_regions.is_empty());
+        surface.rights = SurfaceRights::default();
+        assert_eq!(
+            read_u32(&call(&mut surface, ClientId(1), &request), 0),
+            Some(errno_status(mochi_user_syscall::EACCES))
+        );
+        surface.rights = SurfaceRights::COMMIT;
+        assert_eq!(
+            read_u32(&call(&mut surface, ClientId(1), &request), 0),
+            Some(0)
+        );
+        assert_eq!(surface.input_regions.len(), 1);
+        put_u32(&mut request, 24, 0);
+        assert_ne!(
+            read_u32(&call(&mut surface, ClientId(1), &request), 0),
+            Some(0)
+        );
+        assert_eq!(surface.input_regions[0].width, 280);
+        request.truncate(16);
+        put_u32(&mut request, 12, 33);
+        assert_ne!(
+            read_u32(&call(&mut surface, ClientId(1), &request), 0),
+            Some(0)
+        );
+        put_u32(&mut request, 12, 0);
+        assert_eq!(
+            read_u32(&call(&mut surface, ClientId(1), &request), 0),
+            Some(0)
+        );
+        assert!(surface.input_regions.is_empty());
+    }
 
     #[test]
     fn new_toplevel_windows_take_keyboard_focus() {

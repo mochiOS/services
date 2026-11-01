@@ -170,7 +170,14 @@ fn hit_test(surfaces: &[Surface], windows: &[Window], x: i32, y: i32) -> Option<
                 // Match Binder StatusArea's 9px edge; active window grabs still
                 // bypass hit testing and retain their drag/resize ownership.
                 let reveal_edge = surface.y == 0 && sy < 9;
+                let explicit_target = surface.input_regions.iter().any(|region| {
+                    (sx as i64) >= i64::from(region.x)
+                        && (sy as i64) >= i64::from(region.y)
+                        && (sx as i64) < i64::from(region.x) + i64::from(region.width)
+                        && (sy as i64) < i64::from(region.y) + i64::from(region.height)
+                });
                 if !reveal_edge
+                    && !explicit_target
                     && read_current_pixel(surface, sx, sy).is_none_or(|pixel| pixel >> 24 == 0)
                 {
                     continue;
@@ -783,6 +790,7 @@ fn encode_key_event_detail(flags: u16, modifiers: u32) -> u32 {
 
 #[cfg(test)]
 mod tests {
+    use crate::geometry::Rect;
     use super::hit_test;
     use super::panel_observer_event;
     use super::{
@@ -900,6 +908,12 @@ mod tests {
         panel.width = 1280;
         panel.height = 800;
         panel.role = SurfaceRole::Panel;
+        panel.input_regions.push(Rect {
+            x: 1100,
+            y: 0,
+            width: 180,
+            height: 44,
+        });
         let surfaces = [content, decor, panel];
         for (x, y) in [(1279, 0), (1279, 20), (1160, 0)] {
             assert_eq!(hit_test(&surfaces, &[window], x, y), Some(1));
@@ -907,6 +921,34 @@ mod tests {
         assert_eq!(hit_test(&surfaces, &[window], 1100, 0), Some(2));
         window.state = crate::protocol::WINDOW_STATE_NORMAL;
         assert_eq!(hit_test(&surfaces, &[window], 1279, 0), Some(2));
+    }
+
+    #[test]
+    fn explicit_panel_targets_accept_transparent_edges_only_inside_the_registered_area() {
+        let mut app = Surface::empty();
+        app.live = true;
+        app.visible = true;
+        app.width = 1280;
+        app.height = 800;
+        let mut panel = Surface::empty();
+        panel.live = true;
+        panel.visible = true;
+        panel.width = 1280;
+        panel.height = 800;
+        panel.role = SurfaceRole::Panel;
+        panel.input_regions.push(Rect {
+            x: 1000,
+            y: 0,
+            width: 280,
+            height: 44,
+        });
+        let mut surfaces = [app, panel];
+        assert_eq!(hit_test(&surfaces, &[], 1279, 27), Some(1));
+        assert_eq!(hit_test(&surfaces, &[], 1279, 43), Some(1));
+        assert_eq!(hit_test(&surfaces, &[], 1279, 44), Some(0));
+        assert_eq!(hit_test(&surfaces, &[], 999, 27), Some(0));
+        surfaces[1].input_regions.clear();
+        assert_eq!(hit_test(&surfaces, &[], 1279, 27), Some(0));
     }
 
     #[test]

@@ -261,7 +261,7 @@ fn handle_request(
             );
         }
         OP_CREATE_SURFACE | OP_ATTACH_BUFFER | OP_DAMAGE | OP_COMMIT | OP_SET_POSITION
-        | OP_DESTROY_SURFACE | OP_SET_TITLE => {
+        | OP_DESTROY_SURFACE | OP_SET_TITLE | OP_SET_INPUT_REGIONS => {
             return crate::surface::handle_request(
                 clients,
                 surfaces,
