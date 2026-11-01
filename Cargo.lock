@@ -2585,7 +2585,9 @@ dependencies = [
 name = "posix-service"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "async-trait",
+ "ed25519-dalek",
  "ext4plus",
  "filesystem-service",
  "libc",

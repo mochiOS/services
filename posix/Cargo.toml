@@ -19,6 +19,8 @@ mochios-posix-protocol = { git = "https://github.com/mochiOS/syscalls", package 
 mochios-posix-client = { git = "https://github.com/mochiOS/syscalls", package = "mochios-posix-client", default-features = false, features = ["syscall-endpoint"] }
 
 [dev-dependencies]
+anyhow = { version = "1", default-features = false }
+ed25519-dalek = { version = "2", default-features = false, features = ["alloc"] }
 mochios-file-publication = { path = "../../tools/devkit/crates/file-publication" }
 mochios-linker-driver = { path = "../../tools/devkit/crates/linker-driver" }
 mochios-user-database = { path = "../../user/crates/user-database" }
