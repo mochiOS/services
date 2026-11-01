@@ -73,3 +73,10 @@ pub fn image(main: bool, fixed: bool, mapped: bool) -> Vec<u8> {
     bytes[0x1100] = 0xc3;
     bytes
 }
+
+pub fn static_image() -> Vec<u8> {
+    let mut bytes = image(false, true, true);
+    // No interpreter, dynamic table or relocation: a fixed raw executable.
+    bytes[64 + 2 * 56..64 + 2 * 56 + 4].fill(0);
+    bytes
+}

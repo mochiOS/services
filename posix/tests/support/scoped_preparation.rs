@@ -325,6 +325,81 @@ unsafe impl Backend for FaultAllocation {
 }
 
 #[test]
+fn static_capture_runs_policy_once_and_publishes_only_the_accepted_snapshot() {
+    let mut root = super::interpreter_preparation::fixture::static_image();
+    // Remove PT_DYNAMIC to exercise a fixed static image, with no relocation,
+    // interpreter or dependency handling. Include a nonloaded suffix too.
+    root.resize(256 * 1024 + 19, 0x5a);
+    assert!(!mochios_posix_client::image_preparation::needs_preparation_bytes(&root).unwrap());
+    for reject in [None, Some((1, EACCES))] {
+        reset(0);
+        STATE.with_borrow_mut(|s| {
+            s.bytes = root.clone();
+            s.bulk_reads = true;
+        });
+        ALLOCATIONS.with_borrow_mut(|s| *s = Allocations::default());
+        CAPTURES.with_borrow_mut(|s| {
+            *s = Captures {
+                reject,
+                mutate_after_capture: true,
+                ..Default::default()
+            }
+        });
+        let mut owner = Preparation::<FaultAllocation>::default();
+        let result = owner.prepare(
+            &FaultAllocation,
+            19,
+            Environment::default(),
+            Default::default(),
+        );
+        match (reject, result) {
+            (None, Ok(prepared)) => {
+                assert_eq!(prepared.image, 29);
+                assert_eq!(prepared.source, root);
+                assert_eq!(prepared.bytes, root);
+                assert_eq!(prepared.source.as_ptr(), prepared.bytes.as_ptr());
+                assert!(prepared.executable.is_none());
+                assert!(
+                    prepared.lifecycle.is_empty()
+                        && prepared.tls.is_empty()
+                        && prepared.indirect.is_empty()
+                );
+            }
+            (Some((_, expected)), Err(error)) => assert_eq!(error, expected),
+            (_, other) => panic!("unexpected static preparation result: {}", other.is_ok()),
+        }
+        assert!(matches!(
+            owner.prepare(
+                &FaultAllocation,
+                19,
+                Environment::default(),
+                Default::default()
+            ),
+            Err(EINVAL)
+        ));
+        drop(owner);
+        CAPTURES.with_borrow(|s| assert_eq!(s.seen, [(None, root.clone())]));
+        ALLOCATIONS.with_borrow(|s| assert!(s.live.is_empty()));
+        STATE.with_borrow(|s| {
+            assert!(
+                s.bytes.iter().all(|b| *b == 0),
+                "original file changed after capture"
+            );
+            assert_eq!(s.opened, 0);
+            assert!(s.library_paths.is_empty());
+            assert!(!s.closed.contains(&19));
+            if reject.is_none() {
+                assert_eq!(s.prepared, root);
+                assert_eq!(s.closed, [28, 29]);
+            } else {
+                assert_eq!(s.images_created, 0);
+                assert!(s.closed.is_empty());
+            }
+        });
+    }
+}
+
+#[test]
 fn interpreter_capture_uses_only_the_delegated_scope_and_authenticated_bytes() {
     use super::interpreter_preparation::fixture;
     let root = fixture::image(true, false, false);

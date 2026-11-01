@@ -1,4 +1,7 @@
 #define _GNU_SOURCE 1
+#ifndef __mochios__
+#error "native_fexecve requires the mochiOS target ABI"
+#endif
 #include <errno.h>
 #include <fcntl.h>
 #include <signal.h>
@@ -10,6 +13,12 @@
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#ifndef FEXECVE_PAYLOAD_PATH
+#define FEXECVE_PAYLOAD_PATH "/system/tests/fexecve-payload-201"
+#endif
+#ifndef FEXECVE_SELF_PATH
+#define FEXECVE_SELF_PATH "/system/services/compositor.service"
+#endif
 #define CHECK(x)                                                               \
   do {                                                                         \
     if (!(x)) {                                                                \
@@ -146,7 +155,7 @@ int main(int argc, char **argv) {
   const char *path = "/tmp/fexecve-image-201", *data = "/tmp/fexecve-data-201";
   unlink(path);
   unlink(data);
-  CHECK(copy_image("/system/tests/fexecve-payload-201", path) == 0);
+  CHECK(copy_image(FEXECVE_PAYLOAD_PATH, path) == 0);
   int image = open(path, O_RDONLY | O_CLOEXEC);
   CHECK(image >= 0);
   CHECK(unlink(path) == 0);
@@ -180,6 +189,11 @@ int main(int argc, char **argv) {
     CHECK(sigemptyset(&blocked) == 0 && sigaddset(&blocked, SIGUSR1) == 0);
     CHECK(sigprocmask(SIG_BLOCK, &blocked, NULL) == 0 &&
           kill(getpid(), SIGUSR1) == 0);
+    // Establish pending state before exec, rather than attributing an earlier
+    // signal-generation or mask failure to the replacement boundary.
+    sigset_t pending_before;
+    CHECK(sigpending(&pending_before) == 0 &&
+          sigismember(&pending_before, SIGUSR1) == 1);
     char k[32], d[32], im[32], r[32], g[32];
     snprintf(k, sizeof k, "KEEP=%d", keep);
     snprintf(d, sizeof d, "DROP=%d", drop);
@@ -219,7 +233,7 @@ int main(int argc, char **argv) {
   CHECK(child >= 0);
   if (child == 0) {
     char *args[] = {"path-reexec", "--path-reexec", NULL}, *env[] = {NULL};
-    execve("/system/services/compositor.service", args, env);
+    execve(FEXECVE_SELF_PATH, args, env);
     _exit(98);
   }
   CHECK(waitpid(child, &status, 0) == child && WIFEXITED(status) &&

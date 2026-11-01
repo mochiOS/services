@@ -62,9 +62,6 @@ mod exec_inputs;
 mod interpreter_preparation;
 #[path = "support/scoped_preparation.rs"]
 mod scoped_preparation;
-#[path = "../../../user/crates/newlib-runtime/src/vector_buffer.rs"]
-mod vector_buffer;
-use vector_buffer::VectorBuffer;
 #[path = "../../../user/crates/newlib-runtime/src/exec_handle.rs"]
 mod implementation;
 #[path = "../../../user/crates/newlib-runtime/src/user_copy.rs"]
@@ -520,7 +517,11 @@ fn actual_fd_path_preserves_original_references_and_cleans_every_failed_stage() 
             assert_eq!(s.checked, 1);
             assert_eq!(s.drops, drops);
             assert_eq!(s.entered, entered);
-            assert_eq!(s.closed, if failure == 6 { vec![404] } else { vec![] });
+            assert_eq!(s.closed, match failure {
+                1..=3 => vec![],
+                6 => vec![28, 404, 29],
+                _ => vec![28, 29],
+            });
         });
         assert_eq!(fds.get(0).unwrap().handle.lower_handle, 19);
         assert_eq!(DEFER.get(), 0);
@@ -652,7 +653,7 @@ fn executable_open_needs_read_and_transfer_but_no_shared_cursor_authority() {
         );
         STATE.with_borrow(|s| {
             assert_eq!(s.entered, usize::from(allowed));
-            assert_eq!(s.closed, [19]);
+            assert_eq!(s.closed, if allowed { vec![28, 29, 19] } else { vec![19] });
         });
     }
 }
@@ -1712,6 +1713,7 @@ fn rpath_is_inherited_by_transitive_dependencies_while_runpath_is_not() {
 
 #[test]
 fn exec_publishes_authenticated_auxiliary_identity_and_removes_secure_loader_environment() {
+    let root = interpreter_preparation::fixture::static_image();
     for (secure, expected) in [
         (0, [0, 0, 0, 0, 0]),
         (1, [0, 501, 0, 0, 1]),
@@ -1719,7 +1721,7 @@ fn exec_publishes_authenticated_auxiliary_identity_and_removes_secure_loader_env
     ] {
         assert_eq!(
             search_exec(
-                &[],
+                &root,
                 &[],
                 &[
                     c"KEEP=original",
@@ -2085,7 +2087,7 @@ fn fixed_executable_preparation_preserves_entry_bias_and_private_source_headers(
 }
 
 #[test]
-fn static_fixed_image_keeps_the_original_native_exec_path() {
+fn static_fixed_image_preserves_exact_bytes_in_a_private_readonly_snapshot() {
     struct Temporary(std::path::PathBuf);
     impl Drop for Temporary {
         fn drop(&mut self) {
@@ -2137,12 +2139,13 @@ fn static_fixed_image_keeps_the_original_native_exec_path() {
     );
     STATE.with_borrow(|s| {
         assert_eq!(s.entered, 1);
-        assert!(s.prepared.is_empty() && s.library_paths.is_empty());
+        assert_eq!(s.prepared, large);
+        assert!(s.library_paths.is_empty());
         // The broker compares SHA-256 of all source bytes, including the
-        // nonloaded suffix. Static images must use the bulk path as well.
+        // nonloaded suffix. Static images must use the bulk capture path too.
         assert_eq!(s.bytes, large);
         assert_eq!(s.source_max_request, mnu_abi::provider::MAX_SHARED_READ_LEN);
-        assert!(s.source_reads < 20, "source reads={}", s.source_reads);
+        assert!(s.source_reads < large.len().div_ceil(64 * 1024), "source reads={}", s.source_reads);
         assert!(!s.closed.contains(&19));
     });
     for stride in [56usize, 64] {
@@ -2161,11 +2164,12 @@ fn static_fixed_image_keeps_the_original_native_exec_path() {
         assert_eq!(search_exec(&source, &[], &[], 0, 0), Err(ENOEXEC));
         STATE.with_borrow(|state| {
             assert_eq!(state.entered, 1);
-            assert!(state.prepared.is_empty() && state.library_paths.is_empty());
+            assert_eq!(state.prepared, source);
+            assert!(state.library_paths.is_empty());
             assert!(
                 !state.closed.contains(&19)
-                    && !state.closed.contains(&28)
-                    && !state.closed.contains(&29)
+                    && state.closed.contains(&28)
+                    && state.closed.contains(&29)
             );
         });
     }
