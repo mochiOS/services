@@ -1630,6 +1630,7 @@ dependencies = [
  "mnu-abi",
  "mochi-user-syscall",
  "mochios-capability-protocol",
+ "mochios-package-manifest",
  "mochios-workspace-protocol",
 ]
 
@@ -1777,6 +1778,13 @@ version = "0.1.0"
 [[package]]
 name = "mochios-network-stack"
 version = "0.1.0"
+
+[[package]]
+name = "mochios-package-manifest"
+version = "0.1.0"
+dependencies = [
+ "toml 1.1.6+spec-1.1.0",
+]
 
 [[package]]
 name = "mochios-package-protocol"
@@ -2614,6 +2622,7 @@ dependencies = [
  "mochios-linux-gui-protocol",
  "mochios-net-device-protocol",
  "mochios-network-stack",
+ "mochios-package-manifest",
  "mochios-posix-client",
  "mochios-posix-protocol",
  "mochios-signature-protocol",

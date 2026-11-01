@@ -70,12 +70,19 @@ fn main() {
     assert_eq!(executed.stdout, b"manifest326\n");
     println!("embedded-manifest-326: PASS ./main after removing the manifest input");
 
-    fs::write(&manifest, "broken = [").unwrap();
-    let rejected = compile();
-    assert!(!rejected.status.success());
-    assert!(String::from_utf8_lossy(&rejected.stderr).contains("invalid manifest.toml"));
-    assert_eq!(fs::read(&executable).unwrap(), signed);
-    println!("embedded-manifest-326: PASS malformed manifest preserves the old signed ELF");
+    for invalid in [
+        "broken = [".to_owned(),
+        declaration.replace("requires = [\"net.connect\"]", "requires = \"net.connect\""),
+    ] {
+        fs::write(&manifest, invalid).unwrap();
+        let rejected = compile();
+        assert!(!rejected.status.success());
+        assert!(String::from_utf8_lossy(&rejected.stderr).contains("invalid manifest.toml"));
+        assert_eq!(fs::read(&executable).unwrap(), signed);
+    }
+    println!(
+        "manifest-schema-327: PASS malformed syntax and declaration types preserve the old signed ELF"
+    );
 
     let mut tampered = signed;
     let matches: Vec<_> = tampered

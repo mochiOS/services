@@ -52,11 +52,13 @@ fn application_and_dynamic_grant_readers_do_not_use_kernel_path_file_apis() {
     ] {
         assert!(!source.contains("platform::package::read_manifest("));
         assert!(!source.contains("platform::file::"));
-        assert!(source.contains("crate::persistent_grant::read_file,"));
     }
-    assert!(include_str!("../../capability/src/app_spawn.rs").contains("verified_manifest("));
-    assert!(
-        include_str!("../../capability/src/dynamic_grant.rs")
-            .contains("crate::runtime_manifest::read_manifest(")
-    );
+    let application = include_str!("../../capability/src/app_spawn.rs");
+    assert!(application.contains("verified_manifest("));
+    assert!(application.contains("crate::persistent_grant::read_file,"));
+    // Dynamic grants no longer reopen a pathname manifest. The common gate
+    // owns authenticated subject and image evidence; do not reintroduce I/O.
+    let dynamic = include_str!("../../capability/src/dynamic_grant.rs");
+    assert!(!dynamic.contains("read_manifest("));
+    assert!(!dynamic.contains("read_file("));
 }

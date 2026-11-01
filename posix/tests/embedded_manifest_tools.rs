@@ -54,6 +54,7 @@ fn signer_embeds_exact_declarations_and_preserves_output_on_invalid_metadata() {
         vec![0xff],
         vec![b'x'; MAX_MANIFEST_LEN + 1],
         b"x = \"a\0b\"".to_vec(),
+        declaration.replace("requires = [\"net.connect\"]", "requires = \"net.connect\"").into_bytes(),
     ] {
         fs::write(&manifest, invalid).unwrap();
         assert!(!sign().status.success());

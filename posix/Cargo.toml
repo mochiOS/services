@@ -19,6 +19,7 @@ mochios-posix-protocol = { git = "https://github.com/mochiOS/syscalls", package 
 mochios-posix-client = { git = "https://github.com/mochiOS/syscalls", package = "mochios-posix-client", default-features = false, features = ["syscall-endpoint"] }
 
 [dev-dependencies]
+mochios-package-manifest = { path = "../../user/crates/package-manifest" }
 mochios-elf-signature = { path = "../../user/crates/elf-signature" }
 anyhow = { version = "1", default-features = false }
 ed25519-dalek = { version = "2", default-features = false, features = ["alloc"] }
