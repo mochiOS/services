@@ -113,6 +113,10 @@ const IPC_DELIVERY_ENDPOINT_HANDLE: u32 = 2;
 const NOT_FOUND: u64 = status::Error::NotFound.into_raw();
 const EACCES: u64 = status::Error::AccessDenied.into_raw();
 mod task { pub const PROCESS_MAX_OBJECT_HANDLES: usize = 4096; }
+mod capability { pub enum Capability { IpcClient, IpcServer } }
+mod syscall { pub mod security {
+    pub fn caller_has_any_capability(_: &[crate::capability::Capability]) -> bool { true }
+} }
 struct HandleRights;
 impl HandleRights { const SEND: Self = Self; }
 struct EndpointRights(u32);

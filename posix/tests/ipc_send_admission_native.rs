@@ -55,6 +55,7 @@ struct ObjectHandleAttachments{delivery_flags:u32}
 fn resolve_call_destination(handle:u64)->Result<(IpcEndpoint,u64,u32),u64>{
     let error=RESOLVE_ERROR.get();if error!=0{return Err(error);}
     let dest=IpcEndpoint{thread_id:19,slot:3,generation:7};
+    if handle>4096&&CAPABILITIES.get()==0{return Err(Error::AccessDenied.into_raw());}
     match handle{7=>Ok((dest,5001,2)),5001=>Ok((dest,5001,0)),_=>Err(Error::NotFound.into_raw())}
 }
 fn decode_outgoing_object_handles(pointer:u64)->Result<ObjectHandleAttachments,u64>{
@@ -116,6 +117,9 @@ fn main(){
     // global endpoint delivery above leaves it clear. Both resolve explicitly.
     reset(true);EXPECTED_FLAGS.set(2);assert_eq!(send_object_handles(7,11,3,99),0);
     assert_eq!((SENDS.get(),DECODES.get()),(1,1));
+    reset(true);EXPECTED_FLAGS.set(2);CAPABILITIES.set(0);
+    assert_eq!(send_object_handles(7,11,3,99),0);
+    assert_eq!((SENDS.get(),DECODES.get(),CAPABILITIES.get()),(1,1,0));
 }
 "#);
     probe::run(&program);

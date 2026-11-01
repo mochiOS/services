@@ -39,6 +39,8 @@ thread_local!{
     static VALID:Cell<bool>=const{Cell::new(true)};
     static SENDER:Cell<bool>=const{Cell::new(true)};
     static LOCKED:Cell<bool>=const{Cell::new(false)};
+    static CAPABILITIES:Cell<bool>=const{Cell::new(true)};
+    static GLOBAL_LOOKUPS:Cell<usize>=const{Cell::new(0)};
 }
 #[derive(Clone,Debug)]enum KernelObject{IpcEndpoint{thread_id:u64,slot:u16,generation:u64},Other}
 struct Entry{rights:HandleRights,object:KernelObject}
@@ -58,8 +60,14 @@ mod task{
         assert!(!crate::LOCKED.replace(true));let result=body(&Process);crate::LOCKED.set(false);Some(result)
     }
 }
+mod capability{pub enum Capability{IpcClient,IpcServer}}
 mod syscall{
-    pub mod security{pub fn current_process_id()->Option<u64>{crate::CONTEXT.get().then_some(42)}}
+    pub mod security{
+        pub fn current_process_id()->Option<u64>{crate::CONTEXT.get().then_some(42)}
+        pub fn caller_has_any_capability(requested:&[crate::capability::Capability])->bool{
+            assert_eq!(requested.len(),2);crate::CAPABILITIES.get()
+        }
+    }
     pub mod handle{
         use crate::{mnu_abi,KernelObject,HandleRights,ObjectHandle};
 "#);
@@ -79,6 +87,7 @@ struct EndpointRights(u8);
 impl EndpointRights{const RECV:Self=Self(1);fn contains(&self,required:Self)->bool{self.0&required.0==required.0}}
 struct Record{thread_id:u64,slot:u16,generation:u64,rights:EndpointRights}
 fn endpoint_record_from_handle(raw:u64)->Option<Record>{
+    GLOBAL_LOOKUPS.set(GLOBAL_LOOKUPS.get()+1);
     match raw{5001=>Some(Record{thread_id:19,slot:3,generation:7,rights:EndpointRights(1)}),
         5002=>Some(Record{thread_id:20,slot:4,generation:8,rights:EndpointRights(0)}),_=>None}
 }
@@ -97,6 +106,7 @@ fn endpoint_record_from_handle(raw:u64)->Option<Record>{
     program.push_str(r#"
 fn reset(){
     CONTEXT.set(true);PROCESS.set(true);HANDLE.set(true);RIGHTS.set(12);KIND.set(true);VALID.set(true);SENDER.set(true);
+    CAPABILITIES.set(true);GLOBAL_LOOKUPS.set(0);
     assert!(!LOCKED.get());
 }
 fn main(){
@@ -129,6 +139,19 @@ fn main(){
     assert_eq!(resolve_receive_thread(5001,20),Err(Error::AccessDenied.into_raw()));
     assert_eq!(resolve_receive_thread(5002,20),Err(Error::AccessDenied.into_raw()));
     assert_eq!(resolve_receive_thread(6000,19),Err(Error::NotFound.into_raw()));
+    reset();CAPABILITIES.set(false);RIGHTS.set(HandleRights::SEND.bits());
+    assert_eq!(resolve_call_destination(7),Ok((IpcEndpoint{thread_id:19,slot:3,generation:7},5001,2)));
+    assert_eq!(GLOBAL_LOOKUPS.get(),0);
+    for raw in [5001,5002,6000,u64::MAX]{
+        assert_eq!(resolve_call_destination(raw),Err(Error::AccessDenied.into_raw()));
+        assert_eq!(GLOBAL_LOOKUPS.get(),0);
+    }
+    RIGHTS.set(HandleRights::RECEIVE.bits());
+    assert_eq!(resolve_call_destination(7),Err(Error::AccessDenied.into_raw()));
+    RIGHTS.set(HandleRights::SEND.bits());KIND.set(false);
+    assert_eq!(resolve_call_destination(7),Err(Error::InvalidArgument.into_raw()));
+    KIND.set(true);VALID.set(false);
+    assert_eq!(resolve_call_destination(7),Err(Error::NotFound.into_raw()));
     assert!(!LOCKED.get());
 }
 "#);

@@ -76,6 +76,11 @@ path = "tests/native_signed_image.rs"
 harness = false
 
 [[test]]
+name = "native_delegated_ipc"
+path = "tests/native_delegated_ipc.rs"
+harness = false
+
+[[test]]
 name = "native_memory_object_capacity"
 path = "tests/native_memory_object_capacity.rs"
 harness = false

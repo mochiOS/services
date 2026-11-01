@@ -137,9 +137,12 @@ fn main(){
         }
     }
     for handles in [false,true]{
-        for stage in 0..6{
+        reset();CAPS.set(false);
+        STATE.with_borrow_mut(|s|s.replies.push_back(0));
+        assert_eq!(run(handles),123);assert!(!CAPS.get());assert_eq!(OBSERVERS.get(),0);
+        STATE.with_borrow(|s|assert_eq!((s.calls,s.receives,s.decodes),(1,1,usize::from(handles))));
+        for stage in 1..6{
             reset();let expected=match stage{
-                0=>{CAPS.set(false);NativeError::AccessDenied},
                 1=>{CONTEXT.set(false);NativeError::NotReady},
                 2=>{REGISTER.set(false);NativeError::ResourceUnavailable},
                 3=>{TARGET.set(false);NativeError::NotFound},
