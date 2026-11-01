@@ -261,4 +261,227 @@ mod tests {
                 .contains("requires a Section Header Table")
         );
     }
+
+    fn refresh_adhoc(bytes: &mut [u8]) {
+        let record = locate_record(bytes).unwrap().unwrap();
+        let digest = normalized_digest(bytes, &record).unwrap();
+        bytes[record.digest_file_offset..record.digest_file_offset + 32].copy_from_slice(&digest);
+    }
+
+    #[test]
+    fn captured_evidence_measures_all_original_bytes_including_signature() {
+        let signed = sign_adhoc(&fixture()).unwrap();
+        let evidence = verify_image(&signed, None, &VerificationLimits::default()).unwrap();
+        let raw: [u8; 32] = Sha256::digest(&signed).into();
+        assert_eq!(evidence.bytes().as_ptr(), signed.as_ptr());
+        assert_eq!(evidence.bytes(), signed);
+        assert_eq!(*evidence.source_digest(), raw);
+        assert_ne!(evidence.source_digest(), &evidence.signature().digest);
+        let mut changed = signed.clone();
+        // This is not a loaded code byte, but is still part of both hashes.
+        changed[0xf0] = 1;
+        assert!(verify_image(&changed, None, &VerificationLimits::default()).is_err());
+        refresh_adhoc(&mut changed);
+        let other = verify_image(&changed, None, &VerificationLimits::default()).unwrap();
+        assert_ne!(other.source_digest(), evidence.source_digest());
+    }
+
+    #[test]
+    fn image_and_header_limits_are_checked_before_untrusted_tables() {
+        let signed = sign_adhoc(&fixture()).unwrap();
+        let base = VerificationLimits::default();
+        let limits = VerificationLimits {
+            max_image_bytes: signed.len() - 1,
+            ..base
+        };
+        assert!(
+            verify_with_limits(&signed, None, &limits)
+                .unwrap_err()
+                .to_string()
+                .contains("byte limit")
+        );
+        let limits = VerificationLimits {
+            max_section_headers: 4,
+            ..base
+        };
+        assert!(
+            verify_with_limits(&signed, None, &limits)
+                .unwrap_err()
+                .to_string()
+                .contains("section header limit")
+        );
+        let mut bad = signed.clone();
+        put_u16(&mut bad, 56, u16::MAX);
+        let limits = VerificationLimits {
+            max_program_headers: 64,
+            ..base
+        };
+        assert!(
+            verify_with_limits(&bad, None, &limits)
+                .unwrap_err()
+                .to_string()
+                .contains("program header limit")
+        );
+        let limits = VerificationLimits {
+            max_image_bytes: signed.len(),
+            max_section_headers: 5,
+            max_program_headers: 0,
+            ..base
+        };
+        assert!(verify_with_limits(&signed, None, &limits).is_ok());
+    }
+
+    #[test]
+    fn repeated_section_names_consume_a_cumulative_budget() {
+        let mut unsigned = fixture();
+        let shstr_offset = unsigned.len();
+        let mut names = b"\0.shstrtab\0.text\0".to_vec();
+        let long_name = names.len();
+        names.extend_from_slice(&vec![b'x'; 4096]);
+        names.push(0);
+        unsigned.extend_from_slice(&names);
+        put_u64(&mut unsigned, 0x100 + 64 + 24, shstr_offset as u64);
+        put_u64(&mut unsigned, 0x100 + 64 + 32, names.len() as u64);
+        put_u32(&mut unsigned, 0x100 + 128, long_name as u32);
+        let mut signed = sign_adhoc(&unsigned).unwrap();
+        let table = read_u64(&signed, 40).unwrap() as usize;
+        // Alias the same long name from a second ordinary section.
+        put_u32(&mut signed, table + 64, long_name as u32);
+        refresh_adhoc(&mut signed);
+        let parsed = parse_elf(&signed).unwrap();
+        let cost: usize = parsed.sections.iter().map(|s| s.name_len + 1).sum();
+        let limits = VerificationLimits {
+            max_name_scan_bytes: cost,
+            ..VerificationLimits::default()
+        };
+        assert!(verify_with_limits(&signed, None, &limits).is_ok());
+        let limits = VerificationLimits {
+            max_name_scan_bytes: cost - 1,
+            ..limits
+        };
+        assert!(
+            verify_with_limits(&signed, None, &limits)
+                .unwrap_err()
+                .to_string()
+                .contains("name scan limit")
+        );
+        // An unterminated large name is scanned only up to the supplied budget.
+        let mut bad = signed;
+        let table = read_u64(&bad, 40).unwrap() as usize;
+        let shstr_index = read_u16(&bad, 62).unwrap() as usize;
+        let names_offset = read_u64(&bad, table + shstr_index * 64 + 24).unwrap() as usize;
+        bad[names_offset + long_name + 4096] = b'x';
+        let limits = VerificationLimits {
+            max_name_scan_bytes: 16,
+            ..limits
+        };
+        assert!(
+            verify_with_limits(&bad, None, &limits)
+                .unwrap_err()
+                .to_string()
+                .contains("name scan limit")
+        );
+    }
+
+    #[test]
+    fn overlapping_non_signature_notes_cannot_multiply_scan_work() {
+        let signed = sign_adhoc(&fixture()).unwrap();
+        let old_table = read_u64(&signed, 40).unwrap() as usize;
+        let count = read_u16(&signed, 60).unwrap() as usize;
+        let mut repeated = signed.clone();
+        let area = repeated.len();
+        repeated.extend_from_slice(&[0u8; 12 * 128]);
+        pad_to(&mut repeated, 8).unwrap();
+        let table = repeated.len();
+        repeated.extend_from_slice(&signed[old_table..old_table + count * 64]);
+        for _ in 0..4 {
+            let mut header = [0u8; 64];
+            put_u32(&mut header, 4, SHT_NOTE);
+            put_u64(&mut header, 24, area as u64);
+            put_u64(&mut header, 32, 12 * 128);
+            put_u64(&mut header, 48, 4);
+            repeated.extend_from_slice(&header);
+        }
+        put_u64(&mut repeated, 40, table as u64);
+        put_u16(&mut repeated, 60, (count + 4) as u16);
+        refresh_adhoc(&mut repeated);
+        let parsed = parse_elf(&repeated).unwrap();
+        let cost: usize = parsed
+            .sections
+            .iter()
+            .filter(|s| s.section_type == SHT_NOTE)
+            .map(|s| s.size)
+            .sum();
+        let limits = VerificationLimits {
+            max_note_scan_bytes: cost,
+            ..VerificationLimits::default()
+        };
+        assert!(verify_with_limits(&repeated, None, &limits).is_ok());
+        let limits = VerificationLimits {
+            max_note_scan_bytes: cost - 1,
+            ..limits
+        };
+        assert!(
+            verify_with_limits(&repeated, None, &limits)
+                .unwrap_err()
+                .to_string()
+                .contains("NOTE scan limit")
+        );
+    }
+
+    #[test]
+    fn section_and_program_note_alias_is_counted_without_changing_v1_rules() {
+        let mut unsigned = fixture();
+        put_u64(&mut unsigned, 32, 64);
+        put_u16(&mut unsigned, 54, 56);
+        put_u16(&mut unsigned, 56, 1);
+        put_u32(&mut unsigned, 64, PT_NOTE);
+        let mut signed = sign_adhoc(&unsigned).unwrap();
+        let parsed = parse_elf(&signed).unwrap();
+        let note = *parsed
+            .sections
+            .iter()
+            .find(|s| s.section_type == SHT_NOTE)
+            .unwrap();
+        put_u64(&mut signed, 64 + 8, note.offset as u64);
+        put_u64(&mut signed, 64 + 32, note.size as u64);
+        refresh_adhoc(&mut signed);
+        let limits = VerificationLimits {
+            max_note_scan_bytes: note.size * 2,
+            ..VerificationLimits::default()
+        };
+        assert!(verify_with_limits(&signed, None, &limits).is_ok());
+        let limits = VerificationLimits {
+            max_note_scan_bytes: note.size * 2 - 1,
+            ..limits
+        };
+        assert!(
+            verify_with_limits(&signed, None, &limits)
+                .unwrap_err()
+                .to_string()
+                .contains("NOTE scan limit")
+        );
+    }
+
+    #[test]
+    fn captured_keyed_evidence_never_downgrades_to_adhoc() {
+        let key = SigningKey::from_bytes(&[23; 32]);
+        let signed = sign_ed25519(&fixture(), &key).unwrap();
+        let limits = VerificationLimits::default();
+        assert!(verify_image(&signed, None, &limits).is_err());
+        let wrong = SigningKey::from_bytes(&[24; 32]);
+        let wrong = SuppliedPublicKey::new(&wrong.verifying_key().to_bytes()).unwrap();
+        assert!(verify_image(&signed, Some(&wrong), &limits).is_err());
+        let resolver = SuppliedPublicKey::new(&key.verifying_key().to_bytes()).unwrap();
+        let evidence = verify_image(&signed, Some(&resolver), &limits).unwrap();
+        assert_eq!(evidence.signature().kind, SignatureKind::Ed25519);
+        assert_eq!(
+            *evidence.source_digest(),
+            <[u8; 32]>::from(Sha256::digest(&signed))
+        );
+        let record = locate_record(&signed).unwrap().unwrap();
+        let mut tampered = signed;
+        tampered[record.signature_file_offset] ^= 1;
+        assert!(verify_image(&tampered, Some(&resolver), &limits).is_err());
+    }
 }
