@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
 """Verify installation of supplied inputs without generating or changing an SDK."""
 import hashlib
+import importlib.util
 import os
 from pathlib import Path
 import struct
 import subprocess
 import sys
 import tempfile
+import tomllib
 import unittest
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -28,6 +31,12 @@ def elf(machine=62, interpreter=False):
 
 
 class DevelopmentTools(unittest.TestCase):
+    def stager(self):
+        spec = importlib.util.spec_from_file_location("development_stager", STAGER)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
     def setUp(self):
         self.work = tempfile.TemporaryDirectory(prefix="development stage-")
         self.addCleanup(self.work.cleanup)
@@ -86,6 +95,29 @@ class DevelopmentTools(unittest.TestCase):
             self.assertEqual(target.stat().st_mode & 0o777, 0o755)
             self.assertEqual(target.read_bytes(), elf())
         self.assertFalse((prefix / "manifest.toml").exists())
+        package = self.stage / "system/packages/development-tools"
+        declaration = package / "manifest.toml"
+        metadata = tomllib.loads(declaration.read_text())
+        self.assertEqual(metadata["package"]["id"], "org.mochios.development-tools")
+        self.assertEqual(metadata["package"]["kind"], "binary")
+        self.assertEqual(package.stat().st_mode & 0o777, 0o755)
+        self.assertEqual(declaration.stat().st_mode & 0o777, 0o644)
+        self.assertFalse((package / "verification.bin").exists())
+        self.assertEqual(len(metadata["binary"]), 4)
+        files = {entry["id"]: entry for entry in metadata["file"]}
+        for binary in metadata["binary"]:
+            entry = files[binary["file"]]
+            name = Path(binary["path"]).name
+            self.assertEqual(binary["path"], "/system/developer/bin/" + name)
+            self.assertEqual(entry["path"], binary["path"])
+            self.assertEqual(entry["digest"], "sha256:" + hashlib.sha256(elf()).hexdigest())
+            self.assertEqual(entry["size"], len(elf()))
+            self.assertEqual(entry["mode"], "0755")
+            self.assertEqual(binary["kind"], "application")
+            self.assertEqual(set(binary["requires"]), {
+                "fs.read.all", "fs.write.tmp", "fs.write.user", "ipc.client",
+                "ipc.server", "process.spawn", "system.random.read",
+            })
         self.assertEqual(self.snapshot(), before)
         self.assertEqual(list((self.stage / "system").glob(".developer-*")), [])
         for directory in (prefix, self.stage / "system", self.stage / "system/bin",
@@ -144,6 +176,62 @@ class DevelopmentTools(unittest.TestCase):
         self.assertIn("escapes", self.run_stage(False).stderr)
         self.assertEqual(private.read_text(), "not an SDK header")
         self.assertFalse((self.stage / "system/developer").exists())
+
+    def test_package_collision_is_rejected_without_touching_existing_files(self):
+        package = self.stage / "system/packages/development-tools"
+        package.mkdir(parents=True)
+        marker = package / "manifest.toml"
+        marker.write_text("existing package")
+        self.assertIn("refusing to replace", self.run_stage(False).stderr)
+        self.assertEqual(marker.read_text(), "existing package")
+        self.assertFalse((self.stage / "system/developer").exists())
+        self.assertFalse((self.stage / "system/bin/clang").exists())
+
+    def test_alias_failure_rolls_back_sdk_package_and_only_its_own_links(self):
+        module = self.stager()
+        unrelated = self.stage / "system/packages/unrelated/keep"
+        unrelated.parent.mkdir(parents=True)
+        unrelated.write_text("keep")
+        before = self.snapshot()
+        symlink = Path.symlink_to
+
+        def fail_second(path, target, *args, **kwargs):
+            if path.name == "ld.lld":
+                raise OSError("injected alias failure")
+            return symlink(path, target, *args, **kwargs)
+
+        with patch.object(Path, "symlink_to", fail_second):
+            with self.assertRaisesRegex(OSError, "injected alias failure"):
+                module.stage_tools(self.stage, self.sdk, self.llvm, self.tools)
+        self.assertFalse((self.stage / "system/developer").exists())
+        self.assertFalse((self.stage / "system/packages/development-tools").exists())
+        for name in module.TOOLS:
+            self.assertFalse(os.path.lexists(self.stage / "system/bin" / name))
+        self.assertEqual(unrelated.read_text(), "keep")
+        self.assertEqual(self.snapshot(), before)
+
+    def test_manifest_measures_published_bytes_including_non_loaded_trailer(self):
+        module = self.stager()
+        copy = module.shutil.copyfile
+        before = self.snapshot()
+
+        def altered_copy(source, destination, *args, **kwargs):
+            result = copy(source, destination, *args, **kwargs)
+            destination = Path(destination)
+            if destination.parent.name == "bin":
+                destination.write_bytes(destination.read_bytes() + b"copied trailer")
+            return result
+
+        with patch.object(module.shutil, "copyfile", altered_copy):
+            module.stage_tools(self.stage, self.sdk, self.llvm, self.tools)
+        metadata = tomllib.loads((self.stage / "system/packages/development-tools/manifest.toml").read_text())
+        for entry in metadata["file"]:
+            published = self.stage / entry["path"].lstrip("/")
+            content = published.read_bytes()
+            self.assertTrue(content.endswith(b"copied trailer"))
+            self.assertEqual(entry["size"], len(content))
+            self.assertEqual(entry["digest"], "sha256:" + hashlib.sha256(content).hexdigest())
+        self.assertEqual(self.snapshot(), before)
 
 
 if __name__ == "__main__":

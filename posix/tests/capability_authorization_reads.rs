@@ -35,6 +35,66 @@ const MANIFEST: &str = "/system/packages/capability/manifest.toml";
 const RECORD: &str = "/system/packages/capability/verification.bin";
 const BINARY: &str = "/system/services/capability.service";
 
+#[test]
+#[ignore = "requires MOCHIOS_TEST_DEVELOPMENT_PACKAGE and MOCHIOS_TEST_DEVELOPMENT_PREFIX"]
+fn generated_tool_catalog_authenticates_exact_real_code_without_shell_identity() {
+    use mochios_posix_client::image_preparation::Source;
+    use std::path::PathBuf;
+    let package_root = PathBuf::from(std::env::var_os("MOCHIOS_TEST_DEVELOPMENT_PACKAGE").unwrap());
+    let prefix = PathBuf::from(std::env::var_os("MOCHIOS_TEST_DEVELOPMENT_PREFIX").unwrap());
+    let declaration = std::fs::read(package_root.join("manifest.toml")).unwrap();
+    let record = std::fs::read(package_root.join("verification.bin")).unwrap();
+    let manifest_path = "/system/packages/development-tools/manifest.toml";
+    let record_path = "/system/packages/development-tools/verification.bin";
+    let manifest = package::parse_manifest(std::str::from_utf8(&declaration).unwrap()).unwrap();
+    assert_eq!(manifest.package_id, "org.mochios.development-tools");
+    assert_eq!(manifest.binaries.len(), 4);
+    for name in ["clang", "ld.lld", "ld", "msign"] {
+        FILES.with_borrow_mut(|files| {
+            *files = Files::default();
+            files
+                .bytes
+                .insert(manifest_path.into(), declaration.clone());
+            files.bytes.insert(record_path.into(), record.clone());
+        });
+        let path = format!("/system/developer/bin/{name}");
+        let verified = resolver::verified_manifest(manifest_path, read_file).unwrap();
+        let decision = verified.decide_capabilities(&path).unwrap();
+        assert!(decision.is_allowed());
+        assert_eq!(decision.requested.len(), 7);
+        for capability in &decision.requested {
+            assert!(mnu_abi::capability::metadata(capability).is_some());
+        }
+        let catalog = image_catalog::Catalog::new(verified, &path).unwrap();
+        assert_eq!(catalog.identity().package_id, manifest.package_id);
+        assert_ne!(catalog.identity().package_id, "org.mochios.msh");
+        assert_eq!(catalog.identity().provenance, InstallProvenance::BuiltIn);
+        let bytes = std::fs::read(prefix.join("bin").join(name)).unwrap();
+        assert!(!bytes.is_empty());
+        assert_eq!(catalog.validate(Source::Root, &bytes), Ok(()));
+        let mut changed = bytes.clone();
+        changed[0] ^= 1;
+        assert!(catalog.validate(Source::Root, &changed).is_err());
+        assert!(
+            catalog
+                .validate(Source::Root, &bytes[..bytes.len() - 1])
+                .is_err()
+        );
+        changed.clone_from(&bytes);
+        changed.push(0);
+        assert!(catalog.validate(Source::Root, &changed).is_err());
+        FILES.with_borrow_mut(|files| {
+            files
+                .bytes
+                .get_mut(manifest_path)
+                .unwrap()
+                .extend_from_slice(b"\n# replaced declaration\n");
+        });
+        assert_eq!(catalog.validate(Source::Root, &bytes), Ok(()));
+        assert!(resolver::verified_manifest(manifest_path, read_file).is_err());
+    }
+}
+
 #[derive(Default)]
 struct Files {
     bytes: BTreeMap<String, Vec<u8>>,
