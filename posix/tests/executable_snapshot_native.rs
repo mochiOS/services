@@ -36,6 +36,13 @@ thread_local! {
     static EXTENT_QUERIES:Cell<usize>=const {Cell::new(0)};
     static EXTENT_ERROR:Cell<Option<u64>>=const {Cell::new(None)};
     static EXTENT_REPLY_LEN:Cell<usize>=const {Cell::new(8)};
+    static FEATURES:Cell<u64>=const {Cell::new(0)};
+    static ACTUAL_LENGTH:Cell<Option<u64>>=const {Cell::new(None)};
+    static SHARED_CALLS:Cell<usize>=const {Cell::new(0)};
+    static SHARED_MAX:Cell<usize>=const {Cell::new(0)};
+    static TRANSFERS:Cell<usize>=const {Cell::new(0)};
+    static DECLINE:Cell<bool>=const {Cell::new(false)};
+    static SHARED_ERROR_AFTER:Cell<usize>=const {Cell::new(usize::MAX)};
 }
 static ALLOCATIONS:AtomicUsize=AtomicUsize::new(0);
 struct Allocator;
@@ -72,6 +79,31 @@ impl Memory {
     }
 }
 struct Provider {object_id:u64}
+impl Provider {fn memory_features(&self)->u64 {FEATURES.get()}}
+// Controlled data transport; actual wire validation and transfer ownership
+// execute separately in provider_shared_native.rs. Here the real read_all
+// must retain one backing guard, choose the right path and own every result.
+struct ProviderReadTransfer {capacity:usize}
+impl ProviderReadTransfer {
+    fn new(capacity:usize)->Result<Self,u64> {
+        assert_eq!(LOCKS.get(),UNLOCKS.get());
+        assert_eq!(TRANSFERS.replace(1),0);
+        Ok(Self{capacity})
+    }
+    fn read_locked(&self,_:&Provider,identity:u64,position:Option<u64>,bytes:&mut[u8])->Result<Option<usize>,u64> {
+        assert_eq!(identity,11);assert_eq!(LOCKS.get()-UNLOCKS.get(),1);
+        assert_eq!(TRANSFERS.get(),1);assert!(bytes.len()<=self.capacity);
+        let call=SHARED_CALLS.get();SHARED_CALLS.set(call+1);SHARED_MAX.set(SHARED_MAX.get().max(bytes.len()));
+        if call>=SHARED_ERROR_AFTER.get(){return Err(Error::PeerClosed.into_raw());}
+        if DECLINE.get(){return Ok(None);}
+        let length=ACTUAL_LENGTH.get().unwrap_or(LENGTH.get());
+        let count=(length.saturating_sub(position.unwrap())as usize).min(bytes.len());
+        bytes[..count].fill(b'x');Ok(Some(count))
+    }
+}
+impl Drop for ProviderReadTransfer {
+    fn drop(&mut self){assert_eq!(LOCKS.get(),UNLOCKS.get());assert_eq!(TRANSFERS.replace(0),1);}
+}
 enum KernelObject {VmObject(Memory),Provider(Arc<Provider>),Other}
 thread_local! {static PROVIDER:Arc<Provider>=Arc::new(Provider{object_id:91});}
 fn object_native(raw:u64,rights:HandleRights)->Result<KernelObject,Error> {
@@ -122,7 +154,7 @@ fn provider_read_at(_: &Provider,offset:u64,bytes:&mut [u8])->Result<usize,u64> 
     READS.set(READS.get()+1);
     if let Some(error)=BACKEND_ERROR.get(){return Err(error);}
     if SHORT.get(){return Ok(bytes.len()+1);}
-    let count=(LENGTH.get().saturating_sub(offset)as usize).min(bytes.len()).min(2);
+    let count=(ACTUAL_LENGTH.get().unwrap_or(LENGTH.get()).saturating_sub(offset)as usize).min(bytes.len()).min(2);
     bytes[..count].fill(b'x');Ok(count)
 }
 "#,
@@ -138,6 +170,8 @@ fn reset(mode:u8) {
     FAIL_AFTER.set(None);MODE.set(mode);AUTH_ERROR.set(None);BACKEND_ERROR.set(None);
     LENGTH.set(5);SHORT.set(false);IDENTITY.set(Some(11));QUERIES.set(0);READS.set(0);SEEKS.set(0);LOCKS.set(0);UNLOCKS.set(0);
     EXTENT_QUERIES.set(0);EXTENT_ERROR.set(None);EXTENT_REPLY_LEN.set(8);
+    FEATURES.set(0);ACTUAL_LENGTH.set(None);SHARED_CALLS.set(0);SHARED_MAX.set(0);
+    assert_eq!(TRANSFERS.get(),0);DECLINE.set(false);SHARED_ERROR_AFTER.set(usize::MAX);
 }
 fn error(expected:u64) {
     let allocations=ALLOCATIONS.load(Ordering::Relaxed);
@@ -183,6 +217,30 @@ fn main() {
         }
         reset(mode);LENGTH.set(0);assert!(read_all(7,0).unwrap().is_empty());assert_eq!(LOCKS.get(),UNLOCKS.get());
     }
+    // Known extents use one guard and three bulk reads plus the exact EOF
+    // probe. The readonly source's cursor is never queried or mutated.
+    let chunk=mnu_abi::provider::MAX_SHARED_READ_LEN;
+    let length=2*chunk+311;
+    reset(1);FEATURES.set(mnu_abi::provider::MEMORY_FEATURE_READ_AT_SHARED);LENGTH.set(length as u64);
+    let bytes=read_all(7,length).unwrap();assert_eq!(bytes.len(),length);assert!(bytes.iter().all(|b|*b==b'x'));drop(bytes);
+    assert_eq!((SHARED_CALLS.get(),SHARED_MAX.get(),READS.get(),SEEKS.get()),(4,chunk,0,0));
+    assert_eq!((LOCKS.get(),UNLOCKS.get(),EXTENT_QUERIES.get(),TRANSFERS.get()),(1,1,1,0));
+    // A transport error after progress must fail the entire snapshot. No
+    // inline replay, truncated authorization, recursive lock or retained Handle.
+    reset(1);FEATURES.set(mnu_abi::provider::MEMORY_FEATURE_READ_AT_SHARED);LENGTH.set(length as u64);SHARED_ERROR_AFTER.set(1);
+    assert_eq!(read_all(7,length).err(),Some(Error::PeerClosed.into_raw()));
+    assert_eq!((SHARED_CALLS.get(),READS.get(),TRANSFERS.get()),(2,0,0));assert_eq!(LOCKS.get(),UNLOCKS.get());
+    for actual in [length as u64-1,length as u64+1] {
+        reset(1);FEATURES.set(mnu_abi::provider::MEMORY_FEATURE_READ_AT_SHARED);LENGTH.set(length as u64);ACTUAL_LENGTH.set(Some(actual));
+        assert_eq!(read_all(7,length).err(),Some(Error::BackingFailure.into_raw()));
+        assert_eq!(READS.get(),0);assert_eq!(TRANSFERS.get(),0);assert_eq!(LOCKS.get(),UNLOCKS.get());
+    }
+    // Only an explicit decline changes transport, and only once. A feature
+    // without an actual backing identity must stay on the original path.
+    reset(1);FEATURES.set(mnu_abi::provider::MEMORY_FEATURE_READ_AT_SHARED);DECLINE.set(true);LENGTH.set(5000);
+    assert_eq!(read_all(7,5000).unwrap().len(),5000);assert_eq!(SHARED_CALLS.get(),1);assert!(READS.get()>0);assert_eq!(TRANSFERS.get(),0);
+    reset(1);FEATURES.set(mnu_abi::provider::MEMORY_FEATURE_READ_AT_SHARED);IDENTITY.set(None);LENGTH.set(5000);
+    assert_eq!(read_all(7,5000).unwrap().len(),5000);assert_eq!(SHARED_CALLS.get(),0);assert_eq!(TRANSFERS.get(),0);
     for length in [0,7] {
         reset(1);EXTENT_REPLY_LEN.set(length);error(Error::BackingFailure.into_raw());
         assert_eq!(READS.get(),0);assert_eq!(EXTENT_QUERIES.get(),1);
