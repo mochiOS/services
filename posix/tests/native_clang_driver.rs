@@ -1,5 +1,6 @@
 //! Real mochiOS clang defaults, shared linker driver, signing and ./main.
-//! Tools live in one diagnostic SDK; no compiler/SDK paths are passed to clang.
+//! Uses the normal PATH, or an explicitly selected diagnostic tool directory.
+//! No compiler/SDK paths are passed to clang.
 #[cfg(not(target_os = "mochios"))]
 fn main() {
     eprintln!("native-clang-driver: requires mochiOS");
@@ -8,9 +9,19 @@ fn main() {
 #[cfg(target_os = "mochios")]
 fn main() {
     use mochios_file_publication::PrivateDirectory;
-    use std::{fs, path::Path, process::Command, time::Instant};
+    use std::{
+        fs,
+        path::{Path, PathBuf},
+        process::Command,
+        time::Instant,
+    };
 
-    const BIN: &str = "/system/tests/posix/clang315/sdk/bin";
+    let arguments: Vec<_> = std::env::args_os().skip(1).collect();
+    let bin = match arguments.as_slice() {
+        [] => None,
+        [option, path] if option == "--tool-directory" => Some(PathBuf::from(path)),
+        _ => panic!("usage: native-clang-driver [--tool-directory PATH]"),
+    };
     const SOURCE: &str = r#"
 #include <stdio.h>
 #include <stdint.h>
@@ -25,7 +36,11 @@ int main(void) { puts("clang-driver315"); return 37; }
     let began = Instant::now();
     let directory = PrivateDirectory::new_in(Path::new("/tmp"), "clang-driver315").unwrap();
     let command = |tool: &str| {
-        let mut command = Command::new(format!("{BIN}/{tool}"));
+        let mut command = Command::new(
+            bin.as_ref()
+                .map(|bin| bin.join(tool))
+                .unwrap_or_else(|| PathBuf::from(tool)),
+        );
         command.current_dir(directory.path());
         for variable in [
             "MOCHIOS_SDK",
