@@ -31,7 +31,7 @@ impl Rect {
     }
 }
 
-pub(crate) fn rounded_rect_contains(rect: Rect, radius: u32, x: i32, y: i32) -> bool {
+pub(crate) fn rounded_rect_contains(rect: Rect, radius: f32, x: i32, y: i32) -> bool {
     // Input coordinates identify a physical pixel; sample its center like rendering.
     if x < rect.x
         || y < rect.y
@@ -47,7 +47,7 @@ pub(crate) fn rounded_rect_contains(rect: Rect, radius: u32, x: i32, y: i32) -> 
             rect.width as f32,
             rect.height as f32,
         ],
-        radius as f32,
+        radius,
     )
     .contains((x as f32 + 0.5, y as f32 + 0.5))
 }
@@ -168,7 +168,7 @@ mod continuous_corner_tests {
     #[test]
     fn native_input_uses_reference_pixel_centers() {
         use mochios_viewkit_gpu_protocol::continuous_corner::RoundedRect;
-        for (width, height, radius) in [(1, 1, 0), (100, 60, 20), (17, 70, 999), (90, 40, 1)] {
+        for (width, height, radius) in [(1, 1, 0.0), (100, 60, 26.5), (17, 70, 999.0), (90, 40, 1.0)] {
             let rect = Rect {
                 x: 7,
                 y: 13,
@@ -180,7 +180,7 @@ mod continuous_corner_tests {
             for y in 12..(14 + height as i32) {
                 for x in 6..(8 + width as i32) {
                     assert_eq!(
-                        rounded_rect_contains(rect, radius, x, y),
+                        rounded_rect_contains(rect, radius as f32, x, y),
                         shape.contains((x as f32 + 0.5, y as f32 + 0.5))
                     );
                 }

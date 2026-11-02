@@ -10,7 +10,7 @@ use crate::state::getrandom_u64;
 use crate::surface::{Surface, SurfaceHandle, SurfaceRole};
 use crate::surface::{surface_extent, surface_index_by_handle};
 
-pub(crate) const WINDOW_CORNER_RADIUS: u32 = 14;
+pub(crate) const WINDOW_CORNER_RADIUS: f32 = crate::window_elevation::CORNER_RADIUS;
 pub(crate) const WINDOW_SHADOW_MARGIN: u32 = 20;
 pub(crate) const ACTIVE_WINDOW_BORDER_ALPHA: u8 = crate::window_elevation::BORDER_ALPHA;
 pub(crate) const MAX_WINDOW_TITLE_BYTES: usize = 64;
@@ -56,9 +56,9 @@ impl Default for Window {
 }
 
 impl Window {
-    pub(crate) fn corner_radius(&self) -> u32 {
+    pub(crate) fn corner_radius(&self) -> f32 {
         if self.state == crate::protocol::WINDOW_STATE_MAXIMIZED {
-            0
+            0.0
         } else {
             WINDOW_CORNER_RADIUS
         }

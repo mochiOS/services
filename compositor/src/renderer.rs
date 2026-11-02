@@ -457,7 +457,7 @@ pub(crate) fn composite_and_present(
                     ))
                 });
             if let Some((window_index, frame_rect, active, radius)) = window_style
-                && radius != 0
+                && radius != 0.0
                 && !shadow_drawn[window_index]
             {
                 draw_window_shadow(frame, frame_w, frame_h, present_rect, frame_rect, active);
@@ -507,7 +507,7 @@ pub(crate) fn composite_and_present(
                         let inner = inset_rect(window_frame, 1);
                         let inner_coverage = rounded_rect_coverage(
                             inner,
-                            radius.saturating_sub(1),
+                            (radius - 1.0).max(0.0),
                             dx as i32,
                             dy as i32,
                         );
@@ -705,7 +705,7 @@ fn draw_shadow(
             frame_height,
             damage,
             shadow_rect,
-            WINDOW_CORNER_RADIUS.saturating_add(expansion),
+            WINDOW_CORNER_RADIUS + expansion as f32,
             alpha as u8,
             window_frame,
             WINDOW_CORNER_RADIUS,
@@ -719,10 +719,10 @@ fn fill_rounded_black(
     frame_height: usize,
     damage: Rect,
     rect: Rect,
-    radius: u32,
+    radius: f32,
     alpha: u8,
     occluder: Rect,
-    occluder_radius: u32,
+    occluder_radius: f32,
 ) {
     let left = rect.x.max(damage.x).max(0) as usize;
     let top = rect.y.max(damage.y).max(0) as usize;
@@ -743,8 +743,9 @@ fn fill_rounded_black(
         .min(frame_height as i64)
         .max(0) as usize;
     let occluder_radius = occluder_radius
-        .min(occluder.width / 2)
-        .min(occluder.height / 2) as usize;
+        .min(occluder.width as f32 * 0.5)
+        .min(occluder.height as f32 * 0.5)
+        .ceil() as usize;
     for y in top..bottom {
         if y < occluder_top || y >= occluder_bottom {
             fill_shadow_range(frame, frame_width, rect, radius, alpha, y, left, right);
@@ -789,7 +790,7 @@ fn fill_shadow_range(
     frame: &mut [u32],
     frame_width: usize,
     rect: Rect,
-    radius: u32,
+    radius: f32,
     alpha: u8,
     y: usize,
     left: usize,
@@ -817,7 +818,7 @@ fn inset_rect(rect: Rect, amount: u32) -> Rect {
     }
 }
 
-fn rounded_rect_coverage(rect: Rect, radius: u32, x: i32, y: i32) -> u8 {
+fn rounded_rect_coverage(rect: Rect, radius: f32, x: i32, y: i32) -> u8 {
     if rect.width == 0 || rect.height == 0 {
         return 0;
     }
@@ -919,12 +920,23 @@ mod continuous_corner_tests {
 
     #[test]
     fn shared_window_elevation_stays_within_existing_damage_bounds() {
-        let margin=crate::window::WINDOW_SHADOW_MARGIN;
-        for layer in ACTIVE_WINDOW_SHADOW.iter().chain(INACTIVE_WINDOW_SHADOW.iter()) {
+        let margin = crate::window::WINDOW_SHADOW_MARGIN;
+        for layer in ACTIVE_WINDOW_SHADOW
+            .iter()
+            .chain(INACTIVE_WINDOW_SHADOW.iter())
+        {
             assert!(layer.blur_radius + layer.spread + layer.offset_y.unsigned_abs() <= margin);
         }
-        assert!(ACTIVE_WINDOW_SHADOW.iter().map(|layer| u32::from(layer.alpha)).sum::<u32>()
-            > INACTIVE_WINDOW_SHADOW.iter().map(|layer| u32::from(layer.alpha)).sum::<u32>());
+        assert!(
+            ACTIVE_WINDOW_SHADOW
+                .iter()
+                .map(|layer| u32::from(layer.alpha))
+                .sum::<u32>()
+                > INACTIVE_WINDOW_SHADOW
+                    .iter()
+                    .map(|layer| u32::from(layer.alpha))
+                    .sum::<u32>()
+        );
     }
     #[test]
     fn maximized_cpu_surface_coverage_fills_the_corner_pixel() {
@@ -947,13 +959,14 @@ mod continuous_corner_tests {
     #[test]
     fn shadow_and_surface_coverage_use_shared_reference() {
         for (w, h, r) in [
-            (1, 1, 0),
-            (1, 1, 999),
-            (31, 21, 999),
-            (17, 70, 999),
-            (31, 20, 10),
-            (100, 50, 1),
-            (75, 40, 17),
+            (1, 1, 0.0),
+            (1, 1, 999.0),
+            (31, 21, 999.0),
+            (17, 70, 999.0),
+            (31, 20, 10.0),
+            (100, 50, 1.0),
+            (75, 40, 17.0),
+            (100, 60, 26.5),
         ] {
             let rect = Rect {
                 x: 3,
@@ -976,7 +989,7 @@ mod continuous_corner_tests {
                         }
                     }
                     assert_eq!(
-                        rounded_rect_coverage(rect, r, x, y),
+                        rounded_rect_coverage(rect, r as f32, x, y),
                         ((count * 255 + 8) / 16) as u8
                     );
                 }
