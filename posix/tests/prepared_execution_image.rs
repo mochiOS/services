@@ -20,6 +20,7 @@ struct State {
     fail_authorize: bool,
     fail_read: bool,
     fail_write: bool,
+    fail_verify: Option<&'static str>,
     reply: Reply,
 }
 struct Reply {
@@ -158,7 +159,6 @@ pub mod ipc {
 }
 mod state {
     pub struct Record {
-        pub manifest: (),
         pub manifest_path: String,
     }
     pub struct Index {
@@ -171,28 +171,50 @@ mod state {
 mod resolver {
     use crate::syscall::SysError;
     pub type FileReader = fn(&str) -> Result<Vec<u8>, SysError>;
-    pub fn binary_caps<'a>(
-        _: &'a (),
-        _: &str,
-        _: &str,
-        _: FileReader,
-    ) -> Result<&'a [String], SysError> {
-        crate::event("verify caps");
-        Ok(&[])
+    pub struct VerifiedManifest {
+        pub manifest: u8,
+        pub identity: u8,
     }
-    pub fn application_identity(_: &(), _: &str, _: FileReader) -> Result<(), SysError> {
-        crate::event("verify identity");
-        Ok(())
+    pub struct Decision;
+    pub fn verified_manifest(path: &str, _: FileReader) -> Result<VerifiedManifest, SysError> {
+        assert_eq!(path, "/manifest");
+        verify("verify manifest")?;
+        Ok(VerifiedManifest {
+            manifest: 42,
+            identity: 7,
+        })
+    }
+    impl VerifiedManifest {
+        pub fn decide_capabilities(&self, path: &str) -> Result<Decision, SysError> {
+            assert_eq!((self.manifest, path), (42, "/image"));
+            verify("verify caps")?;
+            Ok(Decision)
+        }
+    }
+    impl Decision {
+        pub fn into_allowed(self) -> Result<Vec<String>, SysError> {
+            Ok(vec!["fs.read.all".into()])
+        }
+    }
+    pub fn verify(step: &'static str) -> Result<(), SysError> {
+        crate::event(step);
+        if crate::STATE.with_borrow(|s| s.fail_verify == Some(step)) {
+            Err(crate::error(mochi_user_syscall::EACCES))
+        } else {
+            Ok(())
+        }
     }
     pub fn authorize_spawn_image(
         sender: u64,
         path: &str,
-        _: &(),
-        _: &[String],
+        identity: &u8,
+        capabilities: &[String],
         _: crate::service::ExecutionClass,
         bytes: &[u8],
     ) -> Result<(), SysError> {
         assert_eq!((sender, path), (17, "/image"));
+        assert_eq!(*identity, 7);
+        assert_eq!(capabilities, ["fs.read.all"]);
         crate::STATE.with_borrow_mut(|s| {
             assert_eq!(bytes, &s.image);
             s.events.push("authorize");
@@ -202,6 +224,21 @@ mod resolver {
                 Ok(())
             }
         })
+    }
+}
+// The real digest implementation is exercised by capability_authorization_reads
+// and trusted_broker_images; this fixture observes the native publication order.
+mod image_catalog {
+    pub fn validate_declared_root(
+        manifest: &u8,
+        path: &str,
+        bytes: &[u8],
+    ) -> Result<(), crate::syscall::SysError> {
+        assert_eq!(
+            (*manifest, path, bytes),
+            (42, "/image", b"image".as_slice())
+        );
+        crate::resolver::verify("verify code")
     }
 }
 fn read(_: &str) -> Result<Vec<u8>, syscall::SysError> {
@@ -218,7 +255,6 @@ fn fixture() -> state::CapabilityServiceState {
             by_binary: BTreeMap::from([(
                 "/image".into(),
                 state::Record {
-                    manifest: (),
                     manifest_path: "/manifest".into(),
                 },
             )]),
@@ -270,6 +306,16 @@ fn copied_snapshot_is_authorized_and_every_preparation_failure_releases_ownershi
     let image = server::prepare(&fixture(), 17, 2, "/image", read).unwrap();
     STATE.with_borrow(|s| {
         assert_eq!(s.image, b"image");
+        assert_eq!(
+            &s.events[..5],
+            [
+                "verify manifest",
+                "verify caps",
+                "read",
+                "verify code",
+                "allocate"
+            ]
+        );
         assert_eq!(s.events.last(), Some(&"authorize"));
     });
     drop(image);
@@ -288,6 +334,25 @@ fn copied_snapshot_is_authorized_and_every_preparation_failure_releases_ownershi
             } else {
                 assert_eq!(s.events.last(), Some(&"source close"));
             }
+        });
+    }
+}
+
+#[test]
+fn invalid_manifest_policy_or_code_is_rejected_before_native_allocation() {
+    for step in ["verify manifest", "verify caps", "verify code"] {
+        STATE.set(State {
+            fail_verify: Some(step),
+            ..Default::default()
+        });
+        assert_eq!(
+            server::prepare(&fixture(), 17, 2, "/image", read).err(),
+            Some(error(mochi_user_syscall::EACCES))
+        );
+        STATE.with_borrow(|s| {
+            assert_eq!(s.events.last(), Some(&step));
+            assert!(!s.events.contains(&"allocate"));
+            assert!(!s.events.contains(&"authorize"));
         });
     }
 }

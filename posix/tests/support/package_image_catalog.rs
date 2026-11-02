@@ -315,7 +315,7 @@ fn bundle_traversal_and_path_aliases_do_not_bind_code_records() {
 }
 
 #[test]
-fn static_installed_path_policy_cannot_approve_a_dynamic_or_unbound_modern_package() {
+fn unbound_static_dynamic_and_bootstrap_roots_are_rejected() {
     let original = manifest();
     let legacy = original
         .split("[[file]]")
@@ -333,24 +333,15 @@ fn static_installed_path_policy_cannot_approve_a_dynamic_or_unbound_modern_packa
         install(&legacy);
         let snapshot = resolver::verified_manifest(MANIFEST, read_file).unwrap();
         bytes[64..68].copy_from_slice(&(if dynamic { 2u32 } else { 1u32 }).to_le_bytes());
-        let policy = image_catalog::Catalog::for_static(snapshot, APP, &bytes);
-        if dynamic {
-            assert!(policy.is_err());
-        } else {
-            let policy = policy.unwrap();
-            assert!(policy.validate(Source::Root, &bytes).is_ok());
-            bytes[100] ^= 1;
-            assert!(policy.validate(Source::Root, &bytes).is_err());
-            assert!(
-                policy
-                    .validate(dependency(LIB.as_bytes()), LIBRARY)
-                    .is_err()
-            );
-        }
+        assert!(image_catalog::validate_declared_root(&snapshot.manifest, APP, &bytes).is_err());
+        assert!(image_catalog::Catalog::new(snapshot, APP).is_err());
+        let service = legacy.replace("kind = \"application\"", "kind = \"service\"");
+        let service = package::parse_manifest(&service).unwrap();
+        assert!(image_catalog::validate_declared_root(&service, APP, &bytes).is_err());
     }
     install(&original.replace("file = \"root\"", ""));
     let snapshot = resolver::verified_manifest(MANIFEST, read_file).unwrap();
-    assert!(image_catalog::Catalog::for_static(snapshot, APP, &bytes).is_err());
+    assert!(image_catalog::Catalog::new(snapshot, APP).is_err());
 }
 
 #[test]
@@ -364,6 +355,12 @@ fn installed_commands_use_their_verified_manifest_and_exact_captured_bytes() {
     bytes[54..56].copy_from_slice(&56u16.to_le_bytes());
     bytes[56..58].copy_from_slice(&1u16.to_le_bytes());
     bytes[64..68].copy_from_slice(&1u32.to_le_bytes());
+    let installed = format!(
+        "{}\n[[file]]\nid='root'\npath='{path}'\ndigest='sha256:{:x}'\nsize={}\nmode='0755'\n",
+        installed.replacen("requires = [", "file = 'root'\nrequires = [", 1),
+        Sha256::digest(&bytes),
+        bytes.len()
+    );
     for kind in [None, Some("binary"), Some("service"), Some("unknown")] {
         let text = match kind {
             None => installed.to_owned(),
@@ -373,7 +370,7 @@ fn installed_commands_use_their_verified_manifest_and_exact_captured_bytes() {
         };
         install(&text);
         let snapshot = resolver::verified_manifest(MANIFEST, read_file).unwrap();
-        let approved = image_catalog::Catalog::for_static(snapshot, path, &bytes);
+        let approved = image_catalog::Catalog::new(snapshot, path);
         if matches!(kind, None | Some("binary")) {
             let approved = approved.unwrap();
             assert!(approved.validate(Source::Root, &bytes).is_ok());
@@ -386,7 +383,7 @@ fn installed_commands_use_their_verified_manifest_and_exact_captured_bytes() {
     }
     install(&installed.replace("kind = \"application\"", "kind = \"service\""));
     let snapshot = resolver::verified_manifest(MANIFEST, read_file).unwrap();
-    assert!(image_catalog::Catalog::for_static(snapshot, path, &bytes).is_err());
+    assert!(image_catalog::Catalog::new(snapshot, path).is_err());
 }
 
 #[test]

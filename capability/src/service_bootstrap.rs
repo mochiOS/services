@@ -4,7 +4,7 @@ use alloc::string::ToString;
 use mochi_user_platform as platform;
 
 use crate::package_index::{PackageIndex, package_manifest_by_id, service_binary_path};
-use crate::resolver::{application_identity, authorize_spawn_image, binary_caps};
+use crate::resolver::{authorize_spawn_image, verified_manifest};
 
 const SERVICE_MANAGER_PACKAGE_ID: &str = "org.mochios.service-manager";
 const SIGNATURE_PACKAGE_ID: &str = "org.mochios.signature";
@@ -24,7 +24,7 @@ fn spawn_service_by_package(
             mochi_user_syscall::EINVAL as i64,
         ));
     }
-    let (manifest, manifest_path) = package_manifest_by_id(index, package_id).map_err(|error| {
+    let (_, manifest_path) = package_manifest_by_id(index, package_id).map_err(|error| {
         stderr_line(&format!(
             "capability.service: package lookup failed id={} errno={}",
             package_id,
@@ -32,42 +32,44 @@ fn spawn_service_by_package(
         ));
         error
     })?;
-    let service_path = service_binary_path(&manifest).ok_or_else(|| {
+    let verified = verified_manifest(&manifest_path, crate::bootstrap_file::read_file)?;
+    if verified.identity.package_id != package_id {
+        return Err(mochi_user_syscall::SysError::from_raw(
+            mochi_user_syscall::EACCES as i64,
+        ));
+    }
+    let service_path = service_binary_path(&verified.manifest).ok_or_else(|| {
         stderr_line(&format!(
             "capability.service: service binary missing id={}",
             package_id
         ));
         mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64)
     })?;
-    let caps = binary_caps(
-        &manifest,
-        &manifest_path,
-        service_path,
-        crate::bootstrap_file::read_file,
-    )
-    .map_err(|error| {
-        stderr_line(&format!(
-            "capability.service: capability resolution failed path={} errno={}",
-            service_path,
-            error.errno().unwrap_or(0)
-        ));
-        error
-    })?;
+    let caps = verified
+        .decide_capabilities(service_path)?
+        .into_allowed()
+        .map_err(|error| {
+            stderr_line(&format!(
+                "capability.service: capability resolution failed path={} errno={}",
+                service_path,
+                error.errno().unwrap_or(0)
+            ));
+            error
+        })?;
     platform::logln!(
         "capability.service: parsed {} caps={}",
         service_path,
         caps.len()
     );
     let logger_endpoint = platform::logger::endpoint().unwrap_or(0);
-    let identity =
-        application_identity(&manifest, &manifest_path, crate::bootstrap_file::read_file)?;
     let args = alloc::vec![logger_endpoint.to_string()];
     crate::native_bootstrap::spawn(service_path, &args, |image| {
+        crate::image_catalog::validate_declared_root(&verified.manifest, service_path, image)?;
         authorize_spawn_image(
             0,
             service_path,
-            &identity,
-            caps,
+            &verified.identity,
+            &caps,
             platform::service::ExecutionClass::Privileged,
             image,
         )

@@ -175,6 +175,18 @@ impl EffectiveCapabilityDecision {
         self.deny_reason.is_none() && self.denied.is_empty()
     }
 
+    pub(crate) fn into_allowed(self) -> Result<Vec<String>, mochi_user_syscall::SysError> {
+        if self.is_allowed() {
+            return Ok(self.effective);
+        }
+        let errno = if self.deny_reason == Some(CapabilityDenyReason::UnknownCapability) {
+            mochi_user_syscall::EINVAL
+        } else {
+            mochi_user_syscall::EACCES
+        };
+        Err(mochi_user_syscall::SysError::from_raw(errno as i64))
+    }
+
     pub(crate) fn apply_runtime_constraints(
         mut self,
         user_allowed: &[String],

@@ -3,7 +3,7 @@ extern crate alloc;
 extern crate mochi_user_platform as platform_real;
 extern crate self as mochi_user_platform;
 use mochios_signature_protocol::{InstallProvenance, InstallRecord, VerifiedResponse};
-pub use platform_real::{logln, package, service};
+pub use platform_real::{logln, package};
 use sha2::{Digest, Sha256};
 use std::{
     cell::RefCell,
@@ -32,6 +32,85 @@ mod resolver;
 #[allow(dead_code)]
 #[path = "../../capability/src/trusted_images.rs"]
 mod trusted_images;
+#[allow(dead_code)]
+mod bootstrap_service {
+    include!("../../capability/src/service_bootstrap.rs");
+    pub fn launch(
+        index: &crate::package_index::PackageIndex,
+        package: &str,
+    ) -> Result<u64, crate::SysError> {
+        spawn_service_by_package(index, package)
+    }
+}
+mod bootstrap_file {
+    pub fn read_file(path: &str) -> Result<Vec<u8>, crate::SysError> {
+        crate::read(path)
+    }
+}
+pub mod io {
+    pub fn stderr(bytes: &[u8]) -> Result<usize, crate::SysError> {
+        Ok(bytes.len())
+    }
+}
+pub mod logger {
+    pub fn endpoint() -> Result<u64, crate::SysError> {
+        Ok(0)
+    }
+}
+pub mod service {
+    use super::*;
+    pub use mnu_abi::exec::ExecutionClass;
+    pub fn authorize_exec_for_requester(
+        sender: u64,
+        path: &str,
+        fields: &[u8],
+        capabilities: &[u8],
+    ) -> Result<u64, SysError> {
+        assert_eq!(sender, 0);
+        assert!(capabilities.is_empty());
+        STATE.with_borrow(|s| {
+            assert_eq!(path, PROFILES[1].3);
+            let expected = format!(
+                "{}{:x}",
+                mnu_abi::exec::EXECUTABLE_DIGEST_PREFIX,
+                Sha256::digest(&s.service_image)
+            );
+            assert!(
+                fields
+                    .split(|b| *b == 0)
+                    .any(|field| field == expected.as_bytes())
+            );
+            let expected = format!(
+                "{}{}",
+                mnu_abi::exec::APPLICATION_PACKAGE_ID_PREFIX,
+                PROFILES[1].1
+            );
+            assert!(
+                fields
+                    .split(|b| *b == 0)
+                    .any(|field| field == expected.as_bytes())
+            );
+        });
+        native_event("authorize service")?;
+        Ok(1)
+    }
+}
+// Only the native allocation/create boundary is substituted. Authentication,
+// selected identity/capabilities and code binding use the production modules.
+mod native_bootstrap {
+    use super::*;
+    pub fn spawn(
+        path: &str,
+        _: &[String],
+        authorize: impl FnOnce(&[u8]) -> Result<(), SysError>,
+    ) -> Result<u64, SysError> {
+        let bytes = read(path)?;
+        STATE.with_borrow_mut(|s| s.service_image = bytes.clone());
+        authorize(&bytes)?;
+        native_event("create service")?;
+        Ok(77)
+    }
+}
 mod policy {
     pub fn is_known_capability(_: &str) -> bool {
         true
@@ -50,6 +129,20 @@ mod package_index {
         pub by_package: BTreeMap<String, PackageRecord>,
         pub by_binary: BTreeMap<String, PackageRecord>,
     }
+    pub fn package_manifest_by_id(
+        index: &PackageIndex,
+        package: &str,
+    ) -> Result<(package::PackageManifest, String), SysError> {
+        let record = index.by_package.get(package).ok_or_else(error)?;
+        Ok((record.manifest.clone(), record.manifest_path.clone()))
+    }
+    pub fn service_binary_path(manifest: &package::PackageManifest) -> Option<&str> {
+        manifest
+            .binaries
+            .iter()
+            .find(|b| b.kind.as_deref() == Some("service"))
+            .map(|b| b.path.as_str())
+    }
 }
 #[derive(Default)]
 struct State {
@@ -65,6 +158,7 @@ struct State {
     objects: BTreeMap<u32, u64>,
     failure: Option<usize>,
     next_handle: u32,
+    service_image: Vec<u8>,
 }
 thread_local! {static STATE:RefCell<State>=RefCell::new(State::default());}
 fn error() -> SysError {
@@ -97,6 +191,9 @@ pub mod ipc {
 }
 pub mod process {
     use super::*;
+    pub fn exit(_: i32) -> ! {
+        panic!("unexpected bootstrap batch exit")
+    }
     pub fn open_handle_for_endpoint(endpoint: u64, rights: u64) -> Result<u32, SysError> {
         assert_eq!((endpoint, rights), (700, handle::HANDLE_RIGHT_WAIT));
         native_event("open")?;
@@ -243,14 +340,13 @@ fn fixture(dynamic: bool) -> package_index::PackageIndex {
     let mut index = package_index::PackageIndex::default();
     for (i, &(_, package, kind, path)) in PROFILES.iter().enumerate() {
         let name = package.rsplit('.').next().unwrap();
+        let bytes = elf(if dynamic && i == 0 { 3 } else { 2 }, i as u8);
         let text = format!(
-            "[package]\nprovenance=\"built-in\"\nid=\"{package}\"\nname=\"{name}\"\nversion=\"1\"\n\n[[binary]]\npath=\"{path}\"\nkind=\"{kind}\"\nrequires=[]\n"
+            "[package]\nprovenance=\"built-in\"\nid=\"{package}\"\nname=\"{name}\"\nversion=\"1\"\n\n[[binary]]\npath=\"{path}\"\nkind=\"{kind}\"\nfile=\"root\"\nrequires=[]\n\n[[file]]\nid=\"root\"\npath=\"{path}\"\ndigest=\"sha256:{:x}\"\nsize={}\nmode=\"0755\"\n",
+            Sha256::digest(&bytes),bytes.len()
         );
         install(&mut s.files, name, &text);
-        s.files.insert(
-            path.into(),
-            elf(if dynamic && i == 0 { 3 } else { 2 }, i as u8),
-        );
+        s.files.insert(path.into(), bytes);
         let record = package_index::PackageRecord {
             manifest_path: format!("/system/packages/{name}/manifest.toml"),
             manifest: package::parse_manifest(&text).unwrap(),
@@ -480,8 +576,96 @@ fn source_read_failure_and_signed_file_binding_mismatch_have_no_mutable_fallback
         error()
     );
     let index = fixture(false);
-    STATE.with_borrow_mut(|s|{let mut text=String::from_utf8(s.files["/system/packages/msh/manifest.toml"].clone()).unwrap();text=text.replace("requires=[]","requires=[]\nfile=\"root\"");text.push_str(&format!("\n[[file]]\nid=\"root\"\npath=\"{}\"\ndigest=\"sha256:{}\"\nsize=4096\nmode=\"0755\"\n",PROFILES[0].3,"00".repeat(32)));install(&mut s.files,"msh",&text);});
+    STATE.with_borrow_mut(|s| {
+        let text =
+            String::from_utf8(s.files["/system/packages/msh/manifest.toml"].clone()).unwrap();
+        let digest = format!("{:x}", Sha256::digest(&s.files[PROFILES[0].3]));
+        install(
+            &mut s.files,
+            "msh",
+            &text.replace(&digest, &"00".repeat(32)),
+        );
+    });
     assert!(trusted_images::TrustedImages::bootstrap(&index, read).is_err());
+}
+
+#[test]
+fn bootstrap_rejects_authenticated_role_manifests_without_a_code_binding() {
+    let index = fixture(false);
+    STATE.with_borrow_mut(|s| {
+        let text =
+            String::from_utf8(s.files["/system/packages/msh/manifest.toml"].clone()).unwrap();
+        let text = text
+            .split("[[file]]")
+            .next()
+            .unwrap()
+            .replace("file=\"root\"", "");
+        install(&mut s.files, "msh", &text);
+    });
+    assert!(trusted_images::TrustedImages::bootstrap(&index, read).is_err());
+}
+
+#[test]
+fn initial_service_authorization_uses_one_authenticated_snapshot_and_capture() {
+    let mut index = fixture(false);
+    index
+        .by_package
+        .get_mut(PROFILES[1].1)
+        .unwrap()
+        .manifest
+        .binaries[0]
+        .path = "/stale-index".into();
+    assert_eq!(bootstrap_service::launch(&index, PROFILES[1].1), Ok(77));
+    STATE.with_borrow(|s| {
+        assert_eq!(
+            s.reads,
+            [
+                "/system/packages/workspace/verification.bin",
+                "/system/packages/workspace/manifest.toml",
+                PROFILES[1].3
+            ]
+        );
+        assert_eq!(s.events, ["authorize service", "create service"]);
+    });
+}
+
+#[test]
+fn initial_service_code_mismatch_unbound_manifest_or_changed_package_never_authorizes() {
+    for scenario in 0..4 {
+        let index = fixture(false);
+        STATE.with_borrow_mut(|s| match scenario {
+            0 => {
+                s.files.get_mut(PROFILES[1].3).unwrap()[4095] ^= 1;
+            }
+            1 => {
+                let text =
+                    String::from_utf8(s.files["/system/packages/workspace/manifest.toml"].clone())
+                        .unwrap();
+                let text = text
+                    .split("[[file]]")
+                    .next()
+                    .unwrap()
+                    .replace("file=\"root\"", "");
+                install(&mut s.files, "workspace", &text);
+            }
+            2 => {
+                let text =
+                    String::from_utf8(s.files["/system/packages/workspace/manifest.toml"].clone())
+                        .unwrap()
+                        .replace(PROFILES[1].1, "org.example.other-service");
+                install(&mut s.files, "workspace", &text);
+            }
+            3 => {
+                s.files.remove(PROFILES[1].3);
+            }
+            _ => unreachable!(),
+        });
+        assert!(
+            bootstrap_service::launch(&index, PROFILES[1].1).is_err(),
+            "scenario {scenario}"
+        );
+        STATE.with_borrow(|s| assert!(s.events.is_empty()));
+    }
 }
 #[test]
 fn transformed_code_is_attested_only_to_the_process_created_by_the_trusted_preparer() {

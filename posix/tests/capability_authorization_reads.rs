@@ -18,8 +18,8 @@ mod package_index {
     }
 }
 mod policy {
-    pub(crate) fn is_known_capability(_: &str) -> bool {
-        true
+    pub(crate) fn is_known_capability(name: &str) -> bool {
+        mnu_abi::capability::metadata(name).is_some()
     }
 }
 #[allow(dead_code)]
@@ -226,7 +226,11 @@ fn read_file(path: &str) -> Result<Vec<u8>, syscall::SysError> {
 }
 
 fn fixture() -> package::PackageManifest {
-    let bytes = include_bytes!("../../capability/manifest.toml").to_vec();
+    fixture_text(include_str!("../../capability/manifest.toml"))
+}
+
+fn fixture_text(text: &str) -> package::PackageManifest {
+    let bytes = text.as_bytes().to_vec();
     let manifest = package::parse_manifest(std::str::from_utf8(&bytes).unwrap()).unwrap();
     let digest: [u8; 32] = Sha256::digest(&bytes).into();
     let caps = manifest
@@ -346,6 +350,10 @@ fn modified_manifest_and_missing_provenance_still_deny_authorization() {
         Some(resolver::CapabilityDenyReason::MissingProvenance)
     );
     assert!(!decision.is_allowed());
+    assert_eq!(
+        decision.into_allowed().err().unwrap().raw(),
+        syscall::EACCES as i64
+    );
 }
 
 #[test]
@@ -360,6 +368,31 @@ fn capability_allowance_and_manifest_policy_are_one_authenticated_snapshot() {
     assert_eq!(
         decision.requested,
         original.binary_requires(BINARY).unwrap()
+    );
+    assert_eq!(
+        decision.into_allowed().unwrap(),
+        original.binary_requires(BINARY).unwrap()
+    );
+    FILES.with_borrow(|files| assert_eq!(files.reads, [RECORD, MANIFEST]));
+}
+
+#[test]
+fn authenticated_unknown_capabilities_cannot_be_published_to_native_authorization() {
+    let text = include_str!("../../capability/manifest.toml").replacen(
+        "requires = [",
+        "requires = [\n\"unknown.capability\",",
+        1,
+    );
+    fixture_text(&text);
+    let snapshot = resolver::verified_manifest(MANIFEST, read_file).unwrap();
+    let decision = snapshot.decide_capabilities(BINARY).unwrap();
+    assert_eq!(
+        decision.deny_reason,
+        Some(resolver::CapabilityDenyReason::UnknownCapability)
+    );
+    assert_eq!(
+        decision.into_allowed().err().unwrap().raw(),
+        syscall::EINVAL as i64
     );
     FILES.with_borrow(|files| assert_eq!(files.reads, [RECORD, MANIFEST]));
 }

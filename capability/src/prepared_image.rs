@@ -25,13 +25,13 @@ pub(crate) fn prepare(
         .by_binary
         .get(path)
         .ok_or(SysError::from_raw(ENOENT as i64))?;
-    let caps = crate::resolver::binary_caps(&record.manifest, &record.manifest_path, path, read)?;
-    let identity =
-        crate::resolver::application_identity(&record.manifest, &record.manifest_path, read)?;
+    let verified = crate::resolver::verified_manifest(&record.manifest_path, read)?;
+    let caps = verified.decide_capabilities(path)?.into_allowed()?;
     let bytes = read(path)?;
     if bytes.len() > mnu_abi::exec::MAX_CAPTURED_IMAGE_BYTES {
         return Err(SysError::from_raw(mochios_posix_protocol::STATUS_EFBIG as i64));
     }
+    crate::image_catalog::validate_declared_root(&verified.manifest, path, &bytes)?;
     let image = platform::memory_object::MemoryObject::create_resizable(bytes.len() as u64)?;
     let mut written = 0;
     while written < bytes.len() {
@@ -41,6 +41,6 @@ pub(crate) fn prepare(
         }
         written += count;
     }
-    crate::resolver::authorize_spawn_image(sender, path, &identity, caps, class, &bytes)?;
+    crate::resolver::authorize_spawn_image(sender, path, &verified.identity, &caps, class, &bytes)?;
     Ok(image)
 }

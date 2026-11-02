@@ -247,16 +247,7 @@ pub(crate) fn launch(
         .map_err(app_image::status)?;
     let root = Reference(root.handle);
     let bytes = app_image::capture(root.0)?;
-    let bound_root = !verified.manifest.files.is_empty()
-        || verified
-            .manifest
-            .binary(path)
-            .is_some_and(|binary| binary.file.is_some());
-    let catalog = if bound_root {
-        Catalog::resolve(verified, path, load_library)?
-    } else {
-        Catalog::for_static(verified, path, &crate::persistent_grant::read_file(path)?)?
-    };
+    let catalog = Catalog::resolve(verified, path, load_library)?;
     catalog.validate(Source::Root, &bytes)?;
     let dynamic = image_preparation::needs_preparation_bytes(&bytes).map_err(app_image::status)?;
     let source = app_image::readonly(&bytes)?;
