@@ -187,6 +187,22 @@ fn main(){
         assert_eq!(transfer(2,grant),Error::InvalidArgument.into_raw());
         assert!(!owns(2,"fs.read.all"));
     }
+    // Revoke after the preliminary role/path reads, at the final mutable
+    // table borrow. Cover self-grants and both source/destination orderings.
+    for reverse in [false,true] {
+        for destination in [1,2] {
+            process::set(Some("capabilities.manage"),None,reverse);
+            assert_eq!(transfer(destination,"fs.read.tmp\x1funused"),SUCCESS);
+            assert!(owns(destination,"fs.read.tmp"));
+            assert!(owns(1,"capabilities.manage"));
+
+            process::set(Some("capabilities.manage"),None,reverse);
+            REVOKE.store(true,Ordering::Relaxed);
+            assert_eq!(transfer(destination,"fs.read.tmp\x1funused"),Error::AccessDenied.into_raw());
+            assert!(!owns(destination,"fs.read.tmp"));
+            assert!(!owns(1,"capabilities.manage"));
+        }
+    }
     assert_eq!(transfer(99,"fs.read.tmp"),Error::NotFound.into_raw());
     control::MISSING.store(true,Ordering::Relaxed);
     assert_eq!(transfer(2,"fs.read.tmp"),Error::NotReady.into_raw());
