@@ -42,7 +42,16 @@ fn with_dynamic_registry<R>(f:impl FnOnce(&mut DynamicCapabilityRegistry)->R)->R
     program.push_str(&capability[capability.find("/// `parent` が、").unwrap()..]);
     program.push_str(r#"
 const SUCCESS:u64=0;const EACCES:u64=(-13i64)as u64;const EINVAL:u64=(-22i64)as u64;const ENOSYS:u64=(-38i64)as u64;
-mod task {pub mod process {
+mod task {
+pub mod authority_transition {
+    use std::cell::Cell;
+    thread_local! {pub static FROZEN:Cell<Option<u64>>=const{Cell::new(None)};}
+    pub struct Mutation;
+    pub fn begin_mutation(process:u64)->Result<Mutation,crate::Error>{
+        if FROZEN.get()==Some(process){Err(crate::Error::ResourceUnavailable)}else{Ok(Mutation)}
+    }
+}
+pub mod process {
     use crate::*;
     type ProcessId=u64;
     pub struct Process {pub id:u64,pub caps:CapabilitySet,pub authorities:KernelAuthoritySet}
@@ -142,6 +151,13 @@ fn owns(id:u64,name:&str)->bool{process::with_process(id,|p|match parse_capabili
     CapabilityToken::Plain(c)=>p.caps.contains_exact(c),CapabilityToken::Authority(a)=>p.authorities.contains_exact(&a)
 }).unwrap_or(false)}
 fn main(){
+    for frozen in [1,2] {
+        process::set(Some("fs.read.tmp"),None,false);
+        task::authority_transition::FROZEN.set(Some(frozen));
+        assert_eq!(transfer(2,"fs.read.tmp"),Error::ResourceUnavailable.into_raw());
+        assert!(owns(1,"fs.read.tmp"));assert!(!owns(2,"fs.read.tmp"));
+        task::authority_transition::FROZEN.set(None);
+    }
     for name in ["fs.read.tmp","memory.phys.map@4096:4096"]{
         for reverse in [false,true]{
             process::set(Some(name),None,reverse);ARM.store(true,Ordering::Relaxed);

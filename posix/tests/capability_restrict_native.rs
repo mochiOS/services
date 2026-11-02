@@ -56,6 +56,14 @@ impl Process {
     fn kernel_authorities_mut(&mut self)->&mut KernelAuthoritySet{&mut self.authorities}
 }
 mod task {
+    pub mod authority_transition {
+        use std::cell::Cell;
+        thread_local! {pub static FROZEN:Cell<Option<u64>>=const{Cell::new(None)};}
+        pub struct Mutation;
+        pub fn begin_mutation(process:u64)->Result<Mutation,crate::Error>{
+            if FROZEN.get()==Some(process){Err(crate::Error::ResourceUnavailable)}else{Ok(Mutation)}
+        }
+    }
     pub mod process {
         pub fn process_has_capability(id:u64,cap:crate::Capability)->bool{assert_eq!(id,23);crate::PROCESS.with_borrow(|p|p.as_ref().is_some_and(|p|p.caps.contains(cap)))}
         pub fn process_has_kernel_authority(id:u64,cap:&crate::KernelAuthority)->bool{assert_eq!(id,23);crate::PROCESS.with_borrow(|p|p.as_ref().is_some_and(|p|p.authorities.implies(cap)))}
@@ -106,6 +114,13 @@ fn contains(name:&str)->bool{PROCESS.with_borrow(|p|{let p=p.as_ref().unwrap();i
 fn count()->usize{PROCESS.with_borrow(|p|{let p=p.as_ref().unwrap();p.caps.len()+p.authorities.len()})}
 fn restrict(parent:&str,child:&str)->u64{restrict_capability(parent.as_ptr() as u64,parent.len() as u64,child.as_ptr() as u64,child.len() as u64)}
 fn main(){
+    set("fs.read.all",None);
+    task::authority_transition::FROZEN.set(Some(23));
+    assert_eq!(restrict("fs.read.all","fs.read.tmp"),Error::ResourceUnavailable.into_raw());
+    assert_eq!(drop_capability("fs.read.all".as_ptr() as u64,11),Error::ResourceUnavailable.into_raw());
+    assert_eq!(clone_capability("fs.read.all".as_ptr() as u64,11),SUCCESS);
+    assert!(contains("fs.read.all"));assert_eq!(count(),1);
+    task::authority_transition::FROZEN.set(None);
     for (parent,child) in [("fs.read.all","fs.read.tmp"),("memory.phys.map@4096:8192","memory.phys.map@4096:4096")] {
         for failure in 0..2 {
             set(parent,None);FAIL_AFTER.set(Some(failure));assert_eq!(restrict(parent,child),Error::ResourceUnavailable.into_raw());assert!(FAIL_AFTER.get().is_none());assert!(contains(parent));assert!(!contains(child));assert_eq!(count(),1);assert!(!LOCKED.get());

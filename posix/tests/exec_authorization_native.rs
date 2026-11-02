@@ -111,14 +111,14 @@ mod task {
         pub struct ApplicationIdentity;
         impl ApplicationIdentity{pub fn try_clone(&self)->Result<Self,crate::Error>{if crate::CLONE_FAIL.get()==1{Err(crate::Error::ResourceUnavailable)}else{Ok(Self)}}pub fn new(package:String,developer:String,_:[u8;32],_:ApplicationProvenance)->Self{assert_eq!((package.as_str(),developer.as_str()),("app.example","developer.example"));Self}}
         #[derive(Clone,Copy,PartialEq)]pub enum PendingExecKind{ImageReplace,Spawn,SpawnInherit}
-        pub struct PendingExecSecurity{pub path:String,pub authorized_thread:super::ThreadId,pub executable_digest:[u8;32],pub capabilities:crate::CapabilitySet,pub kernel_authorities:crate::KernelAuthoritySet,pub identity:ApplicationIdentity,pub kind:PendingExecKind,pub execution_class:crate::ExecutionClass}
+        pub struct PendingExecSecurity{pub path:String,pub authorized_thread:super::ThreadId,pub executable_digest:[u8;32],pub capabilities:crate::CapabilitySet,pub kernel_authorities:crate::KernelAuthoritySet,pub identity:ApplicationIdentity,pub kind:PendingExecKind,pub execution_class:crate::ExecutionClass,pub authority_revision:u64}
     }
     pub struct Process{caps:crate::CapabilitySet,authorities:crate::KernelAuthoritySet}
     impl Process{
         pub fn image_digest(&self)->Option<[u8;32]>{crate::DIGEST_PRESENT.get().then_some([0x6b;32])}
         pub fn application_identity(&self)->Option<&process::ApplicationIdentity>{crate::APP_PRESENT.get().then_some(&process::ApplicationIdentity)}
         pub fn capabilities(&self)->&crate::CapabilitySet{&self.caps}pub fn kernel_authorities(&self)->&crate::KernelAuthoritySet{&self.authorities}
-        pub fn authorize_next_exec(&mut self,a:process::PendingExecSecurity){if crate::INHERITING.get(){assert_eq!(a.capabilities.0,crate::GRANTED.get());assert_eq!(a.kernel_authorities.0,0);assert_eq!(a.execution_class,crate::ExecutionClass::Unprivileged);}assert_eq!(a.path,"opaque:key");assert_eq!(a.authorized_thread.0,crate::TARGET.get());assert_eq!(a.executable_digest,if a.kind==process::PendingExecKind::SpawnInherit {[0x6b;32]}else{[0;32]});crate::WRITES.set(crate::WRITES.get()+1);}
+        pub fn authorize_next_exec(&mut self,a:process::PendingExecSecurity)->Result<(),crate::Error>{if crate::INHERITING.get(){assert_eq!(a.capabilities.0,crate::GRANTED.get());assert_eq!(a.kernel_authorities.0,0);assert_eq!(a.execution_class,crate::ExecutionClass::Unprivileged);}assert_eq!(a.path,"opaque:key");assert_eq!(a.authorized_thread.0,crate::TARGET.get());assert_eq!(a.executable_digest,if a.kind==process::PendingExecKind::SpawnInherit {[0x6b;32]}else{[0;32]});crate::WRITES.set(crate::WRITES.get()+1);Ok(())}
     }
     fn process()->Process{Process{caps:crate::CapabilitySet(crate::GRANTED.get()),authorities:crate::KernelAuthoritySet(crate::AUTHORITY.get())}}
     pub fn with_process<T>(id:u64,body:impl FnOnce(&Process)->T)->Option<T>{assert!(id==19||id==31);crate::PRESENT.get().then(||body(&process()))}
