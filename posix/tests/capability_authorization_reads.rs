@@ -36,6 +36,114 @@ const RECORD: &str = "/system/packages/capability/verification.bin";
 const BINARY: &str = "/system/services/capability.service";
 
 #[test]
+#[ignore = "requires MOCHIOS_TEST_BOUND_PACKAGES and MOCHIOS_TEST_BOUND_ROOTFS"]
+fn generated_builtin_records_authenticate_every_installed_code_binding() {
+    use mochios_posix_client::image_preparation::Source;
+    use std::path::{Path, PathBuf};
+    fn collect(directory: &Path, out: &mut Vec<PathBuf>) {
+        for entry in std::fs::read_dir(directory).unwrap() {
+            let entry = entry.unwrap();
+            if entry.file_type().unwrap().is_dir() {
+                collect(&entry.path(), out);
+            } else if entry.file_name() == "manifest.toml" {
+                out.push(entry.path());
+            }
+        }
+    }
+    let packages = PathBuf::from(std::env::var_os("MOCHIOS_TEST_BOUND_PACKAGES").unwrap());
+    let rootfs = PathBuf::from(std::env::var_os("MOCHIOS_TEST_BOUND_ROOTFS").unwrap());
+    let mut manifests = Vec::new();
+    collect(&packages, &mut manifests);
+    manifests.sort();
+    assert!(!manifests.is_empty());
+    let mut paths = std::collections::BTreeSet::new();
+    let mut binaries = 0;
+    for source in &manifests {
+        let declaration = std::fs::read(source).unwrap();
+        let manifest_path = format!(
+            "/system/packages/{}",
+            source.strip_prefix(&packages).unwrap().display()
+        );
+        let record_path = manifest_path
+            .strip_suffix("manifest.toml")
+            .unwrap()
+            .to_owned()
+            + "verification.bin";
+        let record = std::fs::read(source.with_file_name("verification.bin")).unwrap();
+        let manifest = package::parse_manifest(std::str::from_utf8(&declaration).unwrap()).unwrap();
+        FILES.with_borrow_mut(|files| {
+            *files = Files::default();
+            files
+                .bytes
+                .insert(manifest_path.clone(), declaration.clone());
+            files.bytes.insert(record_path, record);
+        });
+        for binary in &manifest.binaries {
+            assert!(
+                paths.insert(binary.path.clone()),
+                "duplicate code path {}",
+                binary.path
+            );
+            assert!(binary.file.is_some(), "unbound code {}", binary.path);
+            // Explicit host build mapping, not a runtime pathname fallback.
+            let path = binary
+                .path
+                .strip_prefix("/bin/")
+                .map(|tail| format!("system/bin/{tail}"))
+                .unwrap_or_else(|| binary.path.strip_prefix('/').unwrap().into());
+            let mut bytes = std::fs::read(rootfs.join(path)).unwrap();
+            assert!(!bytes.is_empty());
+            let verified = resolver::verified_manifest(&manifest_path, read_file).unwrap();
+            let decision = verified.decide_capabilities(&binary.path).unwrap();
+            assert!(decision.is_allowed(), "{}", binary.path);
+            assert!(
+                decision
+                    .requested
+                    .iter()
+                    .all(|name| mnu_abi::capability::metadata(name).is_some())
+            );
+            let catalog = if binary.kind.as_deref() == Some("application") {
+                Some(image_catalog::Catalog::new(verified, &binary.path).unwrap())
+            } else {
+                None
+            };
+            let validate = |bytes: &[u8]| {
+                if let Some(catalog) = &catalog {
+                    catalog.validate(Source::Root, bytes)
+                } else {
+                    image_catalog::validate_declared_root(&manifest, &binary.path, bytes)
+                }
+            };
+            assert_eq!(validate(&bytes), Ok(()), "{}", binary.path);
+            let last = bytes.len() - 1;
+            bytes[last] ^= 1;
+            assert!(validate(&bytes).is_err(), "modified code {}", binary.path);
+            bytes[last] ^= 1;
+            assert!(
+                validate(&bytes[..last]).is_err(),
+                "truncated code {}",
+                binary.path
+            );
+            bytes.push(0);
+            assert!(validate(&bytes).is_err(), "extended code {}", binary.path);
+            binaries += 1;
+        }
+        FILES.with_borrow_mut(|files| {
+            files
+                .bytes
+                .get_mut(&manifest_path)
+                .unwrap()
+                .extend_from_slice(b"\n# changed manifest\n")
+        });
+        assert!(resolver::verified_manifest(&manifest_path, read_file).is_err());
+    }
+    eprintln!(
+        "Authenticated {} packages and {binaries} code bindings through the production resolver and catalog",
+        manifests.len()
+    );
+}
+
+#[test]
 #[ignore = "requires MOCHIOS_TEST_DEVELOPMENT_PACKAGE and MOCHIOS_TEST_DEVELOPMENT_PREFIX"]
 fn generated_tool_catalog_authenticates_exact_real_code_without_shell_identity() {
     use mochios_posix_client::image_preparation::Source;
