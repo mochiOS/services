@@ -480,6 +480,14 @@ pub(crate) fn composite_and_present(
             if copy_right <= copy_left || copy_bottom <= copy_top {
                 continue;
             }
+            let coverage_mask =
+                window_style.map(|(_, frame, _, radius)| RoundedCoverage::new(frame, radius));
+            let border_mask =
+                window_style
+                    .filter(|(_, _, active, _)| *active)
+                    .map(|(_, frame, _, radius)| {
+                        RoundedCoverage::new(inset_rect(frame, 1), (radius - 1.0).max(0.0))
+                    });
             for dy in copy_top as usize..copy_bottom as usize {
                 let sy = (dy as i64).saturating_sub(surface.y as i64) as usize;
                 for dx in copy_left as usize..copy_right as usize {
@@ -493,9 +501,9 @@ pub(crate) fn composite_and_present(
                     let Some(pixel) = read_current_pixel(surface, sx, sy) else {
                         continue;
                     };
-                    let coverage = window_style.map_or(255, |(_, frame, _, radius)| {
-                        rounded_rect_coverage(frame, radius, dx as i32, dy as i32)
-                    });
+                    let coverage = coverage_mask
+                        .as_ref()
+                        .map_or(255, |mask| mask.at(dx as i32, dy as i32));
                     if coverage == 0 {
                         continue;
                     }
@@ -503,14 +511,8 @@ pub(crate) fn composite_and_present(
                         return errno_status(crate::protocol::SIZE_LIMIT);
                     };
                     *slot = blend_surface_pixel(*slot, pixel, surface.current_format, coverage);
-                    if let Some((_, window_frame, true, radius)) = window_style {
-                        let inner = inset_rect(window_frame, 1);
-                        let inner_coverage = rounded_rect_coverage(
-                            inner,
-                            (radius - 1.0).max(0.0),
-                            dx as i32,
-                            dy as i32,
-                        );
+                    if let Some(mask) = &border_mask {
+                        let inner_coverage = mask.at(dx as i32, dy as i32);
                         let border_coverage = coverage.saturating_sub(inner_coverage);
                         if border_coverage != 0 {
                             let alpha = ((u32::from(ACTIVE_WINDOW_BORDER_ALPHA)
@@ -746,9 +748,10 @@ fn fill_rounded_black(
         .min(occluder.width as f32 * 0.5)
         .min(occluder.height as f32 * 0.5)
         .ceil() as usize;
+    let coverage = RoundedCoverage::new(rect, radius);
     for y in top..bottom {
         if y < occluder_top || y >= occluder_bottom {
-            fill_shadow_range(frame, frame_width, rect, radius, alpha, y, left, right);
+            fill_shadow_range(frame, frame_width, &coverage, alpha, y, left, right);
             continue;
         }
         let in_corner_row = y < occluder_top.saturating_add(occluder_radius)
@@ -766,8 +769,7 @@ fn fill_rounded_black(
         fill_shadow_range(
             frame,
             frame_width,
-            rect,
-            radius,
+            &coverage,
             alpha,
             y,
             left,
@@ -776,8 +778,7 @@ fn fill_rounded_black(
         fill_shadow_range(
             frame,
             frame_width,
-            rect,
-            radius,
+            &coverage,
             alpha,
             y,
             left.max(right_start),
@@ -789,15 +790,14 @@ fn fill_rounded_black(
 fn fill_shadow_range(
     frame: &mut [u32],
     frame_width: usize,
-    rect: Rect,
-    radius: f32,
+    mask: &RoundedCoverage,
     alpha: u8,
     y: usize,
     left: usize,
     right: usize,
 ) {
     for x in left..right {
-        let coverage = rounded_rect_coverage(rect, radius, x as i32, y as i32);
+        let coverage = mask.at(x as i32, y as i32);
         if coverage == 0 {
             continue;
         }
@@ -815,6 +815,89 @@ fn inset_rect(rect: Rect, amount: u32) -> Rect {
         y: rect.y.saturating_add(offset),
         width: rect.width.saturating_sub(amount.saturating_mul(2)),
         height: rect.height.saturating_sub(amount.saturating_mul(2)),
+    }
+}
+
+// Renderer-thread-only, local-space corner masks. Position and rectangle size
+// are deliberately absent from the key: moving or resizing a window reuses its
+// corner samples. At most 32 * 128 * 128 bytes (512 KiB) are retained per thread.
+const COVERAGE_CACHE_CAPACITY: usize = 32;
+const MAX_CACHED_CORNER: usize = 128;
+thread_local! {
+    static COVERAGE_MASKS: std::cell::RefCell<std::collections::VecDeque<(u32, std::sync::Arc<[u8]>)>> =
+        const { std::cell::RefCell::new(std::collections::VecDeque::new()) };
+}
+
+struct RoundedCoverage {
+    rect: Rect,
+    radius: f32,
+    side: usize,
+    corner: Option<std::sync::Arc<[u8]>>,
+}
+
+impl RoundedCoverage {
+    fn new(rect: Rect, radius: f32) -> Self {
+        let radius = if radius.is_finite() {
+            radius.max(0.0)
+        } else {
+            0.0
+        }
+        .min(rect.width.min(rect.height) as f32 * 0.5);
+        let side = radius.ceil() as usize;
+        let corner = (side > 0 && side <= MAX_CACHED_CORNER).then(|| {
+            COVERAGE_MASKS.with(|cache| {
+                let mut cache = cache.borrow_mut();
+                let key = radius.to_bits();
+                if let Some(index) = cache.iter().position(|(k, _)| *k == key) {
+                    let entry = cache.remove(index).unwrap();
+                    let result = entry.1.clone();
+                    cache.push_back(entry);
+                    return result;
+                }
+                let bounds = Rect {
+                    x: 0,
+                    y: 0,
+                    width: side as u32 * 2,
+                    height: side as u32 * 2,
+                };
+                let pixels: std::sync::Arc<[u8]> = (0..side * side)
+                    .map(|i| {
+                        rounded_rect_coverage(bounds, radius, (i % side) as i32, (i / side) as i32)
+                    })
+                    .collect::<Vec<_>>()
+                    .into();
+                if cache.len() == COVERAGE_CACHE_CAPACITY {
+                    cache.pop_front();
+                }
+                cache.push_back((key, pixels.clone()));
+                pixels
+            })
+        });
+        Self {
+            rect,
+            radius,
+            side,
+            corner,
+        }
+    }
+
+    fn at(&self, x: i32, y: i32) -> u8 {
+        let dx = i64::from(x) - i64::from(self.rect.x);
+        let dy = i64::from(y) - i64::from(self.rect.y);
+        let w = i64::from(self.rect.width);
+        let h = i64::from(self.rect.height);
+        if dx < 0 || dy < 0 || dx >= w || dy >= h {
+            return 0;
+        }
+        let cx = dx.min(w - 1 - dx) as usize;
+        let cy = dy.min(h - 1 - dy) as usize;
+        if cx >= self.side || cy >= self.side {
+            return 255;
+        }
+        if let Some(corner) = &self.corner {
+            return corner[cy * self.side + cx];
+        }
+        rounded_rect_coverage(self.rect, self.radius, x, y)
     }
 }
 
@@ -994,6 +1077,147 @@ mod continuous_corner_tests {
                     );
                 }
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod coverage_cache_tests {
+    use super::*;
+
+    #[test]
+    fn cached_coverage_is_pixel_identical_during_move_and_resize() {
+        for (w, h) in [
+            (0, 0),
+            (1, 1),
+            (17, 70),
+            (31, 21),
+            (54, 53),
+            (111, 83),
+            (256, 133),
+            (301, 299),
+        ] {
+            for radius in [0., 0.5, 1., 9.25, 26.5, 28.5, 30.5, 40.5, 999.] {
+                for (x, y) in [(0, 0), (-37, -19), (1777, 951)] {
+                    let rect = Rect {
+                        x,
+                        y,
+                        width: w,
+                        height: h,
+                    };
+                    let mask = RoundedCoverage::new(rect, radius);
+                    for py in y - 1..y + h as i32 + 1 {
+                        for px in x - 1..x + w as i32 + 1 {
+                            assert_eq!(
+                                mask.at(px, py),
+                                rounded_rect_coverage(rect, radius, px, py),
+                                "rect={x},{y},{w},{h} r={radius}, p={px},{py}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn moving_and_resizing_reuse_samples_and_cache_has_a_memory_bound() {
+        let a = RoundedCoverage::new(
+            Rect {
+                x: 0,
+                y: 0,
+                width: 640,
+                height: 400,
+            },
+            26.5,
+        );
+        let b = RoundedCoverage::new(
+            Rect {
+                x: -10,
+                y: 200,
+                width: 800,
+                height: 600,
+            },
+            26.5,
+        );
+        assert!(std::sync::Arc::ptr_eq(
+            a.corner.as_ref().unwrap(),
+            b.corner.as_ref().unwrap()
+        ));
+        for n in 1..80 {
+            RoundedCoverage::new(
+                Rect {
+                    x: 0,
+                    y: 0,
+                    width: 800,
+                    height: 600,
+                },
+                n as f32 + 0.25,
+            );
+        }
+        COVERAGE_MASKS.with(|cache| {
+            let cache = cache.borrow();
+            assert!(cache.len() <= COVERAGE_CACHE_CAPACITY);
+            assert!(cache.iter().map(|(_, p)| p.len()).sum::<usize>() <= 512 * 1024);
+        });
+        assert!(
+            RoundedCoverage::new(
+                Rect {
+                    x: 0,
+                    y: 0,
+                    width: 1000,
+                    height: 1000
+                },
+                200.
+            )
+            .corner
+            .is_none()
+        );
+        for r in [f32::NAN, f32::INFINITY, -1.] {
+            assert_eq!(
+                RoundedCoverage::new(
+                    Rect {
+                        x: 0,
+                        y: 0,
+                        width: 20,
+                        height: 20
+                    },
+                    r
+                )
+                .at(0, 0),
+                255
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "manual window coverage CPU benchmark"]
+    fn benchmark_moving_window_coverage() {
+        for cached in [false, true] {
+            let start = std::time::Instant::now();
+            let mut checksum = 0u64;
+            for n in 0..10 {
+                let rect = Rect {
+                    x: n * 7,
+                    y: n * 3,
+                    width: 640,
+                    height: 400,
+                };
+                let mask = RoundedCoverage::new(rect, 26.5);
+                for y in rect.y..rect.y + rect.height as i32 {
+                    for x in rect.x..rect.x + rect.width as i32 {
+                        checksum += u64::from(std::hint::black_box(if cached {
+                            mask.at(x, y)
+                        } else {
+                            rounded_rect_coverage(rect, 26.5, x, y)
+                        }));
+                    }
+                }
+            }
+            eprintln!(
+                "window coverage cached={cached}: {:?}, checksum={checksum}",
+                start.elapsed()
+            );
         }
     }
 }
