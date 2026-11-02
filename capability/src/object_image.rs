@@ -3,6 +3,7 @@ use mochi_user_platform as platform;
 use mochi_user_syscall::{EACCES, EINVAL, SysError};
 
 pub(crate) fn authorize(
+    state: &crate::state::CapabilityServiceState,
     sender: u64,
     request: &[u8],
     attached: &platform::ipc::IpcObjectHandles,
@@ -21,38 +22,15 @@ pub(crate) fn authorize(
     {
         return Err(SysError::from_raw(EACCES as i64));
     }
-    // Never perform I/O on an untrusted Provider in this serialized broker.
-    // The caller chooses bytes within its own security domain; its digest is
-    // not a signer assertion. Native replacement verifies the actual bytes
-    // before committing, and this mode cannot add identity or grant authority.
-    authorize_inherited_digest(sender, identity, &digest)
-}
-
-/// Shared publication boundary. Callers establish the measurement and admission
-/// policy; native replacement rechecks actual bytes and inherited authority.
-pub(crate) fn authorize_inherited_digest(
-    sender: u64,
-    identity: &str,
-    digest: &[u8; 32],
-) -> Result<(), SysError> {
-    use mnu_abi::exec::{
-        EXEC_AUTHORIZATION_CLASS_PREFIX, EXEC_AUTHORIZATION_KIND_IMAGE_REPLACE_INHERIT,
-        EXEC_AUTHORIZATION_KIND_PREFIX, EXECUTABLE_DIGEST_PREFIX,
-    };
-    // The native inheritance mode accepts no identity override or grant list.
-    // No package index, path reopen, ambient file access or signer assertion is
-    // needed: this is a new image within the caller's existing security domain.
-    let mut fields = alloc::format!(
-        "{EXEC_AUTHORIZATION_KIND_PREFIX}{EXEC_AUTHORIZATION_KIND_IMAGE_REPLACE_INHERIT}\0{EXEC_AUTHORIZATION_CLASS_PREFIX}unprivileged\0{EXECUTABLE_DIGEST_PREFIX}"
-    );
-    for byte in digest {
-        use core::fmt::Write;
-        let _ = write!(fields, "{byte:02x}");
+    // The legacy transport's digest is only a consistency hint. Query RAM
+    // backing before any read; arbitrary Providers cannot enter this broker.
+    let length = platform::memory::object_length(u64::from(image.handle))?;
+    let snapshot = crate::signed_image::capture(image.handle, length)?;
+    use sha2::{Digest, Sha256};
+    if <[u8; 32]>::from(Sha256::digest(&snapshot)) != digest {
+        return Err(SysError::from_raw(EACCES as i64));
     }
-    fields.push('\0');
-    fields.push('\0');
-    platform::service::authorize_exec_for_requester(sender, identity, fields.as_bytes(), &[])
-        .map(|_| ())
+    crate::signed_image::authorize_snapshot(state, sender, identity, None, &snapshot)
 }
 
 /// The native layer captures the authenticated sender's current identity,

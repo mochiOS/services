@@ -465,13 +465,13 @@ pub(crate) fn serve_capability_requests(mut state: CapabilityServiceState) -> ! 
             continue;
         }
         if opcode == platform::capability::AUTHORIZE_EXEC_OBJECT_OPCODE {
-            let result = crate::object_image::authorize(sender, slice, &attached);
+            let result = crate::object_image::authorize(&state, sender, slice, &attached);
             close_received_handles(&attached);
             capability_reply(sender, result.err().map(error_status).unwrap_or(REPLY_OK));
             continue;
         }
         if opcode == platform::capability::signed_image::AUTHORIZE_OPCODE {
-            let result = crate::signed_image::authorize(sender, slice, &attached);
+            let result = crate::signed_image::authorize(&state, sender, slice, &attached);
             close_received_handles(&attached);
             capability_reply(sender, result.err().map(error_status).unwrap_or(REPLY_OK));
             continue;

@@ -38,6 +38,33 @@ pub mod handle {
         panic!("broker read an untrusted Provider")
     }
 }
+mod state {
+    pub struct CapabilityServiceState;
+}
+pub mod memory {
+    pub fn object_length(handle: u64) -> Result<u64, crate::SysError> {
+        assert_eq!(handle, 19);
+        Ok(b"retained RAM".len() as u64)
+    }
+}
+mod signed_image {
+    pub fn capture(handle: u32, length: u64) -> Result<Vec<u8>, crate::SysError> {
+        assert_eq!((handle, length), (19, b"retained RAM".len() as u64));
+        Ok(b"retained RAM".to_vec())
+    }
+    pub fn authorize_snapshot(
+        _: &crate::state::CapabilityServiceState,
+        sender: u64,
+        key: &str,
+        public_key: Option<&[u8; 32]>,
+        snapshot: &[u8],
+    ) -> Result<(), crate::SysError> {
+        assert!(public_key.is_none());
+        assert_eq!(snapshot, b"retained RAM");
+        crate::service::authorize_exec_for_requester(sender, key, b"common-source-gate", &[])
+            .map(|_| ())
+    }
+}
 pub mod service {
     pub fn authorize_exec_for_requester(
         sender: u64,
@@ -87,16 +114,29 @@ fn reset() {
     });
 }
 #[test]
-fn caller_digest_can_only_select_bytes_within_its_current_security_domain() {
-    for digest in [[0; 32], [0x5a; 32], [0xff; 32]] {
+fn retained_transport_dispatches_only_the_captured_bytes_to_the_common_source_gate() {
+    use sha2::{Digest, Sha256};
+    let expected: [u8; 32] = Sha256::digest(b"retained RAM").into();
+    for digest in [[0; 32], expected, [0xff; 32]] {
         reset();
-        object_image::authorize(77, &request(digest), &attachment()).unwrap();
-        STATE.with_borrow(|s|{
-   assert_eq!(s.issued.len(),1);let(sender,key,fields)=&s.issued[0];assert_eq!((*sender,key.as_str()),(77,"opaque:retained"));
-   let hex=digest.iter().map(|b|format!("{b:02x}")).collect::<String>();use mnu_abi::exec::*;
-   let expected=format!("{EXEC_AUTHORIZATION_KIND_PREFIX}{EXEC_AUTHORIZATION_KIND_IMAGE_REPLACE_INHERIT}\0{EXEC_AUTHORIZATION_CLASS_PREFIX}unprivileged\0{EXECUTABLE_DIGEST_PREFIX}{hex}\0\0");
-   assert_eq!(fields,expected.as_bytes());
-  });
+        let result = object_image::authorize(
+            &state::CapabilityServiceState,
+            77,
+            &request(digest),
+            &attachment(),
+        );
+        if digest == expected {
+            result.unwrap();
+            STATE.with_borrow(|s| {
+                assert_eq!(
+                    s.issued,
+                    [(77, "opaque:retained".into(), b"common-source-gate".to_vec())]
+                )
+            });
+        } else {
+            assert!(result.is_err());
+            STATE.with_borrow(|s| assert!(s.issued.is_empty()));
+        }
     }
     let source = include_str!("../../capability/src/object_image.rs");
     for forbidden in ["handle::read", "read_file(", "open_at(", "find_by_name("] {
@@ -123,7 +163,7 @@ fn malformed_delivery_and_missing_authority_never_publish() {
             7 => STATE.with_borrow_mut(|s| s.allowed = false),
             _ => b[4] ^= 1,
         }
-        assert!(object_image::authorize(77, &b, &a).is_err());
+        assert!(object_image::authorize(&state::CapabilityServiceState, 77, &b, &a).is_err());
         STATE.with_borrow(|s| assert!(s.issued.is_empty()));
     }
 }
@@ -131,8 +171,14 @@ fn malformed_delivery_and_missing_authority_never_publish() {
 fn native_errors_and_received_reference_cleanup_are_preserved() {
     reset();
     STATE.with_borrow_mut(|s| s.issue_error = Some(SysError(-321)));
+    use sha2::{Digest, Sha256};
     assert_eq!(
-        object_image::authorize(77, &request([2; 32]), &attachment()),
+        object_image::authorize(
+            &state::CapabilityServiceState,
+            77,
+            &request(Sha256::digest(b"retained RAM").into()),
+            &attachment(),
+        ),
         Err(SysError(-321))
     );
     STATE.with_borrow(|s| assert!(s.issued.is_empty()));

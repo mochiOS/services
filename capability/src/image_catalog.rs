@@ -90,6 +90,23 @@ fn image(
     })
 }
 
+pub(crate) struct CodeBinding {
+    pub(crate) digest: [u8; 32],
+    pub(crate) size: u64,
+}
+
+pub(crate) fn declared_root_binding(
+    manifest: &package::PackageManifest,
+    path: &str,
+) -> Result<CodeBinding, syscall::SysError> {
+    let binary = manifest.binary(path).ok_or_else(denied)?;
+    let image = image(manifest, binary)?;
+    Ok(CodeBinding {
+        digest: image.digest,
+        size: image.size,
+    })
+}
+
 fn decode_key(hash: &str) -> Result<[u8; 32], syscall::SysError> {
     if hash.len() != 64 {
         return Err(denied());
