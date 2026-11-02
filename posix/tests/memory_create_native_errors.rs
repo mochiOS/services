@@ -82,10 +82,10 @@ mod task {
         crate::INSERTS.set(crate::INSERTS.get()+1);
         if crate::FULL.get(){None}else{assert!(self.entry.is_none());self.entry=Some(entry);Some(Handle)}
     }}
-    pub struct Limits {pub max_mapped_pages:usize}
+    pub struct Limits {pub max_memory_object_pages:usize}
     pub struct Process {pub handles:Table}
     impl Process {
-        pub fn resource_limits(&self)->Limits{Limits{max_mapped_pages:1}}
+        pub fn resource_limits(&self)->Limits{Limits{max_memory_object_pages:1}}
         pub fn object_handles_mut(&mut self)->&mut Table{&mut self.handles}
     }
     pub fn with_process_mut<T>(id:u64,body:impl FnOnce(&mut Process)->T)->Option<T>{
