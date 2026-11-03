@@ -191,7 +191,7 @@ fn native_errors_and_received_reference_cleanup_are_preserved() {
         .next()
         .unwrap();
     assert!(
-        b.find("crate::object_image::authorize").unwrap()
+        b.find("source.authorize(&state)").unwrap()
             < b.find("close_received_handles(&attached)").unwrap()
     );
     assert!(

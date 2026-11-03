@@ -141,6 +141,9 @@ impl Pending {
     pub(crate) fn source_len(&self) -> usize {
         self.source.len()
     }
+    pub(crate) fn process_handle(&self) -> u32 {
+        self.requester.process.0
+    }
     pub(crate) fn subject(&self) -> (&ApplicationIdentity, &[String]) {
         let (identity, capabilities, _) = self.selection.authority();
         (identity, capabilities)

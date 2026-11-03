@@ -30,6 +30,9 @@ mod object_image;
 #[path = "../../capability/src/execution_approval.rs"]
 mod execution_approval;
 #[allow(dead_code)]
+#[path = "../../capability/src/execution_requests.rs"]
+mod execution_requests;
+#[allow(dead_code)]
 #[path = "../../capability/src/consent.rs"]
 mod consent;
 mod consent_peer {
@@ -855,21 +858,712 @@ fn snapshot_failures_and_native_authorization_errors_are_not_retried() {
 #[test]
 fn service_dispatch_releases_received_references_before_replying() {
     let source = include_str!("../../capability/src/server.rs");
-    let branch = source
-        .split("if opcode == platform::capability::signed_image::AUTHORIZE_OPCODE {")
-        .nth(1)
-        .unwrap()
-        .split("continue;")
-        .next()
+    for (opcode, module) in [
+        (
+            "platform::capability::signed_image::AUTHORIZE_OPCODE",
+            "signed_image",
+        ),
+        (
+            "platform::capability::AUTHORIZE_EXEC_OBJECT_OPCODE",
+            "object_image",
+        ),
+    ] {
+        let branch = source
+            .split(&format!("if opcode == {opcode} {{"))
+            .nth(1)
+            .unwrap()
+            .split("continue;")
+            .next()
+            .unwrap();
+        let steps = [
+            format!("crate::{module}::prepare"),
+            "execution_requests.reserve_image".into(),
+            "source.authorize(&state)".into(),
+            "close_received_handles(&attached)".into(),
+            "capability_reply".into(),
+        ];
+        let positions: Vec<_> = steps
+            .iter()
+            .map(|step| branch.find(step).unwrap())
+            .collect();
+        assert!(
+            positions.windows(2).all(|pair| pair[0] < pair[1]),
+            "{opcode}"
+        );
+    }
+}
+
+#[test]
+fn exhausted_retention_budget_rejects_both_transports_before_copying_ram() {
+    for legacy in [false, true] {
+        let code = approvals::code();
+        let (_, mut attached) = setup(code.clone());
+        let mut registry = execution_requests::Registry::with_limits(2, code.len()).unwrap();
+        let mut controller = consent::Controller::new();
+        let queued = request_registry::enqueue(&mut registry, &mut controller, &code, 88, 101);
+        let result = if legacy {
+            attached.handles[0].rights = handle::HANDLE_RIGHT_READ;
+            let mut request = vec![0; 512];
+            let n = mochios_capability_protocol::encode_authorize_exec_object_request(
+                "opaque:budget",
+                &Sha256::digest(&code).into(),
+                &mut request,
+            )
+            .unwrap();
+            object_image::prepare(77, &request[..n], &attached).and_then(|source| {
+                let _reservation = registry.reserve_image(77, source.length())?;
+                source.authorize(&empty_state())
+            })
+        } else {
+            let request = encode(code.len() as u64, None);
+            signed_image::prepare(77, &request, &attached).and_then(|source| {
+                let _reservation = registry.reserve_image(77, source.length())?;
+                source.authorize(&empty_state())
+            })
+        };
+        assert_eq!(
+            result,
+            Err(SysError::from(NativeError::ResourceUnavailable.into_raw()))
+        );
+        STATE.with_borrow(|s| assert_eq!((s.reads, s.issue_calls), (0, 0)));
+        assert_eq!((registry.len(), registry.bytes()), (1, code.len()));
+        registry
+            .cancel(
+                &mut controller,
+                queued.offer.correlation,
+                NativeError::AccessDenied,
+            )
+            .unwrap();
+        assert_eq!(
+            (registry.len(), registry.bytes(), controller.len()),
+            (0, 0, 0)
+        );
+    }
+}
+
+#[test]
+fn resizing_ram_after_preparation_cannot_exceed_the_reserved_extent() {
+    for legacy in [false, true] {
+        for grow in [false, true] {
+            let code = sign_adhoc(&fixture::unsigned()).unwrap();
+            let (request, mut attached) = setup(code.clone());
+            let mut registry = execution_requests::Registry::new().unwrap();
+            let resize = || {
+                STATE.with_borrow_mut(|s| s.extent = if grow { s.extent + 1 } else { s.extent - 1 })
+            };
+            let result = if legacy {
+                attached.handles[0].rights = handle::HANDLE_RIGHT_READ;
+                let mut request = vec![0; 512];
+                let n = mochios_capability_protocol::encode_authorize_exec_object_request(
+                    "opaque:resize",
+                    &Sha256::digest(&code).into(),
+                    &mut request,
+                )
+                .unwrap();
+                let source = object_image::prepare(77, &request[..n], &attached).unwrap();
+                let _reservation = registry.reserve_image(77, source.length()).unwrap();
+                resize();
+                source.authorize(&empty_state())
+            } else {
+                let source = signed_image::prepare(77, &request, &attached).unwrap();
+                let _reservation = registry.reserve_image(77, source.length()).unwrap();
+                resize();
+                source.authorize(&empty_state())
+            };
+            assert_eq!(
+                result,
+                Err(SysError::from_raw(mochi_user_syscall::EINVAL as i64))
+            );
+            assert_eq!((registry.len(), registry.bytes()), (0, 0));
+            STATE.with_borrow(|s| assert_eq!((s.reads, s.issue_calls), (0, 0)));
+        }
+    }
+}
+
+mod request_registry {
+    use super::approvals::{code, instance, peer, session};
+    use super::*;
+    use consent::*;
+    use execution_approval::Pending;
+    use execution_requests::Registry;
+    use platform_real::capability::consent::{Choice, Choices, Feedback};
+
+    pub(super) struct Queued {
+        pub(super) offer: Offer,
+        binding: Binding,
+        presenter: Presenter,
+        input: InputRoute,
+    }
+    pub(super) fn enqueue(
+        registry: &mut Registry,
+        controller: &mut Controller,
+        code: &[u8],
+        target: u64,
+        handle: u32,
+    ) -> Queued {
+        let reservation = registry.reserve(target, code.len()).unwrap();
+        let selected = signed_image::select_snapshot(&empty_state(), None, code).unwrap();
+        let mut requester = peer(handle);
+        requester.instance = instance(target);
+        let request = Pending::new(
+            selected,
+            code.to_vec(),
+            requester,
+            "opaque:approval",
+            session(),
+            3,
+        )
         .unwrap();
-    assert!(
-        branch.find("crate::signed_image::authorize").unwrap()
-            < branch.find("close_received_handles(&attached)").unwrap()
-    );
-    assert!(
-        branch.find("close_received_handles(&attached)").unwrap()
-            < branch.find("capability_reply").unwrap()
-    );
+        let binding = request.binding();
+        let presenter = Presenter {
+            instance: instance(target + 1),
+            registration: target + 2,
+        };
+        let input = InputRoute {
+            source: instance(3),
+            seat: 0,
+            generation: 8,
+        };
+        let correlation = controller.next_correlation([target as u8; 32]).unwrap();
+        let offer = reservation
+            .begin(controller, request, correlation, presenter, input, 100, 100)
+            .unwrap();
+        Queued {
+            offer,
+            binding,
+            presenter,
+            input,
+        }
+    }
+    fn decide(controller: &mut Controller, queued: &Queued) -> Approval {
+        let current = Current {
+            requester: Some(queued.binding.requester),
+            presenter: Some(queued.presenter),
+            input: Some(queued.input),
+            session: Some(queued.binding.session),
+            policy_generation: 3,
+            foreground: true,
+        };
+        assert_eq!(
+            controller.feedback(
+                queued.presenter.instance,
+                queued.offer.correlation,
+                Feedback::Presented,
+                current,
+                100
+            ),
+            Ok(Outcome::Pending)
+        );
+        controller
+            .arm(
+                queued.input.source,
+                queued.offer.correlation,
+                queued.input,
+                20,
+                true,
+                100,
+            )
+            .unwrap();
+        controller
+            .input(
+                queued.input.source,
+                queued.offer.correlation,
+                queued.input,
+                21,
+                Transition::PhysicalPress,
+                100,
+            )
+            .unwrap();
+        let Outcome::Approved(approval) = controller
+            .feedback(
+                queued.presenter.instance,
+                queued.offer.correlation,
+                Feedback::Decision {
+                    choice: Choice::AllowOnce,
+                    gesture: 21,
+                },
+                current,
+                100,
+            )
+            .unwrap()
+        else {
+            panic!("approval required")
+        };
+        assert_eq!(approval.correlation(), queued.offer.correlation);
+        approval
+    }
+    fn no_native_issue() {
+        STATE.with_borrow(|s| assert_eq!(s.issue_calls, 0));
+    }
+
+    #[test]
+    fn malformed_image_lengths_and_invalid_registry_limits_reserve_no_memory() {
+        for (count, bytes) in [
+            (0, 1),
+            (MAX_PENDING + 1, 1),
+            (1, 0),
+            (1, mnu_abi::exec::MAX_CAPTURED_IMAGE_BYTES + 1),
+        ] {
+            assert!(
+                matches!(Registry::with_limits(count,bytes),Err(error) if error==SysError::from(NativeError::InvalidArgument.into_raw()))
+            );
+        }
+        let mut registry = Registry::new().unwrap();
+        for length in [
+            0,
+            mnu_abi::exec::MAX_CAPTURED_IMAGE_BYTES as u64 + 1,
+            u64::MAX,
+        ] {
+            assert!(
+                matches!(registry.reserve_image(77,length),Err(error) if error==SysError::from(NativeError::InvalidArgument.into_raw()))
+            );
+            assert_eq!((registry.len(), registry.bytes()), (0, 0));
+        }
+    }
+
+    #[test]
+    fn policy_refresh_cancels_stale_requests_before_any_response_or_deadline() {
+        let code = code();
+        setup(code.clone());
+        let mut registry = Registry::new().unwrap();
+        let mut controller = Controller::new();
+        enqueue(&mut registry, &mut controller, &code, 77, 101);
+        enqueue(&mut registry, &mut controller, &code, 88, 102);
+        let mut replies = Vec::new();
+        registry.invalidate_policy(&mut controller, 3, |reply| replies.push(reply));
+        assert!(replies.is_empty());
+        assert_eq!((registry.len(), registry.bytes()), (2, code.len() * 2));
+        registry.invalidate_policy(&mut controller, 4, |reply| replies.push(reply));
+        assert_eq!(
+            replies.iter().map(|reply| reply.target).collect::<Vec<_>>(),
+            [77, 88]
+        );
+        assert!(
+            replies
+                .iter()
+                .all(|reply| reply.result
+                    == Err(SysError::from(NativeError::AccessDenied.into_raw())))
+        );
+        registry.invalidate_policy(&mut controller, 5, |_| panic!("duplicate reply"));
+        assert_eq!(
+            (registry.len(), registry.bytes(), controller.len()),
+            (0, 0, 0)
+        );
+        STATE.with_borrow(|state| assert_eq!(state.closed, [101, 102]));
+        no_native_issue();
+    }
+
+    #[test]
+    fn fatal_native_wait_failure_replies_once_and_preserves_the_original_error() {
+        let code = code();
+        setup(code.clone());
+        let mut registry = Registry::new().unwrap();
+        let mut controller = Controller::new();
+        enqueue(&mut registry, &mut controller, &code, 77, 101);
+        enqueue(&mut registry, &mut controller, &code, 88, 102);
+        let failure = SysError::from(NativeError::BackingFailure.into_raw());
+        let mut replies = Vec::new();
+        registry.abort(&mut controller, failure, |reply| replies.push(reply));
+        registry.abort(&mut controller, failure, |_| panic!("duplicate reply"));
+        assert_eq!(
+            replies.iter().map(|r| r.target).collect::<Vec<_>>(),
+            [77, 88]
+        );
+        assert!(replies.iter().all(|r| r.result == Err(failure)));
+        assert_eq!(
+            (registry.len(), registry.bytes(), controller.len()),
+            (0, 0, 0)
+        );
+        no_native_issue();
+        STATE.with_borrow(|s| assert_eq!(s.closed, [101, 102]));
+    }
+
+    #[test]
+    fn source_reservations_roll_back_and_enforce_byte_slot_and_sender_limits() {
+        let code = code();
+        setup(code.clone());
+        let mut registry = Registry::with_limits(1, code.len()).unwrap();
+        drop(registry.reserve(77, code.len()).unwrap());
+        assert_eq!((registry.len(), registry.bytes()), (0, 0));
+        let mut controller = Controller::new();
+        let queued = enqueue(&mut registry, &mut controller, &code, 77, 101);
+        assert_eq!((registry.len(), registry.bytes()), (1, code.len()));
+        assert!(registry.reserve(77, code.len()).is_err());
+        assert!(registry.reserve(88, 1).is_err());
+        let reply = registry
+            .cancel(
+                &mut controller,
+                queued.offer.correlation,
+                NativeError::AccessDenied,
+            )
+            .unwrap();
+        assert_eq!(reply.target, 77);
+        assert!(reply.result.is_err());
+        assert_eq!(controller.len(), 0);
+        assert_eq!((registry.len(), registry.bytes()), (0, 0));
+        drop(registry.reserve(88, code.len()).unwrap());
+        no_native_issue();
+    }
+
+    #[test]
+    fn failed_registration_releases_reservations_and_the_captured_process() {
+        for failure in 0..4 {
+            let code = code();
+            setup(code.clone());
+            let mut registry = Registry::new().unwrap();
+            let mut controller = Controller::new();
+            let reservation = registry
+                .reserve(
+                    if failure == 0 { 88 } else { 77 },
+                    if failure == 1 {
+                        code.len() - 1
+                    } else {
+                        code.len()
+                    },
+                )
+                .unwrap();
+            let request = super::approvals::pending(&empty_state(), code);
+            let correlation = controller.next_correlation([0x71; 32]).unwrap();
+            let presenter = Presenter {
+                instance: instance(2),
+                registration: if failure == 2 { 0 } else { 5 },
+            };
+            let input = InputRoute {
+                source: instance(3),
+                seat: 0,
+                generation: 8,
+            };
+            if failure == 3 {
+                controller
+                    .begin(
+                        request.binding(),
+                        presenter,
+                        input,
+                        Choices::new(Choices::ONCE).unwrap(),
+                        100,
+                        100,
+                        [0x72; 32],
+                    )
+                    .unwrap();
+            }
+            assert!(
+                reservation
+                    .begin(
+                        &mut controller,
+                        request,
+                        correlation,
+                        presenter,
+                        input,
+                        100,
+                        100
+                    )
+                    .is_err()
+            );
+            assert_eq!((registry.len(), registry.bytes()), (0, 0));
+            assert_eq!(controller.len(), usize::from(failure == 3));
+            STATE.with_borrow(|s| assert_eq!(s.closed.iter().filter(|id| **id == 101).count(), 1));
+            no_native_issue();
+        }
+    }
+
+    #[test]
+    fn deadlines_emit_one_reply_per_owner_and_release_all_retained_bytes() {
+        let code = code();
+        setup(code.clone());
+        let mut registry = Registry::new().unwrap();
+        let mut controller = Controller::new();
+        enqueue(&mut registry, &mut controller, &code, 77, 101);
+        enqueue(&mut registry, &mut controller, &code, 88, 102);
+        assert_eq!(registry.next_deadline(), Some(200));
+        let mut replies = Vec::new();
+        registry
+            .expire(&mut controller, 199, |reply| replies.push(reply))
+            .unwrap();
+        assert!(replies.is_empty());
+        registry
+            .expire(&mut controller, 200, |reply| replies.push(reply))
+            .unwrap();
+        assert_eq!(
+            replies.iter().map(|r| r.target).collect::<Vec<_>>(),
+            [77, 88]
+        );
+        assert!(
+            replies
+                .iter()
+                .all(|r| r.result == Err(SysError::from(NativeError::AccessDenied.into_raw())))
+        );
+        registry
+            .expire(&mut controller, 201, |reply| replies.push(reply))
+            .unwrap();
+        assert_eq!(replies.len(), 2);
+        assert_eq!(
+            (registry.len(), registry.bytes(), controller.len()),
+            (0, 0, 0)
+        );
+        no_native_issue();
+        STATE.with_borrow(|s| {
+            for id in [101, 102] {
+                assert_eq!(s.closed.iter().filter(|closed| **closed == id).count(), 1);
+            }
+        });
+    }
+
+    #[test]
+    fn terminated_callers_and_observation_failures_cancel_only_their_own_requests() {
+        let code = code();
+        setup(code.clone());
+        let mut registry = Registry::new().unwrap();
+        let mut controller = Controller::new();
+        enqueue(&mut registry, &mut controller, &code, 77, 101);
+        enqueue(&mut registry, &mut controller, &code, 88, 102);
+        let mut replies = Vec::new();
+        registry.reap(
+            &mut controller,
+            |handle| Ok(handle == 101),
+            |reply| replies.push(reply),
+        );
+        assert_eq!(replies.len(), 1);
+        assert_eq!(replies[0].target, 77);
+        assert_eq!(registry.len(), 1);
+        assert_eq!(registry.bytes(), code.len());
+        let failure = SysError::from(NativeError::BackingFailure.into_raw());
+        registry.reap(
+            &mut controller,
+            |handle| {
+                assert_eq!(handle, 102);
+                Err(failure)
+            },
+            |reply| replies.push(reply),
+        );
+        assert_eq!(replies[1].target, 88);
+        assert_eq!(replies[1].result, Err(failure));
+        assert_eq!(
+            (registry.len(), registry.bytes(), controller.len()),
+            (0, 0, 0)
+        );
+        no_native_issue();
+    }
+
+    #[test]
+    fn wait_plan_uses_the_receive_object_and_retained_process_references() {
+        let code = code();
+        setup(code.clone());
+        let mut registry = Registry::new().unwrap();
+        let mut controller = Controller::new();
+        enqueue(&mut registry, &mut controller, &code, 77, 101);
+        enqueue(&mut registry, &mut controller, &code, 88, 102);
+        let mut items = [mochi_user_syscall::HandleWaitItem::default(); 4];
+        assert_eq!(registry.wait_items(9, &mut items).unwrap(), 3);
+        assert_eq!(
+            (items[0].handle, items[0].interests),
+            (9, mnu_abi::HANDLE_SIGNAL_READABLE)
+        );
+        for (item, handle) in items[1..3].iter().zip([101, 102]) {
+            assert_eq!(
+                (item.handle, item.interests),
+                (handle, mnu_abi::HANDLE_SIGNAL_TERMINATED)
+            );
+        }
+        assert!(registry.wait_items(9, &mut items[..2]).is_err());
+        assert!(registry.wait_items(0, &mut items).is_err());
+        registry.cancel_all(&mut controller, NativeError::AccessDenied, |_| {});
+        assert_eq!(
+            (registry.len(), registry.bytes(), controller.len()),
+            (0, 0, 0)
+        );
+        no_native_issue();
+    }
+
+    #[test]
+    fn only_the_matching_transaction_can_consume_an_owned_request() {
+        let code = code();
+        setup(code.clone());
+        let mut registry = Registry::new().unwrap();
+        let mut controller = Controller::new();
+        let first = enqueue(&mut registry, &mut controller, &code, 77, 101);
+        let second = enqueue(&mut registry, &mut controller, &code, 88, 102);
+        let approval = decide(&mut controller, &second);
+        assert!(
+            registry
+                .finish(
+                    &mut controller,
+                    first.offer.correlation,
+                    approval,
+                    &peer(202),
+                    session(),
+                    3,
+                    100
+                )
+                .is_err()
+        );
+        assert_eq!(registry.len(), 2);
+        assert_eq!(registry.bytes(), code.len() * 2);
+        no_native_issue();
+        registry.cancel_all(&mut controller, NativeError::AccessDenied, |_| {});
+    }
+
+    #[test]
+    fn an_old_approval_cannot_authorize_a_later_identical_request() {
+        let code = code();
+        setup(code.clone());
+        let mut registry = Registry::new().unwrap();
+        let mut controller = Controller::new();
+        let first = enqueue(&mut registry, &mut controller, &code, 77, 101);
+        let approval = decide(&mut controller, &first);
+        registry
+            .cancel(
+                &mut controller,
+                first.offer.correlation,
+                NativeError::AccessDenied,
+            )
+            .unwrap();
+        let next = enqueue(&mut registry, &mut controller, &code, 77, 101);
+        assert_eq!(first.binding, next.binding);
+        assert_ne!(first.offer.correlation, next.offer.correlation);
+        assert!(
+            registry
+                .finish(
+                    &mut controller,
+                    next.offer.correlation,
+                    approval,
+                    &peer(202),
+                    session(),
+                    3,
+                    100
+                )
+                .is_err()
+        );
+        assert_eq!(registry.len(), 1);
+        no_native_issue();
+        registry.cancel_all(&mut controller, NativeError::AccessDenied, |_| {});
+    }
+
+    #[test]
+    fn completion_consumes_one_reply_and_preserves_native_failures() {
+        for failed in [false, true] {
+            let code = code();
+            setup(code.clone());
+            let mut registry = Registry::new().unwrap();
+            let mut controller = Controller::new();
+            let queued = enqueue(&mut registry, &mut controller, &code, 77, 101);
+            let approval = decide(&mut controller, &queued);
+            let failure = SysError::from(NativeError::ResourceUnavailable.into_raw());
+            if failed {
+                STATE.with_borrow_mut(|s| s.issue_error = Some(failure));
+            }
+            let reply = registry
+                .finish(
+                    &mut controller,
+                    queued.offer.correlation,
+                    approval,
+                    &peer(202),
+                    session(),
+                    3,
+                    100,
+                )
+                .unwrap();
+            assert_eq!(reply.target, 77);
+            assert_eq!(reply.result, if failed { Err(failure) } else { Ok(()) });
+            assert_eq!(
+                (registry.len(), registry.bytes(), controller.len()),
+                (0, 0, 0)
+            );
+            STATE.with_borrow(|s| assert_eq!(s.issue_calls, 1));
+            assert!(
+                registry
+                    .cancel(
+                        &mut controller,
+                        queued.offer.correlation,
+                        NativeError::AccessDenied
+                    )
+                    .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn completion_after_the_deadline_never_issues_a_native_permit() {
+        let code = code();
+        setup(code.clone());
+        let mut registry = Registry::new().unwrap();
+        let mut controller = Controller::new();
+        let queued = enqueue(&mut registry, &mut controller, &code, 77, 101);
+        let approval = decide(&mut controller, &queued);
+        let reply = registry
+            .finish(
+                &mut controller,
+                queued.offer.correlation,
+                approval,
+                &peer(202),
+                session(),
+                3,
+                200,
+            )
+            .unwrap();
+        assert_eq!(
+            reply.result,
+            Err(SysError::from(NativeError::AccessDenied.into_raw()))
+        );
+        assert_eq!((registry.len(), registry.bytes()), (0, 0));
+        no_native_issue();
+    }
+
+    #[test]
+    fn expiry_does_not_discard_another_controllers_request_owner() {
+        let code = code();
+        setup(code.clone());
+        let mut registry = Registry::new().unwrap();
+        let mut controller = Controller::new();
+        let queued = enqueue(&mut registry, &mut controller, &code, 77, 101);
+        let foreign = controller
+            .begin(
+                queued.binding,
+                Presenter {
+                    instance: instance(44),
+                    registration: 1,
+                },
+                queued.input,
+                Choices::new(Choices::ONCE).unwrap(),
+                100,
+                50,
+                [0x99; 32],
+            )
+            .unwrap();
+        registry
+            .expire(&mut controller, 150, |_| {
+                panic!("no owned deadline reached")
+            })
+            .unwrap();
+        assert_eq!(controller.len(), 2);
+        let mut expired = Vec::new();
+        controller
+            .expire(150, |ticket, _| expired.push(ticket))
+            .unwrap();
+        assert_eq!(expired, [foreign.correlation.ticket]);
+        registry.cancel_all(&mut controller, NativeError::AccessDenied, |_| {});
+        no_native_issue();
+    }
+
+    #[test]
+    fn backwards_time_is_explicit_and_all_requests_can_still_be_cancelled() {
+        let code = code();
+        setup(code.clone());
+        let mut registry = Registry::new().unwrap();
+        let mut controller = Controller::new();
+        enqueue(&mut registry, &mut controller, &code, 77, 101);
+        registry.expire(&mut controller, 101, |_| {}).unwrap();
+        assert!(registry.expire(&mut controller, 100, |_| {}).is_err());
+        let mut replies = Vec::new();
+        registry.cancel_all(&mut controller, NativeError::BackingFailure, |reply| {
+            replies.push(reply)
+        });
+        assert_eq!(replies.len(), 1);
+        assert_eq!(
+            (registry.len(), registry.bytes(), controller.len()),
+            (0, 0, 0)
+        );
+        no_native_issue();
+    }
 }
 
 mod approvals {
@@ -878,7 +1572,7 @@ mod approvals {
     use execution_approval::Pending;
     use platform_real::capability::consent::{Choice, Choices, Feedback};
 
-    fn instance(id: u64) -> Instance {
+    pub(super) fn instance(id: u64) -> Instance {
         Instance {
             endpoint: id,
             process: id + 100,
@@ -887,13 +1581,13 @@ mod approvals {
             digest: [id as u8; 32],
         }
     }
-    fn peer(handle: u32) -> consent_peer::Peer {
+    pub(super) fn peer(handle: u32) -> consent_peer::Peer {
         consent_peer::Peer {
             instance: instance(77),
             process: consent_peer::ProcessReference(handle),
         }
     }
-    fn session() -> Session {
+    pub(super) fn session() -> Session {
         Session {
             id: 1,
             generation: 2,
@@ -907,10 +1601,10 @@ mod approvals {
         }
         text
     }
-    fn code() -> Vec<u8> {
+    pub(super) fn code() -> Vec<u8> {
         declared("[[binary]]\npath='main'\nrequires=['net.connect']\n")
     }
-    fn pending(state: &state::CapabilityServiceState, code: Vec<u8>) -> Pending {
+    pub(super) fn pending(state: &state::CapabilityServiceState, code: Vec<u8>) -> Pending {
         let selection = signed_image::select_snapshot(state, None, &code).unwrap();
         Pending::new(selection, code, peer(101), "opaque:approval", session(), 3).unwrap()
     }

@@ -117,9 +117,13 @@ impl From<mochi_user_platform::capability::input_authority::Transition> for Tran
 pub(crate) struct Approval {
     binding: Binding,
     choice: Choice,
+    correlation: Correlation,
 }
 
 impl Approval {
+    pub fn correlation(&self) -> Correlation {
+        self.correlation
+    }
     pub fn into_parts(self) -> (Binding, Choice) {
         (self.binding, self.choice)
     }
@@ -207,6 +211,10 @@ impl Controller {
         Ok(())
     }
 
+    pub fn observe_time(&mut self, now: u64) -> Result<(), Error> {
+        self.clock(now)
+    }
+
     pub fn begin(
         &mut self,
         binding: Binding,
@@ -267,6 +275,51 @@ impl Controller {
         });
         self.next_id = id.checked_add(1);
         Ok(offer)
+    }
+
+    /// Reserve no state while a measured compositor registers this display.
+    /// begin_at revalidates the counter before publishing the controller entry.
+    pub fn next_correlation(&self, challenge: [u8; 32]) -> Result<Correlation, Error> {
+        if challenge == [0; 32] {
+            return Err(Error::Invalid);
+        }
+        if self
+            .pending
+            .iter()
+            .flatten()
+            .any(|p| p.offer.correlation.ticket.challenge == challenge)
+        {
+            return Err(Error::Busy);
+        }
+        let id = self.next_id.ok_or(Error::Exhausted)?;
+        Ok(Correlation {
+            ticket: Ticket { id, challenge },
+            display: id,
+        })
+    }
+
+    pub fn begin_at(
+        &mut self,
+        correlation: Correlation,
+        binding: Binding,
+        presenter: Presenter,
+        input: InputRoute,
+        choices: Choices,
+        now: u64,
+        timeout: u64,
+    ) -> Result<Offer, Error> {
+        if self.next_correlation(correlation.ticket.challenge)? != correlation {
+            return Err(Error::Changed);
+        }
+        self.begin(
+            binding,
+            presenter,
+            input,
+            choices,
+            now,
+            timeout,
+            correlation.ticket.challenge,
+        )
     }
 
     fn locate(&self, correlation: Correlation) -> Result<usize, Error> {
@@ -353,6 +406,7 @@ impl Controller {
                 Ok(Outcome::Approved(Approval {
                     binding: pending.binding,
                     choice,
+                    correlation: pending.offer.correlation,
                 }))
             }
         }

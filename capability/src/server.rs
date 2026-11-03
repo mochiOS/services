@@ -33,6 +33,26 @@ fn capability_reply(sender: u64, status: u64) {
     let _ = platform::ipc::reply(sender, &status.to_le_bytes());
 }
 
+fn retained_reply(reply: crate::execution_requests::Reply) {
+    capability_reply(
+        reply.target,
+        reply.result.err().map(error_status).unwrap_or(REPLY_OK),
+    );
+}
+
+fn receive_failure(
+    requests: &mut crate::execution_requests::Registry,
+    controller: &mut crate::consent::Controller,
+    error: mochi_user_syscall::SysError,
+) -> ! {
+    requests.abort(controller, error, retained_reply);
+    platform::logln!(
+        "capability.service: receive wait failed raw={}",
+        error.raw()
+    );
+    platform::process::exit(1)
+}
+
 fn close_received_handles(handles: &platform::ipc::IpcObjectHandles) {
     let count = core::cmp::min(handles.count as usize, handles.handles.len());
     for attached in &handles.handles[..count] {
@@ -105,7 +125,7 @@ pub(crate) fn serve_capability_requests(mut state: CapabilityServiceState) -> ! 
     // The authenticated handoff below switches this phase permanently; a
     // runtime read failure must never retry through the bootstrap path.
     let mut authorization_reader: crate::resolver::FileReader = crate::bootstrap_file::read_file;
-    let endpoint = match platform::ipc::create() {
+    let receive_object = match platform::ipc::create().and_then(|_| platform::ipc::create_handle()) {
         Ok(endpoint) => endpoint,
         Err(err) => {
             platform::logln!(
@@ -115,8 +135,20 @@ pub(crate) fn serve_capability_requests(mut state: CapabilityServiceState) -> ! 
             platform::process::exit(1);
         }
     };
+    let mut execution_requests = match crate::execution_requests::Registry::new() {
+        Ok(registry) => registry,
+        Err(error) => {
+            platform::logln!(
+                "capability.service: execution retention allocation failed raw={}",
+                error.raw()
+            );
+            platform::process::exit(1)
+        }
+    };
     platform::logln!("capability.service: ready");
     let mut buf = [0u8; 1024];
+    let mut wait_items =
+        [mochi_user_syscall::HandleWaitItem::default(); mnu_abi::HANDLE_WAIT_MANY_MAX_ITEMS];
     let mut input_authority: Option<crate::consent_input::Channel> = None;
     let mut display_authority: Option<crate::consent_presentation::Channel> = None;
     let mut desktop_sessions = crate::consent_presentation::Sessions::default();
@@ -125,13 +157,50 @@ pub(crate) fn serve_capability_requests(mut state: CapabilityServiceState) -> ! 
     #[cfg(mochios_consent_input_probe_306)]
     let mut input_probe: Option<crate::consent_input_probe::Probe> = None;
     loop {
+        // Check deadlines before every receive, including under message load.
+        if execution_requests.len() != 0 {
+            execution_requests.invalidate_policy(
+                &mut state.consent,
+                state.authorization_generation,
+                retained_reply,
+            );
+            let now = match platform::time::monotonic_nanoseconds() {
+                Ok(now) => now,
+                Err(error) => receive_failure(&mut execution_requests, &mut state.consent, error),
+            };
+            if let Err(error) = execution_requests.expire(&mut state.consent, now, retained_reply) {
+                receive_failure(&mut execution_requests, &mut state.consent, error);
+            }
+            execution_requests.reap(
+                &mut state.consent,
+                |handle| {
+                    platform::process::handle_status(handle)
+                        .map(|status| status.state == mnu_abi::PROCESS_STATE_EXITED)
+                },
+                retained_reply,
+            );
+        }
         let mut attached = platform::ipc::IpcObjectHandles::default();
-        let msg = match platform::ipc::wait_object_handles(endpoint, &mut buf, &mut attached) {
+        let msg = match platform::ipc::try_wait_object_handles(&mut buf, &mut attached) {
             Ok(msg) => msg,
-            Err(_) => {
-                platform::thread::yield_now();
+            Err(error)
+                if error.raw() == mochi_user_syscall::NativeError::NotReady.into_raw() as i64 =>
+            {
+                let count = match execution_requests.wait_items(receive_object, &mut wait_items) {
+                    Ok(count) => count,
+                    Err(error) => receive_failure(&mut execution_requests, &mut state.consent, error),
+                };
+                let deadline = execution_requests
+                    .next_deadline()
+                    .unwrap_or(mnu_abi::HANDLE_WAIT_INFINITE);
+                if let Err(error) = platform::process::wait_many(&mut wait_items[..count], deadline) {
+                    if error.raw() != mochi_user_syscall::NativeError::NotReady.into_raw() as i64 {
+                        receive_failure(&mut execution_requests, &mut state.consent, error);
+                    }
+                }
                 continue;
             }
+            Err(error) => receive_failure(&mut execution_requests, &mut state.consent, error),
         };
         let sender = msg >> 32;
         let len = (msg & 0xffff_ffff) as usize;
@@ -227,6 +296,11 @@ pub(crate) fn serve_capability_requests(mut state: CapabilityServiceState) -> ! 
                     &state.trusted_images,
                     &mut display_authority,
                     || {
+                        execution_requests.cancel_all(
+                            &mut state.consent,
+                            mochi_user_syscall::NativeError::AccessDenied,
+                            retained_reply,
+                        );
                         state.consent.observe(
                             |_, _, _| crate::consent::Current {
                                 requester: None,
@@ -465,13 +539,19 @@ pub(crate) fn serve_capability_requests(mut state: CapabilityServiceState) -> ! 
             continue;
         }
         if opcode == platform::capability::AUTHORIZE_EXEC_OBJECT_OPCODE {
-            let result = crate::object_image::authorize(&state, sender, slice, &attached);
+            let result = crate::object_image::prepare(sender, slice, &attached).and_then(|source| {
+                let _reservation = execution_requests.reserve_image(sender, source.length())?;
+                source.authorize(&state)
+            });
             close_received_handles(&attached);
             capability_reply(sender, result.err().map(error_status).unwrap_or(REPLY_OK));
             continue;
         }
         if opcode == platform::capability::signed_image::AUTHORIZE_OPCODE {
-            let result = crate::signed_image::authorize(&state, sender, slice, &attached);
+            let result = crate::signed_image::prepare(sender, slice, &attached).and_then(|source| {
+                let _reservation = execution_requests.reserve_image(sender, source.length())?;
+                source.authorize(&state)
+            });
             close_received_handles(&attached);
             capability_reply(sender, result.err().map(error_status).unwrap_or(REPLY_OK));
             continue;

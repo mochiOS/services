@@ -8,6 +8,38 @@ pub(crate) fn authorize(
     request: &[u8],
     attached: &platform::ipc::IpcObjectHandles,
 ) -> Result<(), SysError> {
+    prepare(sender, request, attached)?.authorize(state)
+}
+
+pub(crate) struct Source<'a> {
+    sender: u64,
+    handle: u32,
+    length: u64,
+    digest: [u8; 32],
+    key: &'a str,
+}
+impl Source<'_> {
+    pub(crate) fn length(&self) -> u64 {
+        self.length
+    }
+    pub(crate) fn authorize(
+        self,
+        state: &crate::state::CapabilityServiceState,
+    ) -> Result<(), SysError> {
+        let snapshot = crate::signed_image::capture(self.handle, self.length)?;
+        use sha2::{Digest, Sha256};
+        if <[u8; 32]>::from(Sha256::digest(&snapshot)) != self.digest {
+            return Err(SysError::from_raw(EACCES as i64));
+        }
+        crate::signed_image::authorize_snapshot(state, self.sender, self.key, None, &snapshot)
+    }
+}
+
+pub(crate) fn prepare<'a>(
+    sender: u64,
+    request: &'a [u8],
+    attached: &platform::ipc::IpcObjectHandles,
+) -> Result<Source<'a>, SysError> {
     let (digest, identity) = platform::capability::decode_authorize_exec_object_request(request)
         .map_err(|_| SysError::from_raw(EINVAL as i64))?;
     if !attached.is_user_delivery() || attached.count != 1 {
@@ -25,12 +57,13 @@ pub(crate) fn authorize(
     // The legacy transport's digest is only a consistency hint. Query RAM
     // backing before any read; arbitrary Providers cannot enter this broker.
     let length = platform::memory::object_length(u64::from(image.handle))?;
-    let snapshot = crate::signed_image::capture(image.handle, length)?;
-    use sha2::{Digest, Sha256};
-    if <[u8; 32]>::from(Sha256::digest(&snapshot)) != digest {
-        return Err(SysError::from_raw(EACCES as i64));
-    }
-    crate::signed_image::authorize_snapshot(state, sender, identity, None, &snapshot)
+    Ok(Source {
+        sender,
+        handle: image.handle,
+        length,
+        digest,
+        key: identity,
+    })
 }
 
 /// The native layer captures the authenticated sender's current identity,

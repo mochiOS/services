@@ -17,6 +17,36 @@ pub(crate) fn authorize(
     bytes: &[u8],
     attached: &p::ipc::IpcObjectHandles,
 ) -> Result<(), SysError> {
+    prepare(sender, bytes, attached)?.authorize(state)
+}
+
+/// Borrowed receiver reference and immutable command metadata. The caller
+/// retains its received Handle until authorize has completed.
+pub(crate) struct Source<'a> {
+    sender: u64,
+    handle: u32,
+    length: u64,
+    key: &'a str,
+    public_key: Option<&'a [u8; 32]>,
+}
+impl Source<'_> {
+    pub(crate) fn length(&self) -> u64 {
+        self.length
+    }
+    pub(crate) fn authorize(
+        self,
+        state: &crate::state::CapabilityServiceState,
+    ) -> Result<(), SysError> {
+        let snapshot = capture(self.handle, self.length)?;
+        authorize_snapshot(state, self.sender, self.key, self.public_key, &snapshot)
+    }
+}
+
+pub(crate) fn prepare<'a>(
+    sender: u64,
+    bytes: &'a [u8],
+    attached: &p::ipc::IpcObjectHandles,
+) -> Result<Source<'a>, SysError> {
     let request = p::capability::signed_image::decode(bytes)
         .map_err(|_| SysError::from_raw(EINVAL as i64))?;
     if !attached.is_user_delivery() || attached.count != 1 {
@@ -31,14 +61,13 @@ pub(crate) fn authorize(
     {
         return Err(SysError::from_raw(EACCES as i64));
     }
-    let snapshot = capture(object.handle, request.source_length)?;
-    authorize_snapshot(
-        state,
+    Ok(Source {
+        handle: object.handle,
+        length: request.source_length,
+        key: request.identity,
+        public_key: request.public_key,
         sender,
-        request.identity,
-        request.public_key,
-        &snapshot,
-    )
+    })
 }
 
 pub(crate) fn capture(handle: u32, source_length: u64) -> Result<Vec<u8>, SysError> {
