@@ -20,7 +20,7 @@ def main(configuration):
         )
         subprocess.run([
             "python3", str(driver), str(configuration), "-D", "VALUE=7",
-            "-std=gnu17", "--param", "max-inline-insns-single=1200",
+            "-v", "-std=gnu17", "--param", "max-inline-insns-single=1200",
             "-static", str(source), "-o", str(output),
         ], check=True)
         data = output.read_bytes()
