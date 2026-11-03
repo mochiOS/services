@@ -2,6 +2,21 @@
 mod production;
 use production::{Special, character, special, text};
 #[test]
+fn physical_enter_and_tab_text_events_do_not_send_a_second_control_byte() {
+    for commit in ["\n", "\r", "\r\n", "\t"] {
+        assert!(
+            text(commit).is_empty(),
+            "duplicate physical control: {commit:?}"
+        );
+    }
+    assert_eq!(
+        text("日本語\nnext\tcolumn"),
+        "日本語\nnext\tcolumn".as_bytes()
+    );
+    assert_eq!(text(" "), b" ");
+    assert_eq!(text("hello vim"), b"hello vim");
+}
+#[test]
 fn unicode_and_control_keys_are_terminal_bytes_not_binary_events() {
     assert_eq!(text("日本語\r\nnext\r"), "日本語\nnext\n".as_bytes());
     for (key, byte) in [
