@@ -1035,6 +1035,85 @@ mod request_registry {
             input,
         }
     }
+    #[test]
+    fn presenter_content_comes_only_from_the_retained_authenticated_selection() {
+        use platform_real::capability::consent::prompt;
+        let code = code();
+        setup(code.clone());
+        let mut registry = Registry::new().unwrap();
+        let mut controller = Controller::new();
+        let queued = enqueue(&mut registry, &mut controller, &code, 77, 101);
+        let mut bytes = [0; prompt::MAX_MESSAGE_BYTES];
+        let length = registry
+            .write_prompt(
+                queued.offer.correlation,
+                queued.presenter.instance,
+                101,
+                &mut bytes,
+            )
+            .unwrap();
+        let rendered = prompt::decode(&bytes[..length]).unwrap();
+        assert_eq!(
+            rendered.source_digest,
+            <[u8; 32]>::from(Sha256::digest(&code))
+        );
+        assert_eq!(rendered.correlation, queued.offer.correlation);
+        assert_eq!(rendered.deadline, queued.offer.deadline);
+        assert_eq!(rendered.capabilities().collect::<Vec<_>>(), ["net.connect"]);
+        assert!(rendered.package.starts_with("local.elf."));
+        assert_eq!(rendered.choices.bits(), Choices::ONCE);
+        assert_eq!(registry.len(), 1);
+        no_native_issue();
+    }
+
+    #[test]
+    fn a_ticket_does_not_disclose_prompt_content_to_another_or_replaced_presenter() {
+        use platform_real::capability::consent::prompt;
+        let code = code();
+        setup(code.clone());
+        let mut registry = Registry::new().unwrap();
+        let mut controller = Controller::new();
+        let queued = enqueue(&mut registry, &mut controller, &code, 77, 101);
+        let mut bytes = [0xa5; prompt::MAX_MESSAGE_BYTES];
+        let mut replaced = queued.presenter.instance;
+        replaced.revision += 1;
+        for presenter in [queued.binding.requester, replaced] {
+            assert!(
+                registry
+                    .write_prompt(queued.offer.correlation, presenter, 101, &mut bytes)
+                    .is_err()
+            );
+            assert!(bytes.iter().all(|byte| *byte == 0xa5));
+        }
+        assert!(
+            registry
+                .write_prompt(
+                    queued.offer.correlation,
+                    queued.presenter.instance,
+                    queued.offer.deadline,
+                    &mut bytes
+                )
+                .is_err()
+        );
+        registry
+            .cancel(
+                &mut controller,
+                queued.offer.correlation,
+                NativeError::AccessDenied,
+            )
+            .unwrap();
+        assert!(
+            registry
+                .write_prompt(
+                    queued.offer.correlation,
+                    queued.presenter.instance,
+                    101,
+                    &mut bytes
+                )
+                .is_err()
+        );
+        no_native_issue();
+    }
     fn decide(controller: &mut Controller, queued: &Queued) -> Approval {
         let current = Current {
             requester: Some(queued.binding.requester),

@@ -39,6 +39,7 @@ pub(crate) struct Reply {
 struct Entry {
     offer: Offer,
     request: Pending,
+    presenter: Presenter,
 }
 enum Slot {
     Reserved { target: u64, bytes: usize },
@@ -148,6 +149,24 @@ impl Registry {
             .bytes
             .checked_sub(bytes)
             .expect("execution retention accounting");
+    }
+    /// The adapter must capture this peer from the IPC sender. A ticket alone
+    /// does not disclose another presenter's source or requested permissions.
+    pub(crate) fn write_prompt(
+        &self,
+        correlation: Correlation,
+        presenter: crate::consent::Instance,
+        now: u64,
+        output: &mut [u8],
+    ) -> Result<usize, SysError> {
+        let index = self.index(correlation)?;
+        let Some(Slot::Ready(entry)) = &self.slots[index] else {
+            unreachable!()
+        };
+        if presenter != entry.presenter.instance || now >= entry.offer.deadline {
+            return Err(error(NativeError::AccessDenied));
+        }
+        entry.request.write_prompt(entry.offer, output)
     }
     fn retire(&mut self, index: usize, controller: &mut Controller, reason: SysError) -> Reply {
         let slot = self.slots[index].take().expect("owned execution slot");
@@ -350,7 +369,11 @@ impl Reservation<'_> {
                 timeout,
             )
             .map_err(consent_error)?;
-        self.owner.slots[self.index] = Some(Slot::Ready(Entry { offer, request }));
+        self.owner.slots[self.index] = Some(Slot::Ready(Entry {
+            offer,
+            request,
+            presenter,
+        }));
         self.active = false;
         Ok(offer)
     }

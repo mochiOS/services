@@ -1,6 +1,7 @@
 mod authentication;
 mod clock;
 mod login;
+pub mod execution_prompt;
 mod network_prompt;
 mod permission_server;
 mod portal_prompt;

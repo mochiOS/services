@@ -149,6 +149,52 @@ impl Pending {
         (identity, capabilities)
     }
 
+    /// Generate frontend content from the retained authenticated selection,
+    /// never from request-supplied labels or a fresh pathname lookup.
+    pub(crate) fn write_prompt(
+        &self,
+        offer: crate::consent::Offer,
+        output: &mut [u8],
+    ) -> Result<usize, SysError> {
+        use p::capability::consent::prompt::{self, Prompt};
+        let (identity, capabilities, digest) = self.selection.authority();
+        let mut ordered = [""; prompt::MAX_CAPABILITIES];
+        let names = ordered
+            .get_mut(..capabilities.len())
+            .ok_or_else(|| error(NativeError::InvalidArgument))?;
+        for (slot, name) in names.iter_mut().zip(capabilities) {
+            *slot = name;
+        }
+        names.sort_unstable();
+        let mut encoded = [0; prompt::MAX_REQUIREMENTS_BYTES];
+        let mut length = 0;
+        let mut previous = None;
+        for name in names {
+            if previous == Some(*name) {
+                continue;
+            }
+            let end = length + name.len() + 1;
+            encoded
+                .get_mut(length..end)
+                .ok_or_else(|| error(NativeError::InvalidArgument))?[..name.len()]
+                .copy_from_slice(name.as_bytes());
+            length = end;
+            previous = Some(*name);
+        }
+        prompt::encode(
+            Prompt {
+                correlation: offer.correlation,
+                deadline: offer.deadline,
+                choices: offer.choices,
+                source_digest: *digest,
+                package: &identity.package_id,
+                requirements: &encoded[..length],
+            },
+            output,
+        )
+        .map_err(|_| error(NativeError::InvalidArgument))
+    }
+
     /// Adapters supply fresh authenticated peer/session observations. Approval
     /// is consumed before any native I/O; failures require a new transaction.
     /// Only AllowOnce is implemented here, so persistent/process scopes must

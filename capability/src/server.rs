@@ -428,6 +428,32 @@ pub(crate) fn serve_capability_requests(mut state: CapabilityServiceState) -> ! 
             capability_reply(sender, status);
             continue;
         }
+        if opcode == platform::capability::consent::prompt::FETCH_OPCODE {
+            use platform::capability::consent::prompt;
+            let mut output = [0; prompt::MAX_MESSAGE_BYTES];
+            let result = (|| {
+                if attached.count != 0 || !attached.is_user_delivery() {
+                    return Err(mochi_user_syscall::SysError::from_raw(-22));
+                }
+                let correlation = prompt::decode_fetch(slice)
+                    .map_err(|_| mochi_user_syscall::SysError::from_raw(-22))?;
+                let presenter = crate::consent_peer::capture(sender)?;
+                execution_requests.write_prompt(
+                    correlation,
+                    presenter.instance,
+                    platform::time::monotonic_nanoseconds()?,
+                    &mut output,
+                )
+            })();
+            close_received_handles(&attached);
+            match result {
+                Ok(length) => {
+                    let _ = platform::ipc::reply(sender, &output[..length]);
+                }
+                Err(error) => capability_reply(sender, error_status(error)),
+            }
+            continue;
+        }
         if opcode == platform::capability::INSTALL_POSIX_ENDPOINT_OPCODE {
             let valid_attachment = attached.is_user_delivery()
                 && attached.count == 1
