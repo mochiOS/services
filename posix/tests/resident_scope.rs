@@ -262,6 +262,57 @@ fn failed_installation_cleanup_outlives_the_relocation_scratch_buffer() {
 }
 
 #[test]
+fn relro_preserves_execute_on_an_originally_executable_readable_load() {
+    exercise_with(
+        |fixture| {
+            let bytes = &mut fixture.bytes[0];
+            let table = u64::from_le_bytes(bytes[32..40].try_into().unwrap()) as usize;
+            let count = u16::from_le_bytes(bytes[56..58].try_into().unwrap()) as usize;
+            let mut relro = None;
+            let mut file_size = None;
+            for i in 0..count {
+                let at = table + i * 56;
+                let kind = u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap());
+                if kind == 0x6474e552 {
+                    relro = Some(at);
+                }
+                if kind == 1 && u64::from_le_bytes(bytes[at + 16..at + 24].try_into().unwrap()) == 0
+                {
+                    file_size = Some(u64::from_le_bytes(
+                        bytes[at + 32..at + 40].try_into().unwrap(),
+                    ));
+                    bytes[at + 4..at + 8].copy_from_slice(&5u32.to_le_bytes());
+                    bytes[at + 40..at + 48].copy_from_slice(&4096u64.to_le_bytes());
+                }
+            }
+            let at = relro.unwrap();
+            bytes[at + 8..at + 32].fill(0);
+            bytes[at + 32..at + 40].copy_from_slice(&file_size.unwrap().to_le_bytes());
+            bytes[at + 40..at + 48].copy_from_slice(&4096u64.to_le_bytes());
+        },
+        |scope, fixture| {
+            let host = Host::default();
+            let mut slots = [const { None }; 2];
+            let mut loader = Resident::new(scope, &mut slots).unwrap();
+            loader
+                .install(&mut vec![0; 128 * 1024], || host.clone())
+                .unwrap();
+            assert_eq!(access_at(fixture.bases[0]).as_deref(), Some("r-xp"));
+            loader.initialize(&mut [0; 8], invoke).unwrap();
+            let export = loader
+                .symbol(b"evaluate", Version::Default)
+                .unwrap()
+                .unwrap();
+            let function = unsafe {
+                std::mem::transmute::<u64, unsafe extern "C" fn(i32) -> i32>(export.address())
+            };
+            assert_eq!(unsafe { function(7) }, 82);
+            loader.close(&mut [0; 8], invoke).unwrap();
+        },
+    );
+}
+
+#[test]
 fn constructors_cannot_replace_the_captured_finalizers_through_writable_arrays() {
     exercise_with(
         |fixture| {
