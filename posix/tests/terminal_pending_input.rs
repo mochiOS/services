@@ -23,6 +23,24 @@ impl Write for Writer {
     }
 }
 #[test]
+fn input_and_terminal_query_replies_flush_without_a_paint_or_timer_tick() {
+    let mut queue = production::PendingInput::default();
+    let mut writer = Writer {
+        bytes: Vec::new(),
+        block: false,
+        zero: false,
+    };
+    queue.send(b"\x1b[1;1R", &mut writer).unwrap();
+    assert_eq!(writer.bytes, b"\x1b[1;1R");
+    writer.block = true;
+    queue.send("日本語".as_bytes(), &mut writer).unwrap();
+    queue.send(b"suffix", &mut writer).unwrap();
+    assert_eq!(writer.bytes, b"\x1b[1;1R");
+    writer.block = false;
+    queue.send(b"!", &mut writer).unwrap();
+    assert_eq!(writer.bytes, "\x1b[1;1R日本語suffix!".as_bytes());
+}
+#[test]
 fn partial_writes_and_backpressure_preserve_utf8_and_order_without_spinning() {
     let mut queue = production::PendingInput::default();
     let text = "日本語0123456789".repeat(20);
