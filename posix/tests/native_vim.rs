@@ -55,7 +55,8 @@ fn main() {
     fs::write(
         &script,
         r#"
-set nocompatible encoding=utf-8 noswapfile nomore
+set nocompatible noswapfile nomore
+call assert_equal('utf-8', &encoding)
 scriptencoding utf-8
 call assert_true(localtime() > 0)
 let started = reltime()
