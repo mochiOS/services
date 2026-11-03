@@ -1,4 +1,26 @@
 //! Real account/group C APIs and a real target Vim, through ordinary exec.
+#[cfg(target_os = "mochios")]
+#[path = "../../../applications/terminal/src/model.rs"]
+mod model;
+#[cfg(target_os = "mochios")]
+#[path = "../../../applications/terminal/src/native_launch.rs"]
+mod native_launch;
+#[cfg(target_os = "mochios")]
+#[path = "../../../applications/terminal/src/pending_input.rs"]
+mod pending_input;
+#[cfg(target_os = "mochios")]
+#[path = "../../../applications/terminal/src/settings.rs"]
+mod settings;
+#[cfg(target_os = "mochios")]
+#[path = "../../../applications/terminal/src/stdio_access.rs"]
+mod stdio_access;
+#[cfg(target_os = "mochios")]
+#[path = "../../../applications/terminal/src/transport.rs"]
+mod transport;
+#[cfg(target_os = "mochios")]
+#[path = "vim/pty.rs"]
+mod pty;
+
 #[cfg(not(target_os = "mochios"))]
 fn main() {
     eprintln!("native-vim: requires mochiOS");
@@ -91,6 +113,7 @@ quit!
     println!(
         "native-vim: PASS edit undo redo search UTF-8 save reopen and installed syntax runtime"
     );
+    pty::run(directory.path());
     fs::remove_dir_all(directory.path()).unwrap();
     drop(directory);
     unsafe {

@@ -2630,8 +2630,11 @@ dependencies = [
  "mochios-user-protocol",
  "mochios-viewkit-gpu-protocol",
  "mochios-workspace-protocol",
+ "serde",
  "sha2",
  "tiny-skia",
+ "toml 1.1.6+spec-1.1.0",
+ "vt100",
 ]
 
 [[package]]
@@ -3868,6 +3871,27 @@ dependencies = [
  "wgpu",
  "winit",
  "zeroize",
+]
+
+[[package]]
+name = "vt100"
+version = "0.18.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "eb05cdd19ae8707bf6a0a269972c07e6358103a7079faec749dec318a5b3dc23"
+dependencies = [
+ "itoa",
+ "unicode-width",
+ "vte",
+]
+
+[[package]]
+name = "vte"
+version = "0.15.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a5924018406ce0063cd67f8e008104968b74b563ee1b85dde3ed1f7cb87d3dbd"
+dependencies = [
+ "arrayvec",
+ "memchr",
 ]
 
 [[package]]

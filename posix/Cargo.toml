@@ -20,6 +20,9 @@ mochios-user-protocol = { path = "../../user/crates/user-protocol" }
 mochios-posix-client = { git = "https://github.com/mochiOS/syscalls", package = "mochios-posix-client", default-features = false, features = ["syscall-endpoint"] }
 
 [dev-dependencies]
+vt100 = "=0.18.1"
+serde = { version = "1", features = ["derive"] }
+toml = "1"
 mochios-package-manifest = { path = "../../user/crates/package-manifest" }
 mochios-elf-signature = { path = "../../user/crates/elf-signature" }
 anyhow = { version = "1", default-features = false }
