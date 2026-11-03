@@ -57,6 +57,10 @@ fn main() {
         r#"
 set nocompatible encoding=utf-8 noswapfile nomore
 scriptencoding utf-8
+call assert_true(localtime() > 0)
+let started = reltime()
+sleep 20m
+call assert_true(reltimefloat(reltime(started)) >= 0.01)
 let target = $MOCHIOS_VIM_TEST_DIR . '/document.txt'
 execute 'edit ' . fnameescape(target)
 set fileencoding=utf-8

@@ -18,12 +18,12 @@ fn report(message: &str) {
     .unwrap();
 }
 
-fn until(
+fn wait_for(
     terminal: &mut Transport,
     buffer: &mut TerminalBuffer,
     stage: &str,
     ready: impl Fn(&vt100::Screen) -> bool,
-) {
+) -> bool {
     let start = Instant::now();
     let deadline = start + Duration::from_secs(30);
     loop {
@@ -37,7 +37,7 @@ fn until(
                 "PTY {stage} after {}ms",
                 start.elapsed().as_millis()
             ));
-            return;
+            return true;
         }
         if terminal.exited || Instant::now() >= deadline {
             report(&format!(
@@ -46,10 +46,30 @@ fn until(
                 terminal.exit_status,
                 buffer.screen().contents()
             ));
-            panic!("PTY {stage} failed");
+            return false;
         }
         std::thread::sleep(Duration::from_millis(10));
     }
+}
+
+fn until(
+    terminal: &mut Transport,
+    buffer: &mut TerminalBuffer,
+    stage: &str,
+    ready: impl Fn(&vt100::Screen) -> bool,
+) {
+    assert!(
+        wait_for(terminal, buffer, stage, ready),
+        "PTY {stage} failed"
+    );
+}
+
+fn document_visible(screen: &vt100::Screen) -> bool {
+    let mut rows = screen.rows(0, 80);
+    rows.next().is_some_and(|s| s.trim_end() == "hello vim")
+        && rows
+            .next()
+            .is_some_and(|s| s.trim_end() == "日本語 second line")
 }
 
 pub(super) fn run(directory: &Path) {
@@ -72,10 +92,7 @@ pub(super) fn run(directory: &Path) {
     terminal
         .send("hello vim\r日本語 second line".as_bytes())
         .unwrap();
-    until(&mut terminal, &mut buffer, "typed text", |s| {
-        let text = s.contents();
-        text.starts_with("hello vim\n日本語 second line")
-    });
+    let typed_visible = wait_for(&mut terminal, &mut buffer, "typed text", document_visible);
     // Use the same immediate VT replies and bounded writes as the real app.
     terminal.send(b"\x1b:wq\r").unwrap();
     until(&mut terminal, &mut buffer, "saved and restored msh", |s| {
@@ -85,11 +102,12 @@ pub(super) fn run(directory: &Path) {
         fs::read(&path).unwrap(),
         "hello vim\n日本語 second line\n".as_bytes()
     );
+    report("PASS exact bytes saved by the interactive Vim");
     terminal
         .send(format!("/system/bin/vim -Nu NONE -n -i NONE {}\r", path.display()).as_bytes())
         .unwrap();
     until(&mut terminal, &mut buffer, "reopened saved text", |s| {
-        s.alternate_screen() && s.contents().starts_with("hello vim\n日本語 second line")
+        s.alternate_screen() && document_visible(s)
     });
     terminal.send(b":q\r").unwrap();
     until(&mut terminal, &mut buffer, "reopened Vim exited", |s| {
@@ -103,5 +121,11 @@ pub(super) fn run(directory: &Path) {
     }
     assert!(terminal.exited, "login shell did not exit");
     assert_eq!(terminal.exit_status, Some(0));
+    // Even on a display failure, save/read-back and clean child exit above
+    // retain evidence instead of interrupting Vim inside its error handler.
+    assert!(
+        typed_visible,
+        "Vim did not display typed text before further input"
+    );
     report("PASS actual PTY msh/Vim UTF-8 input, save, reopen and shell exit");
 }

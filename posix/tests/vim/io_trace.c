@@ -9,6 +9,8 @@
 #endif
 
 static unsigned calls;
+static unsigned times;
+static unsigned writes;
 static void trace(const char *name, long first, long second, long third) {
   char line[128];
   unsigned used = 0;
@@ -71,6 +73,34 @@ int __wrap_select(int count, fd_set *readable, fd_set *writable,
   const int error = errno;
   if (enabled)
     trace("select end", result, error, readable && FD_ISSET(0, readable));
+  errno = error;
+  return result;
+}
+
+extern int __real_gettimeofday(struct timeval *, void *);
+int __wrap_gettimeofday(struct timeval *output, void *timezone) {
+  const int result = __real_gettimeofday(output, timezone);
+  const int error = errno;
+  if (times++ < 24) {
+    trace("time status", result, error, result == 0 ? output->tv_sec : -1);
+    if (result == 0)
+      trace("time fraction", output->tv_usec, 0, 0);
+  }
+  errno = error;
+  return result;
+}
+
+extern ssize_t __real_write(int, const void *, size_t);
+ssize_t __wrap_write(int fd, const void *bytes, size_t length) {
+  const int enabled = fd == 1 && writes++ < 128;
+  const int saved = errno;
+  if (enabled)
+    trace("write begin", fd, length, 0);
+  errno = saved;
+  const ssize_t result = __real_write(fd, bytes, length);
+  const int error = errno;
+  if (enabled)
+    trace("write end", result, error, 0);
   errno = error;
   return result;
 }
