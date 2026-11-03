@@ -399,11 +399,13 @@ fn real_lld_libraries_initialize_resolve_execute_finalize_and_unmap() {
             .symbol(b"library_value", Version::Default)
             .unwrap()
             .unwrap();
+        assert_eq!(access_at(dependency.address()).as_deref(), Some("rw-p"));
         assert_eq!(unsafe { *(dependency.address() as *const i32) }, 32);
         let export = loader
             .symbol(b"evaluate", Version::Default)
             .unwrap()
             .unwrap();
+        assert_eq!(access_at(export.address()).as_deref(), Some("r-xp"));
         let function = unsafe {
             std::mem::transmute::<u64, unsafe extern "C" fn(i32) -> i32>(export.address())
         };
