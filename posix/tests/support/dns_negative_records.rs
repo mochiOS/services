@@ -34,6 +34,7 @@ fn positive(name: &str, kind: DnsRecordType) -> DnsRecordSet {
             DnsRecordType::A => vec![1; 4],
             DnsRecordType::Aaaa => vec![1; 16],
             DnsRecordType::Ptr => wire("target.example"),
+            _ => panic!("address fixture only"),
         },
     );
     m.decode(name, kind).unwrap()

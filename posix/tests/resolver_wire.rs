@@ -61,7 +61,10 @@ fn scoped_requests_require_known_nonzero_rights_and_deadline_attenuation() {
     }
     for limits in [
         w::Limits { scopes: 0, ..all },
-        w::Limits { scopes: 8, ..all },
+        w::Limits {
+            scopes: 1 << 31,
+            ..all
+        },
         w::Limits {
             maximum_timeout: 0,
             ..all
@@ -322,4 +325,78 @@ fn large_results_preserve_the_complete_set_and_respect_the_advertised_bound() {
         .is_err()
     );
     assert!(w::decode_result(&vec![0; w::MAX_RESULT_LEN + 1]).is_err());
+}
+
+#[test]
+fn new_record_authorities_are_explicit_and_never_inherited_from_legacy_all() {
+    assert_eq!(w::ALL_SCOPES, 7);
+    for kind in [
+        w::Kind::Ns,
+        w::Kind::Soa,
+        w::Kind::Mx,
+        w::Kind::Txt,
+        w::Kind::Srv,
+    ] {
+        let grant = w::Limits {
+            scopes: kind.scope(),
+            maximum_timeout: 100,
+        };
+        assert!(
+            !w::Limits {
+                scopes: w::ALL_SCOPES,
+                maximum_timeout: 100
+            }
+            .contains(grant)
+        );
+        assert!(
+            w::Limits {
+                scopes: w::SUPPORTED_SCOPES,
+                maximum_timeout: 100
+            }
+            .contains(grant)
+        );
+        assert_eq!(w::Kind::decode(kind as u16), Ok(kind));
+        assert_eq!(
+            w::decode_scoped(&w::scoped(w::ACQUIRE, grant).unwrap()),
+            Ok(grant)
+        );
+    }
+}
+
+#[test]
+fn extended_snapshot_data_is_validated_before_publication_and_reading() {
+    for (kind, value) in [
+        (w::Kind::Ns, NAME.to_vec()),
+        (w::Kind::Mx, [b"\0\x0a".as_slice(), NAME].concat()),
+        (
+            w::Kind::Srv,
+            [b"\0\x01\0\x02\x01\xbb".as_slice(), NAME].concat(),
+        ),
+        (w::Kind::Soa, [NAME, NAME, &[0; 20]].concat()),
+        (w::Kind::Txt, b"\x03a\0b\0".to_vec()),
+    ] {
+        let encoded = success(kind, &[&value]);
+        assert_eq!(
+            w::decode_result(&encoded).unwrap().values().next(),
+            Some(value.as_slice())
+        );
+        let bad = if kind == w::Kind::Txt {
+            vec![255]
+        } else {
+            vec![0xc0, 12]
+        };
+        assert!(
+            w::encode_result(
+                kind,
+                0,
+                name(NAME),
+                Some(name(NAME)),
+                false,
+                core::iter::empty(),
+                [&bad[..]].into_iter(),
+                &mut [0; 4096]
+            )
+            .is_err()
+        );
+    }
 }

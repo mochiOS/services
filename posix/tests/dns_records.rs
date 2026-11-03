@@ -693,3 +693,90 @@ fn deterministic_mutations_never_escape_name_type_or_message_bounds() {
         }
     }
 }
+
+#[test]
+fn extended_records_decompress_names_and_preserve_network_order_data() {
+    for (kind, prefix) in [
+        (DnsRecordType::Ns, vec![]),
+        (DnsRecordType::Mx, vec![0, 10]),
+        (DnsRecordType::Srv, vec![0, 1, 0, 2, 1, 187]),
+    ] {
+        let mut packet = Message::new("example.com", kind as u16);
+        let mut compressed = prefix.clone();
+        compressed.extend([0xc0, 12]);
+        packet.record(0, &[0xc0, 12], kind as u16, 1, 60, &compressed);
+        let answer = packet.decode("example.com", kind).unwrap();
+        assert_eq!(answer.ttl_seconds(), 60);
+        if kind == DnsRecordType::Ns {
+            assert_eq!(
+                answer.values(),
+                &[DnsRecordValue::Name(domain("example.com"))]
+            );
+        } else {
+            let mut expected = prefix;
+            expected.extend(wire("example.com"));
+            assert_eq!(answer.values(), &[DnsRecordValue::Rdata(expected)]);
+        }
+        let mut cache = DnsCache::new(2);
+        cache.insert_records(&answer, 0).unwrap();
+        assert_eq!(
+            cache
+                .lookup_records(&domain("example.com"), kind, 1000)
+                .unwrap()
+                .ttl_seconds(),
+            59
+        );
+        assert!(
+            cache
+                .lookup_records(&domain("example.com"), DnsRecordType::A, 1000)
+                .is_none()
+        );
+    }
+    let mut packet = Message::new("example.com", 6);
+    let mut soa = vec![0xc0, 12, 0xc0, 12];
+    for n in [1u32, 2, 3, 4, 5] {
+        soa.extend(n.to_be_bytes());
+    }
+    packet.record(0, &[0xc0, 12], 6, 1, 60, &soa);
+    let answer = packet.decode("example.com", DnsRecordType::Soa).unwrap();
+    assert_eq!(
+        answer.ttl_seconds(),
+        60,
+        "positive SOA TTL is not its negative-cache minimum"
+    );
+    let mut expected = wire("example.com");
+    expected.extend(wire("example.com"));
+    expected.extend(&soa[4..]);
+    assert_eq!(answer.values(), &[DnsRecordValue::Rdata(expected)]);
+    assert!(answer.negative().is_none());
+    let mut packet = Message::new("example.com", 16);
+    packet.record(0, &[0xc0, 12], 16, 1, 60, b"\x03a\0b\0\x02hi");
+    assert_eq!(
+        packet
+            .decode("example.com", DnsRecordType::Txt)
+            .unwrap()
+            .values(),
+        &[DnsRecordValue::Rdata(b"\x03a\0b\0\x02hi".to_vec())]
+    );
+}
+
+#[test]
+fn extended_records_reject_invalid_lengths_and_compressed_name_cycles() {
+    for (kind, data) in [
+        (DnsRecordType::Ns, vec![0xc0]),
+        (DnsRecordType::Mx, vec![0]),
+        (DnsRecordType::Mx, vec![0, 1, 0, 0]),
+        (DnsRecordType::Srv, vec![0; 6]),
+        (DnsRecordType::Soa, vec![0; 21]),
+        (DnsRecordType::Txt, vec![]),
+        (DnsRecordType::Txt, vec![2, b'a']),
+    ] {
+        let mut packet = Message::new("example.com", kind as u16);
+        packet.record(0, &[0xc0, 12], kind as u16, 1, 60, &data);
+        assert!(packet.decode("example.com", kind).is_err(), "{kind:?}");
+    }
+    let mut packet = Message::new("example.com", 15);
+    let start = packet.record(0, &[0xc0, 12], 15, 1, 60, &[0, 10, 0xc0, 0]);
+    packet.bytes[start + 3] = (start + 2) as u8;
+    assert!(packet.decode("example.com", DnsRecordType::Mx).is_err());
+}

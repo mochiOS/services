@@ -54,6 +54,11 @@ impl<Q: Copy> Job<Q> {
         let kind = match answer.records.record_type() {
             DnsRecordType::A => wire::Kind::A,
             DnsRecordType::Aaaa => wire::Kind::Aaaa,
+            DnsRecordType::Ns => wire::Kind::Ns,
+            DnsRecordType::Soa => wire::Kind::Soa,
+            DnsRecordType::Mx => wire::Kind::Mx,
+            DnsRecordType::Txt => wire::Kind::Txt,
+            DnsRecordType::Srv => wire::Kind::Srv,
             DnsRecordType::Ptr => wire::Kind::Ptr,
         };
         let question = wire::Name::decode(&self.question).map_err(|_| -5)?;
@@ -75,6 +80,7 @@ impl<Q: Copy> Job<Q> {
                 DnsRecordValue::Ipv4(v) => v,
                 DnsRecordValue::Ipv6(v) => v,
                 DnsRecordValue::Name(v) => v.wire(),
+                DnsRecordValue::Rdata(v) => v,
             }
         }
         let mut size = wire::RESULT_HEADER_LEN + self.question.len() + canonical.bytes().len();
@@ -197,6 +203,11 @@ impl<Q: Copy> Server<Q> {
         let kind = match request.kind {
             wire::Kind::A => DnsRecordType::A,
             wire::Kind::Aaaa => DnsRecordType::Aaaa,
+            wire::Kind::Ns => DnsRecordType::Ns,
+            wire::Kind::Soa => DnsRecordType::Soa,
+            wire::Kind::Mx => DnsRecordType::Mx,
+            wire::Kind::Txt => DnsRecordType::Txt,
+            wire::Kind::Srv => DnsRecordType::Srv,
             wire::Kind::Ptr => DnsRecordType::Ptr,
         };
         let mut job = Job {

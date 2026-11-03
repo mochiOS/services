@@ -290,6 +290,7 @@ fn answer(kind: DnsRecordType, count: usize) -> resolver::Answer {
                 DnsRecordType::A => 4,
                 DnsRecordType::Aaaa => 16,
                 DnsRecordType::Ptr => name.wire().len(),
+                _ => panic!("address fixture only"),
             }
         ];
         match kind {
@@ -298,6 +299,7 @@ fn answer(kind: DnsRecordType, count: usize) -> resolver::Answer {
                 data[len - 2..].copy_from_slice(&(i as u16).to_be_bytes());
             }
             DnsRecordType::Ptr => data.copy_from_slice(name.wire()),
+            _ => unreachable!(),
         }
         let record = &mut packet[n..n + 12 + data.len()];
         record[..2].copy_from_slice(&[0xc0, 12]);
@@ -785,4 +787,46 @@ fn malformed_operations_never_consume_factory_or_pending_backend_resources() {
     }
     assert!(b.cancelled.is_empty());
     release(&mut s, &mut b, job);
+}
+
+#[test]
+fn legacy_factory_cannot_open_or_derive_new_dns_record_authority() {
+    let (mut s, mut b) = setup();
+    let factory = acquire(&mut s, &mut b, limits());
+    for kind in [
+        w::Kind::Ns,
+        w::Kind::Soa,
+        w::Kind::Mx,
+        w::Kind::Txt,
+        w::Kind::Srv,
+    ] {
+        assert_eq!(
+            rpc(
+                &mut s,
+                &mut b,
+                77,
+                w::OPEN,
+                &request(kind, 100),
+                &attachment(factory)
+            ),
+            (-13, None)
+        );
+        let grant = w::Limits {
+            scopes: kind.scope(),
+            maximum_timeout: 100,
+        };
+        assert_eq!(
+            rpc(
+                &mut s,
+                &mut b,
+                77,
+                w::DERIVE,
+                &w::scoped(w::DERIVE, grant).unwrap(),
+                &attachment(factory)
+            ),
+            (-13, None)
+        );
+        let explicit = acquire(&mut s, &mut b, grant);
+        open(&mut s, &mut b, explicit, kind);
+    }
 }
