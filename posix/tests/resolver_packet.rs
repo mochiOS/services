@@ -34,7 +34,7 @@ fn native_records_become_parseable_dns_replies_without_unearned_ttl_or_dnssec_cl
         let parsed = w::decode_result(&bytes).unwrap();
         let mut full = [0; 4096];
         let needed = p::reply(&parsed, &mut full).unwrap();
-        assert_eq!(&full[2..4], &[0x81, 0x80]);
+        assert_eq!(&full[2..4], &[0x81, 0x00]);
         assert_eq!(&full[6..8], &[0, 1]);
         let name = mochios_network_stack::DnsRecordName::from_wire(NAME).unwrap();
         let native_kind = match kind {
