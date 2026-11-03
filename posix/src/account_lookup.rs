@@ -3,6 +3,29 @@ use mochios_posix_client::Transport;
 use mochios_posix_protocol::{self as protocol, account as wire};
 use std::vec::Vec;
 
+pub fn lookup_group<T: Transport>(
+    transport: &T,
+    id: u64,
+    query: &[u8],
+    error: impl Fn(T::Error) -> i32,
+) -> Result<Vec<u8>, i32> {
+    use protocol::public_group as wire;
+    let query = wire::decode_query(query).map_err(|_| -22)?;
+    let mut request = [0; wire::MAX_QUERY + mochios_user_protocol::HEADER_LEN];
+    let n = wire::encode_request(id, query, &mut request).map_err(|_| -22)?;
+    let mut response = [0; wire::MAX_RECORD + mochios_user_protocol::HEADER_LEN];
+    let n = transport
+        .call(&request[..n], &mut response)
+        .map_err(error)?;
+    let record = wire::decode_response(id, response.get(..n).ok_or(-5)?).map_err(|_| -5)??;
+    let mut output = Vec::new();
+    output.try_reserve(wire::MAX_RECORD).map_err(|_| -12)?;
+    output.resize(wire::MAX_RECORD, 0);
+    let n = wire::encode_record(record, &mut output).map_err(|_| -5)?;
+    output.truncate(n);
+    Ok(output)
+}
+
 pub fn lookup<T: Transport>(
     transport: &T,
     id: u64,

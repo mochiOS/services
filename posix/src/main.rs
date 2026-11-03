@@ -1454,7 +1454,7 @@ fn main() {
                 })
             }
             (Some(_peer), Some((header, payload)), true)
-                if header.opcode == protocol::OP_ACCOUNT_LOOKUP =>
+                if matches!(header.opcode, protocol::OP_ACCOUNT_LOOKUP | protocol::OP_GROUP_LOOKUP) =>
             {
                 let result = (|| {
                     if header.flags != 0 || header.status != 0 || !attachments.is_empty() {
@@ -1463,12 +1463,18 @@ fn main() {
                     let transport = mochios_posix_client::SyscallEndpointTransport::new(
                         service.account_endpoint().ok_or(-6)?,
                     );
-                    posix_service::account_lookup::lookup(
-                        &transport,
-                        header.request_id,
-                        payload,
-                        |error| protocol::status::normalize_failure(error.raw()),
-                    )
+                    let map_error = |error: platform::syscall::SysError| {
+                        protocol::status::normalize_failure(error.raw())
+                    };
+                    if header.opcode == protocol::OP_GROUP_LOOKUP {
+                        posix_service::account_lookup::lookup_group(
+                            &transport, header.request_id, payload, map_error,
+                        )
+                    } else {
+                        posix_service::account_lookup::lookup(
+                            &transport, header.request_id, payload, map_error,
+                        )
+                    }
                 })();
                 Some(posix_service::ObjectResponse {
                     response: match result {

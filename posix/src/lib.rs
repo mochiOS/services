@@ -4020,6 +4020,7 @@ impl<H: Copy> PosixService<H> {
             | protocol::OP_NETWORK_ENDPOINT_GET
             | protocol::OP_ACCOUNT_ENDPOINT_INSTALL
             | protocol::OP_ACCOUNT_LOOKUP
+            | protocol::OP_GROUP_LOOKUP
             | protocol::OP_NETWORK_ENDPOINT_INSTALL
             | protocol::OP_PROCESS_INITIALIZE
             | protocol::OP_WAIT_CHILD

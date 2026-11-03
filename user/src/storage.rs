@@ -13,7 +13,7 @@ pub struct SaveError {
 }
 
 impl SaveError {
-    fn new(operation: &'static str, source: io::Error) -> Self {
+    pub(crate) fn new(operation: &'static str, source: io::Error) -> Self {
         Self { operation, source }
     }
 
@@ -39,17 +39,24 @@ impl std::error::Error for SaveError {
 }
 
 pub fn load(path: &Path) -> io::Result<UserDatabase> {
+    load_bytes(path)?
+        .map(|bytes| parse(&bytes))
+        .transpose()
+        .map(|database| database.unwrap_or_else(UserDatabase::with_root))
+}
+
+pub fn load_bytes(path: &Path) -> io::Result<Option<Vec<u8>>> {
     match fs::read(path) {
-        Ok(bytes) => parse(&bytes),
+        Ok(bytes) => Ok(Some(bytes)),
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
             for recovery in [temporary_path(path), backup_path(path)] {
                 match fs::read(&recovery) {
-                    Ok(bytes) => return parse(&bytes),
+                    Ok(bytes) => return Ok(Some(bytes)),
                     Err(candidate) if candidate.kind() == io::ErrorKind::NotFound => {}
                     Err(candidate) => return Err(candidate),
                 }
             }
-            Ok(UserDatabase::with_root())
+            Ok(None)
         }
         Err(error) => Err(error),
     }
@@ -59,6 +66,10 @@ pub fn save(path: &Path, database: &UserDatabase) -> Result<(), SaveError> {
     let bytes = database.encode().map_err(|error| {
         SaveError::new("encode", io::Error::new(io::ErrorKind::InvalidData, error))
     })?;
+    save_bytes(path, &bytes)
+}
+
+pub fn save_bytes(path: &Path, bytes: &[u8]) -> Result<(), SaveError> {
     let parent = path.parent().ok_or_else(|| {
         SaveError::new(
             "validate-path",
@@ -70,7 +81,7 @@ pub fn save(path: &Path, database: &UserDatabase) -> Result<(), SaveError> {
     let temporary = temporary_path(path);
     let backup = backup_path(path);
     remove_if_present(&temporary).map_err(|error| SaveError::new("remove-temporary", error))?;
-    write_synced(&temporary, &bytes)?;
+    write_synced(&temporary, bytes)?;
     remove_if_present(&backup).map_err(|error| SaveError::new("remove-backup", error))?;
     let had_database = match fs::rename(path, &backup) {
         Ok(()) => true,

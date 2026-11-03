@@ -24,12 +24,21 @@ struct UserService {
     database: UserDatabase,
     generation: u64,
     healthy: bool,
+    groups: mochios_user_database::groups::GroupDatabase,
+    groups_healthy: bool,
 }
 
 impl UserService {
     fn load() -> std::io::Result<Self> {
+        let database = storage::load(Path::new(DATABASE_PATH))?;
+        let groups = user_service::public_groups::load(
+            Path::new(mochios_user_database::groups::DATABASE_PATH),
+            &database,
+        )?;
         Ok(Self {
-            database: storage::load(Path::new(DATABASE_PATH))?,
+            database,
+            groups,
+            groups_healthy: true,
             generation: 1,
             healthy: true,
         })
@@ -135,10 +144,35 @@ impl UserService {
                 return;
             }
         };
+        if !self.groups_healthy {
+            self.reply_status(sender, request.request_id, mochi_user_syscall::EIO);
+            return;
+        }
+        let mut groups = self.groups.clone();
+        let group_changed = match groups.ensure_private(&user) {
+            Ok(changed) => changed,
+            Err(_) => {
+                self.reply_status(sender, request.request_id, mochi_user_syscall::EINVAL);
+                return;
+            }
+        };
         let mut candidate = self.database.clone();
         if candidate.add(user).is_err() {
             self.reply_status(sender, request.request_id, mochi_user_syscall::EINVAL);
             return;
+        }
+        // A group may exist without an account. Publish a new private group
+        // first; a failed account save leaves valid, unassigned metadata.
+        if group_changed {
+            if let Err(error) = user_service::public_groups::save(
+                Path::new(mochios_user_database::groups::DATABASE_PATH),
+                &groups,
+            ) {
+                self.groups_healthy = false;
+                self.reply_status(sender, request.request_id, i64::from(error.status()) as u64);
+                return;
+            }
+            self.groups = groups;
         }
         let status = self
             .save_candidate("add-user", candidate)
@@ -350,6 +384,27 @@ fn main() {
         let length = (message & 0xffff_ffff) as usize;
         let request = &buffer[..length.min(buffer.len())];
         let opcode = decode_opcode(request);
+        if opcode == Ok(Opcode::PublicGroupLookup) {
+            let mut response = [0; MAX_MESSAGE_LEN];
+            match user_service::public_groups::reply(
+                &service.groups,
+                service.groups_healthy,
+                request,
+                &mut response,
+            ) {
+                Ok(length) => {
+                    let _ = platform::ipc::reply(sender, &response[..length]);
+                }
+                Err(status) => {
+                    let id = mochios_user_protocol::public_group::decode_request(request)
+                        .map(|(id, _)| id)
+                        .unwrap_or(0);
+                    service.reply_status(sender, id, i64::from(status) as u64);
+                }
+            }
+            buffer.zeroize();
+            continue;
+        }
         if opcode == Ok(Opcode::PublicLookup) {
             let mut response = [0; MAX_MESSAGE_LEN];
             match user_service::public_accounts::reply(

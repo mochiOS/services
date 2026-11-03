@@ -4,3 +4,4 @@ pub mod status;
 pub mod storage;
 
 pub mod public_accounts;
+pub mod public_groups;
