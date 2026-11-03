@@ -631,3 +631,152 @@ fn reverse_hosts_dns_ptr_service_names_and_remote_fqdn_are_preserved() {
     );
     assert_eq!(s.borrow().starts[0].0, rw::Kind::Ptr);
 }
+
+#[test]
+fn record_query_uses_real_backend_retires_all_resources_and_handles_short_buffers() {
+    let _test = setup();
+    for capacity in [0, 4, 512] {
+        let s = state();
+        answer(&s, &[b"\x03abc"]);
+        let mut output = vec![0; capacity];
+        let result = resolver_transaction::query(
+            netdb_backend::Backend::new(Native(s.clone())),
+            c"example.com".as_ptr(),
+            1,
+            16,
+            output.as_mut_ptr(),
+            capacity as i32,
+            |_| panic!("unexpected DNS error"),
+        );
+        let length = result.unwrap() as usize;
+        assert!(length > 4);
+        if capacity >= 4 {
+            assert_eq!(output[2] & 2, if capacity < length { 2 } else { 0 });
+        }
+        if capacity >= length {
+            assert_eq!(&output[length - 4..length], b"\x03abc");
+        }
+        assert_eq!(s.borrow().starts[0].0, rw::Kind::Txt);
+        assert!(s.borrow().live.is_empty());
+        assert!(ALLOCATIONS.with_borrow(|a| a.is_empty()));
+        assert!(CONTROL.callback_resources.is_empty());
+    }
+}
+
+#[test]
+fn record_query_rejects_unsupported_and_faulting_input_before_network_and_retires_failures() {
+    let _test = setup();
+    for (class, kind, name) in [
+        (0, 16, c"example.com".as_ptr()),
+        (1, 255, c"example.com".as_ptr()),
+        (1, 16, 1usize as *const c_char),
+    ] {
+        let s = state();
+        let mut out = [0; 512];
+        assert!(
+            resolver_transaction::query(
+                netdb_backend::Backend::new(Native(s.clone())),
+                name,
+                class,
+                kind,
+                out.as_mut_ptr(),
+                512,
+                |_| EIO
+            )
+            .is_err()
+        );
+        assert!(s.borrow().starts.is_empty());
+        assert!(s.borrow().live.is_empty());
+        assert!(ALLOCATIONS.with_borrow(|a| a.is_empty()));
+    }
+    for error in [Error::System(-13), Error::Again, Error::NoName] {
+        let s = state();
+        s.borrow_mut().factory_error = Some(error);
+        let mut out = [0; 512];
+        let observed = Cell::new(None);
+        assert!(
+            resolver_transaction::query(
+                netdb_backend::Backend::new(Native(s.clone())),
+                c"example.com".as_ptr(),
+                1,
+                16,
+                out.as_mut_ptr(),
+                512,
+                |e| {
+                    observed.set(Some(e));
+                    EIO
+                }
+            )
+            .is_err()
+        );
+        assert_eq!(observed.get(), Some(error));
+        assert!(s.borrow().live.is_empty());
+        assert!(ALLOCATIONS.with_borrow(|a| a.is_empty()));
+    }
+}
+
+#[test]
+fn name_expansion_checks_c_memory_and_destination_terminator_space() {
+    let _test = setup();
+    let mut packet = vec![0; 12];
+    packet.extend(b"\x03ABC\0\xc0\x0c");
+    let mut text = [0i8; 16];
+    let base = packet.as_ptr();
+    let end = base.wrapping_add(packet.len());
+    let compressed = base.wrapping_add(17);
+    assert_eq!(
+        resolver_transaction::expand(base, end, compressed, text.as_mut_ptr(), 16),
+        Ok(2)
+    );
+    assert_eq!(unsafe { CStr::from_ptr(text.as_ptr()) }, c"ABC");
+    assert_eq!(
+        resolver_transaction::expand(base, end, compressed, text.as_mut_ptr(), 3),
+        Err(ERANGE)
+    );
+    assert_eq!(
+        resolver_transaction::expand(base, end, compressed, 1usize as *mut c_char, 16),
+        Err(EFAULT)
+    );
+    assert_eq!(
+        resolver_transaction::expand(
+            1usize as *const u8,
+            20usize as *const u8,
+            12usize as *const u8,
+            text.as_mut_ptr(),
+            16
+        ),
+        Err(EFAULT)
+    );
+    assert!(ALLOCATIONS.with_borrow(|a| a.is_empty()));
+    assert!(CONTROL.callback_resources.is_empty());
+}
+
+#[test]
+fn record_query_output_faults_negative_answers_and_allocation_failures_release_every_owner() {
+    let _test = setup();
+    for fail in 0..8 {
+        ATTEMPTS.set(0);
+        FAIL_AT.set(Some(fail));
+        let s=state();
+        answer(&s,&[b"\x03abc"]);
+        let mut out=[0;512];
+        let _=resolver_transaction::query(netdb_backend::Backend::new(Native(s.clone())),
+            c"example.com".as_ptr(),1,16,out.as_mut_ptr(),512,|_|EIO);
+        FAIL_AT.set(None);
+        assert!(s.borrow().live.is_empty());
+        assert!(ALLOCATIONS.with_borrow(|a|a.is_empty()));
+        assert!(CONTROL.callback_resources.is_empty());
+    }
+    let s=state();answer(&s,&[b"\x03abc"]);
+    assert_eq!(resolver_transaction::query(netdb_backend::Backend::new(Native(s.clone())),
+        c"example.com".as_ptr(),1,16,1usize as *mut u8,512,|_|EIO),Err(EFAULT));
+    assert!(s.borrow().live.is_empty());
+    for status in [-2,rw::NO_DATA_STATUS,-11] {
+        let s=state();s.borrow_mut().answers.push_back(Plan{status,..Default::default()});
+        let observed=Cell::new(None);let mut out=[0;512];
+        assert!(resolver_transaction::query(netdb_backend::Backend::new(Native(s.clone())),
+            c"example.com".as_ptr(),1,16,out.as_mut_ptr(),512,|e|{observed.set(Some(e));EIO}).is_err());
+        assert_eq!(observed.get(),Some(if status == rw::NO_DATA_STATUS {Error::System(status)} else if status == -2 {Error::NoName} else {Error::Again}));
+        assert!(s.borrow().live.is_empty());
+    }
+}

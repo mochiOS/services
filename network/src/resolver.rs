@@ -53,7 +53,8 @@ impl Failure {
     pub(crate) fn status(&self) -> i32 {
         match self {
             Self::Transport(error) => *error,
-            Self::Wire(DnsError::Response(DnsResponseCode::NameError) | DnsError::NoData) => -2,
+            Self::Wire(DnsError::Response(DnsResponseCode::NameError)) => -2,
+            Self::Wire(DnsError::NoData) => mochios_net_device_protocol::resolver::NO_DATA_STATUS,
             Self::Wire(
                 DnsError::Timeout
                 | DnsError::RetryLimit

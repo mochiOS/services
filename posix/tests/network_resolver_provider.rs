@@ -284,23 +284,19 @@ fn answer(kind: DnsRecordType, count: usize) -> resolver::Answer {
     packet[2..4].copy_from_slice(&0x8180u16.to_be_bytes());
     packet[6..8].copy_from_slice(&(count as u16).to_be_bytes());
     for i in 0..count {
-        let mut data = vec![
-            0;
-            match kind {
-                DnsRecordType::A => 4,
-                DnsRecordType::Aaaa => 16,
-                DnsRecordType::Ptr => name.wire().len(),
-                _ => panic!("address fixture only"),
-            }
-        ];
-        match kind {
+        let data = match kind {
             DnsRecordType::A | DnsRecordType::Aaaa => {
+                let mut data = vec![0; if kind == DnsRecordType::A { 4 } else { 16 }];
                 let len = data.len();
                 data[len - 2..].copy_from_slice(&(i as u16).to_be_bytes());
+                data
             }
-            DnsRecordType::Ptr => data.copy_from_slice(name.wire()),
-            _ => unreachable!(),
-        }
+            DnsRecordType::Ptr | DnsRecordType::Ns => name.wire().to_vec(),
+            DnsRecordType::Mx => [b"\0\x0a".as_slice(), name.wire()].concat(),
+            DnsRecordType::Srv => [b"\0\x01\0\x02\x01\xbb".as_slice(), name.wire()].concat(),
+            DnsRecordType::Txt => b"\x03abc".to_vec(),
+            DnsRecordType::Soa => [name.wire(), name.wire(), &[0; 20]].concat(),
+        };
         let record = &mut packet[n..n + 12 + data.len()];
         record[..2].copy_from_slice(&[0xc0, 12]);
         record[2..4].copy_from_slice(&(kind as u16).to_be_bytes());
@@ -695,7 +691,7 @@ fn completed_error_handles_and_nodata_are_readable_without_fake_addresses() {
             Err(resolver::Failure::Wire(
                 mochios_network_stack::DnsError::NoData,
             )),
-            -2,
+            w::NO_DATA_STATUS,
         ),
         (
             Err(resolver::Failure::Wire(
@@ -705,7 +701,7 @@ fn completed_error_handles_and_nodata_are_readable_without_fake_addresses() {
             )),
             -2,
         ),
-        (Ok(answer(DnsRecordType::A, 0)), -2),
+        (Ok(answer(DnsRecordType::A, 0)), w::NO_DATA_STATUS),
     ] {
         let (mut s, mut b) = setup();
         let f = acquire(&mut s, &mut b, limits());
@@ -828,5 +824,36 @@ fn legacy_factory_cannot_open_or_derive_new_dns_record_authority() {
         );
         let explicit = acquire(&mut s, &mut b, grant);
         open(&mut s, &mut b, explicit, kind);
+    }
+}
+
+#[test]
+fn extended_native_jobs_publish_real_validated_backend_records() {
+    for (kind, stack_kind) in [
+        (w::Kind::Ns, DnsRecordType::Ns),
+        (w::Kind::Soa, DnsRecordType::Soa),
+        (w::Kind::Mx, DnsRecordType::Mx),
+        (w::Kind::Txt, DnsRecordType::Txt),
+        (w::Kind::Srv, DnsRecordType::Srv),
+    ] {
+        let (mut s, mut b) = setup();
+        let factory = acquire(
+            &mut s,
+            &mut b,
+            w::Limits {
+                scopes: kind.scope(),
+                maximum_timeout: 100,
+            },
+        );
+        let job = open(&mut s, &mut b, factory, kind);
+        b.live.insert(1, Some(Ok(answer(stack_kind, 1))));
+        s.pump(&mut b, 0);
+        let (_, bytes) = native(&mut s, &mut b, job, provider::OP_READ_AT, 0, 4096, true);
+        let result = w::decode_result(&bytes).unwrap();
+        assert_eq!(result.kind, kind);
+        assert_eq!(result.status, 0);
+        assert_eq!(result.values().len(), 1);
+        release(&mut s, &mut b, job);
+        assert!(b.live.is_empty());
     }
 }

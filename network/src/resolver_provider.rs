@@ -71,7 +71,7 @@ impl<Q: Copy> Job<Q> {
         // A terminal lookup with no records is absence, not a successful
         // empty answer, regardless of which backend supplied it.
         if answer.records.values().is_empty() {
-            return Err(-2);
+            return Err(wire::NO_DATA_STATUS);
         }
         let canonical =
             wire::Name::decode(answer.records.canonical_name().wire()).map_err(|_| -5)?;

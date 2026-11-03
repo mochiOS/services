@@ -36,6 +36,11 @@ mod netdb_backend;
 #[path = "../../../user/crates/newlib-runtime/src/vector_buffer.rs"]
 mod vector_buffer;
 use vector_buffer::VectorBuffer;
+#[path = "../../../user/crates/newlib-runtime/src/resolver_transaction.rs"]
+mod resolver_transaction;
+const ENOTSUP: c_int = 95;
+const EOVERFLOW: c_int = 75;
+const ERANGE: c_int = 34;
 const ENOMEM: c_int = 12;
 const PAGE_SIZE: usize = 4096;
 const EFAULT: c_int = 14;
