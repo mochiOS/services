@@ -161,3 +161,56 @@ fn family_lengths_binary_inputs_and_capacity_failures_are_explicit_and_bounded()
         Ok(expected.len())
     );
 }
+
+#[test]
+fn legacy_numeric_spellings_are_recognized_separately_from_strict_addresses() {
+    use mochios_posix_client::internet::legacy_ipv4;
+    for text in [
+        b"127.1".as_slice(),
+        b"0177.0.0.1",
+        b"0x7f000001",
+        b"2130706433",
+        b"127.0.1",
+        b"127.1 \t",
+    ] {
+        assert_eq!(legacy_ipv4(text), Some([127, 0, 0, 1]));
+    }
+    assert_eq!(legacy_ipv4(b"0xffffffff"), Some([255; 4]));
+    assert_eq!(legacy_ipv4(b"0"), Some([0; 4]));
+    for text in [
+        b"".as_slice(),
+        b"1..2",
+        b"1.2.3.4.5",
+        b"1.2.3.256",
+        b"4294967296",
+        b"0x",
+        b"08",
+        b"256.1",
+        b"127.1 trailing",
+        b"+1",
+        b"-1",
+        b" 127.1",
+    ] {
+        assert_eq!(legacy_ipv4(text), None, "{text:?}");
+    }
+}
+
+#[test]
+fn legacy_numeric_conversion_matches_independent_libc_for_supported_spellings() {
+    unsafe extern "C" {
+        #[link_name = "inet_aton"]
+        fn reference_aton(source: *const c_char, destination: *mut u8) -> c_int;
+    }
+    for value in [0u32, 1, 255, 256, 65535, 65536, 0x7f000001, u32::MAX] {
+        for text in [format!("{value}"),format!("0{value:o}"),format!("0x{value:x}"),
+            format!("{}.{}",value>>24,value&0x00ffffff),
+            format!("{}.{}.{}",value>>24,value>>16&255,value&65535),
+            format!("{}.{}.{}.{}",value>>24,value>>16&255,value>>8&255,value&255)] {
+            let c=CString::new(text.clone()).unwrap();let mut octets=[0;4];
+            assert_eq!(unsafe { reference_aton(c.as_ptr(),octets.as_mut_ptr()) },1);
+            assert_eq!(inet::legacy_ipv4(text.as_bytes()),Some(octets));
+            assert_eq!(octets,value.to_be_bytes());
+        }
+    }
+    assert_eq!(inet::Address::parse(inet::AF_INET,b"127.1"),Ok(None));
+}

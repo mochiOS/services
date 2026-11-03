@@ -943,3 +943,25 @@ fn native_wait_signals_include_terminal_completion_without_conflating_half_close
         0
     );
 }
+
+#[test]
+fn optional_ip_and_tcp_identifiers_never_imply_provider_support() {
+    use mochios_posix_client::socket::newlib_setsockopt;
+    for (level, option) in [
+        (0, 1),
+        (0, 2),
+        (0, 33),
+        (0, 34),
+        (0, 35),
+        (0, 36),
+        (6, 1),
+        (41, 16),
+        (41, 18),
+        (41, 19),
+        (41, 20),
+        (41, 21),
+        (41, 67),
+    ] {
+        assert_eq!(newlib_setsockopt(level, option, 1), Err(-92));
+    }
+}
