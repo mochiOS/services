@@ -66,6 +66,10 @@ pub(crate) fn select(image: &VerifiedImage<'_>) -> Result<Selection, SysError> {
 }
 
 impl Selection {
+    pub(crate) fn authority(&self) -> (&ApplicationIdentity, &[String], &[u8; 32]) {
+        (&self.identity, &self.requested, &self.digest)
+    }
+
     pub(crate) fn authorize(&self, sender: u64, key: &str) -> Result<(), SysError> {
         // Requested grants remain pending until the shared consent controller
         // owns this exact selection. A caller's existing grants are no consent.

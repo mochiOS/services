@@ -453,6 +453,50 @@ pub(crate) fn authorize_image_digest(
     digest: &[u8; 32],
     kind: &str,
 ) -> Result<(), mochi_user_syscall::SysError> {
+    authorize_image(
+        requester,
+        key,
+        identity,
+        capabilities,
+        execution_class,
+        digest,
+        kind,
+        None,
+    )
+}
+
+/// Install grants with the new image, never through a temporary parent grant.
+/// The caller owns the authenticated source and consumed consent decision.
+pub(crate) fn authorize_image_install(
+    requester: u64,
+    key: &str,
+    identity: &ApplicationIdentity,
+    capabilities: &[String],
+    digest: &[u8; 32],
+    image_revision: u64,
+) -> Result<(), mochi_user_syscall::SysError> {
+    authorize_image(
+        requester,
+        key,
+        identity,
+        capabilities,
+        platform::service::ExecutionClass::Unprivileged,
+        digest,
+        mnu_abi::exec::EXEC_AUTHORIZATION_KIND_IMAGE_INSTALL,
+        Some(image_revision),
+    )
+}
+
+fn authorize_image(
+    requester: u64,
+    key: &str,
+    identity: &ApplicationIdentity,
+    capabilities: &[String],
+    execution_class: platform::service::ExecutionClass,
+    digest: &[u8; 32],
+    kind: &str,
+    image_revision: Option<u64>,
+) -> Result<(), mochi_user_syscall::SysError> {
     use mnu_abi::exec::{
         EXEC_AUTHORIZATION_CLASS_PREFIX, EXEC_AUTHORIZATION_KIND_PREFIX, EXECUTABLE_DIGEST_PREFIX,
     };
@@ -465,9 +509,7 @@ pub(crate) fn authorize_image_digest(
     let mut authorization = Vec::new();
     encode_identity_args(identity, &mut authorization);
     authorization.push(alloc::format!("{EXECUTABLE_DIGEST_PREFIX}{digest_hex}"));
-    authorization.push(alloc::format!(
-        "{EXEC_AUTHORIZATION_KIND_PREFIX}{kind}"
-    ));
+    authorization.push(alloc::format!("{EXEC_AUTHORIZATION_KIND_PREFIX}{kind}"));
     authorization.push(alloc::format!(
         "{EXEC_AUTHORIZATION_CLASS_PREFIX}{}",
         match execution_class {
@@ -475,6 +517,12 @@ pub(crate) fn authorize_image_digest(
             platform::service::ExecutionClass::Unprivileged => "unprivileged",
         }
     ));
+    if let Some(revision) = image_revision {
+        authorization.push(alloc::format!(
+            "{}{revision}",
+            mnu_abi::exec::EXEC_AUTHORIZATION_IMAGE_REVISION_PREFIX
+        ));
+    }
     let identity_nul = encode_authorization_args(&authorization)?;
     platform::service::authorize_exec_for_requester(
         requester,

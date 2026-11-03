@@ -82,6 +82,20 @@ pub(crate) fn authorize_snapshot(
     public_key: Option<&[u8; 32]>,
     snapshot: &[u8],
 ) -> Result<(), SysError> {
+    select_snapshot(state, public_key, snapshot)?.authorize(
+        &state.app_prompt_policy,
+        sender,
+        identity,
+    )
+}
+
+/// Retain the authenticated selection for either immediate attenuation or a
+/// service-owned consent continuation. Both paths use the same source gate.
+pub(crate) fn select_snapshot(
+    state: &crate::state::CapabilityServiceState,
+    public_key: Option<&[u8; 32]>,
+    snapshot: &[u8],
+) -> Result<crate::execution_approval::Selection, SysError> {
     let key = public_key
         .map(SuppliedPublicKey::new)
         .transpose()
@@ -95,7 +109,7 @@ pub(crate) fn authorize_snapshot(
             snapshot.len() as u64,
             crate::persistent_grant::read_file,
         )? {
-            return selection.authorize(&state.app_prompt_policy, sender, identity);
+            return Ok(crate::execution_approval::Selection::Installed(selection));
         }
     }
     let evidence = verify_image(
@@ -115,5 +129,5 @@ pub(crate) fn authorize_snapshot(
     if key.is_some() && evidence.signature().kind != SignatureKind::Ed25519 {
         return Err(SysError::from_raw(EACCES as i64));
     }
-    crate::standalone_image::select(&evidence)?.authorize(sender, identity)
+    crate::standalone_image::select(&evidence).map(crate::execution_approval::Selection::Standalone)
 }

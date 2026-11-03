@@ -13,6 +13,7 @@ mod object_image;
 mod signed_image;
 mod installed_image;
 mod standalone_image;
+mod execution_approval;
 mod bootstrap_file;
 mod dynamic_grant;
 mod consent;

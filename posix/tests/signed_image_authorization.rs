@@ -26,6 +26,24 @@ mod image_catalog;
 mod installed_image;
 #[path = "../../capability/src/object_image.rs"]
 mod object_image;
+#[allow(dead_code)]
+#[path = "../../capability/src/execution_approval.rs"]
+mod execution_approval;
+#[allow(dead_code)]
+#[path = "../../capability/src/consent.rs"]
+mod consent;
+mod consent_peer {
+    pub struct ProcessReference(pub u32);
+    impl Drop for ProcessReference {
+        fn drop(&mut self) {
+            super::STATE.with_borrow_mut(|s| s.closed.push(self.0));
+        }
+    }
+    pub struct Peer {
+        pub instance: super::consent::Instance,
+        pub process: ProcessReference,
+    }
+}
 
 pub mod syscall {
     pub use mochi_user_syscall::*;
@@ -81,12 +99,17 @@ mod persistent_grant {
 
 #[derive(Default)]
 struct State {
+    same_object: bool,
+    same_error: Option<SysError>,
+    comparisons: usize,
+    closed: Vec<u32>,
     allowed: bool,
     bytes: Vec<u8>,
     extent: u64,
     length_error: Option<SysError>,
     read_error: Option<SysError>,
     issue_error: Option<SysError>,
+    issue_calls: usize,
     part_limit: usize,
     bad_count: bool,
     grow: bool,
@@ -100,6 +123,7 @@ struct State {
 thread_local! { static STATE: RefCell<State> = RefCell::new(State::default()); }
 
 pub mod capability {
+    pub use crate::platform_real::capability::{consent, input_authority};
     pub use mochios_capability_protocol::{
         decode_authorize_captured_image_request, decode_authorize_exec_object_request, signed_image,
     };
@@ -127,6 +151,16 @@ pub mod memory {
     }
 }
 pub mod handle {
+    pub fn same_object(first: u32, second: u32) -> Result<bool, crate::SysError> {
+        assert_eq!((first, second), (202, 101));
+        crate::STATE.with_borrow_mut(|s| {
+            s.comparisons += 1;
+            if let Some(error) = s.same_error {
+                return Err(error);
+            }
+            Ok(s.same_object)
+        })
+    }
     pub const HANDLE_RIGHT_READ: u64 = mnu_abi::HANDLE_RIGHT_READ;
     pub fn read_at(handle: u32, out: &mut [u8], offset: u64) -> Result<usize, crate::SysError> {
         assert_eq!(handle, 19);
@@ -159,6 +193,7 @@ pub mod service {
         caps: &[u8],
     ) -> Result<u64, crate::SysError> {
         crate::STATE.with_borrow_mut(|s| {
+            s.issue_calls += 1;
             if let Some(error) = s.issue_error {
                 return Err(error);
             }
@@ -173,6 +208,7 @@ fn setup(bytes: Vec<u8>) -> (Vec<u8>, ipc::IpcObjectHandles) {
     let length = bytes.len() as u64;
     STATE.with_borrow_mut(|s| {
         *s = State {
+            same_object: true,
             allowed: true,
             bytes,
             extent: length,
@@ -834,4 +870,462 @@ fn service_dispatch_releases_received_references_before_replying() {
         branch.find("close_received_handles(&attached)").unwrap()
             < branch.find("capability_reply").unwrap()
     );
+}
+
+mod approvals {
+    use super::*;
+    use consent::*;
+    use execution_approval::Pending;
+    use platform_real::capability::consent::{Choice, Choices, Feedback};
+
+    fn instance(id: u64) -> Instance {
+        Instance {
+            endpoint: id,
+            process: id + 100,
+            thread: id + 200,
+            revision: 5,
+            digest: [id as u8; 32],
+        }
+    }
+    fn peer(handle: u32) -> consent_peer::Peer {
+        consent_peer::Peer {
+            instance: instance(77),
+            process: consent_peer::ProcessReference(handle),
+        }
+    }
+    fn session() -> Session {
+        Session {
+            id: 1,
+            generation: 2,
+        }
+    }
+    fn hex(bytes: &[u8]) -> String {
+        use std::fmt::Write;
+        let mut text = String::new();
+        for byte in bytes {
+            write!(text, "{byte:02x}").unwrap();
+        }
+        text
+    }
+    fn code() -> Vec<u8> {
+        declared("[[binary]]\npath='main'\nrequires=['net.connect']\n")
+    }
+    fn pending(state: &state::CapabilityServiceState, code: Vec<u8>) -> Pending {
+        let selection = signed_image::select_snapshot(state, None, &code).unwrap();
+        Pending::new(selection, code, peer(101), "opaque:approval", session(), 3).unwrap()
+    }
+    fn approval(binding: Binding, choice: Choice) -> Approval {
+        let presenter = Presenter {
+            instance: instance(2),
+            registration: 4,
+        };
+        let input = InputRoute {
+            source: instance(3),
+            seat: 0,
+            generation: 8,
+        };
+        let mut controller = Controller::new();
+        let offer = controller
+            .begin(
+                binding,
+                presenter,
+                input,
+                Choices::new(Choices::ONCE | Choices::PERSISTENT).unwrap(),
+                100,
+                100,
+                [0x88; 32],
+            )
+            .unwrap();
+        let current = Current {
+            requester: Some(binding.requester),
+            presenter: Some(presenter),
+            input: Some(input),
+            session: Some(binding.session),
+            policy_generation: binding.policy_generation,
+            foreground: true,
+        };
+        assert_eq!(
+            controller.feedback(
+                presenter.instance,
+                offer.correlation,
+                Feedback::Presented,
+                current,
+                100
+            ),
+            Ok(Outcome::Pending)
+        );
+        controller
+            .arm(input.source, offer.correlation, input, 20, true, 100)
+            .unwrap();
+        controller
+            .input(
+                input.source,
+                offer.correlation,
+                input,
+                21,
+                Transition::PhysicalPress,
+                100,
+            )
+            .unwrap();
+        let Outcome::Approved(approval) = controller
+            .feedback(
+                presenter.instance,
+                offer.correlation,
+                Feedback::Decision {
+                    choice,
+                    gesture: 21,
+                },
+                current,
+                100,
+            )
+            .unwrap()
+        else {
+            panic!("approval required")
+        };
+        assert_eq!(controller.len(), 0);
+        assert_eq!(
+            controller.feedback(
+                presenter.instance,
+                offer.correlation,
+                Feedback::Decision {
+                    choice,
+                    gesture: 21
+                },
+                current,
+                100
+            ),
+            Err(consent::Error::Unknown)
+        );
+        approval
+    }
+    fn closed() {
+        STATE.with_borrow(|s| assert_eq!(s.closed.iter().filter(|id| **id == 101).count(), 1));
+    }
+
+    #[test]
+    fn standalone_consent_issues_exact_install_metadata_without_inherited_grants() {
+        let mut original = code();
+        setup(original.clone());
+        let request = pending(&empty_state(), original.clone());
+        let binding = request.binding();
+        assert_eq!(request.source_len(), original.len());
+        assert_eq!(request.subject().1, ["net.connect"]);
+        assert_eq!(
+            binding.source_digest,
+            <[u8; 32]>::from(Sha256::digest(&original))
+        );
+        assert_eq!(binding.prepared_digest, binding.source_digest);
+        original[9] ^= 1;
+        let decision = approval(binding, Choice::AllowOnce);
+        request
+            .complete(decision, &peer(202), session(), 3)
+            .unwrap();
+        STATE.with_borrow(|s| {
+            assert_eq!(s.issued.len(), 1);
+            assert_eq!(s.issued_caps, [b"net.connect\0".to_vec()]);
+            let (endpoint, key, fields) = &s.issued[0];
+            assert_eq!((*endpoint, key.as_str()), (77, "opaque:approval"));
+            let fields: Vec<_> = fields
+                .split(|b| *b == 0)
+                .filter(|s| !s.is_empty())
+                .map(|s| std::str::from_utf8(s).unwrap())
+                .collect();
+            assert_eq!(fields.len(), 8);
+            assert!(fields.contains(&"__MNU_EXEC_AUTH_KIND=image-install"));
+            assert!(fields.contains(&"__MNU_EXEC_AUTH_CLASS=unprivileged"));
+            assert!(fields.contains(&"__MNU_EXEC_IMAGE_REVISION=5"));
+            let package = format!(
+                "__MNU_EXEC_ID_PACKAGE=local.elf.{}",
+                hex(&binding.source_digest)
+            );
+            assert!(fields.contains(&package.as_str()));
+            let digest = format!("__MNU_EXEC_FILE_SHA256={}", hex(&binding.source_digest));
+            assert!(fields.contains(&digest.as_str()));
+            assert!(s.file_reads.is_empty());
+        });
+        closed();
+    }
+
+    #[test]
+    fn installed_source_keeps_the_authenticated_selection_without_path_reopening() {
+        let code = fixture::unsigned();
+        setup(code.clone());
+        let mut state = empty_state();
+        install_code(
+            &mut state,
+            "org.mochios.fixture",
+            "/system/bin/fixture",
+            &code,
+            "application",
+            &["net.connect"],
+        );
+        let request = pending(&state, code);
+        let binding = request.binding();
+        STATE.with_borrow_mut(|s| {
+            s.files.clear();
+            s.file_reads.clear();
+        });
+        request
+            .complete(
+                approval(binding, Choice::AllowOnce),
+                &peer(202),
+                session(),
+                3,
+            )
+            .unwrap();
+        STATE.with_borrow(|s| {
+            assert_eq!(s.issued.len(), 1);
+            assert!(s.file_reads.is_empty());
+            assert!(
+                std::str::from_utf8(&s.issued[0].2)
+                    .unwrap()
+                    .contains("__MNU_EXEC_ID_PACKAGE=org.mochios.fixture\0")
+            );
+        });
+        closed();
+    }
+
+    #[test]
+    fn every_binding_field_is_checked_before_native_authorization() {
+        for changed in 0..12 {
+            let code = code();
+            setup(code.clone());
+            let request = pending(&empty_state(), code);
+            let mut binding = request.binding();
+            match changed {
+                0 => binding.source_digest[0] ^= 1,
+                1 => binding.prepared_digest[0] ^= 1,
+                2 => binding.requirements_digest[0] ^= 1,
+                3 => binding.requester.revision += 1,
+                4 => binding.requester.digest[0] ^= 1,
+                5 => binding.requester.process += 1,
+                6 => binding.session.generation += 1,
+                7 => binding.policy_generation += 1,
+                8 => binding.action = Action::Operation,
+                9 => binding.requester.thread += 1,
+                10 => binding.requester.endpoint += 1,
+                _ => binding.session.id += 1,
+            }
+            assert!(
+                request
+                    .complete(
+                        approval(binding, Choice::AllowOnce),
+                        &peer(202),
+                        session(),
+                        3
+                    )
+                    .is_err()
+            );
+            no_issue();
+            closed();
+            STATE.with_borrow(|s| {
+                assert_eq!(s.comparisons, 0);
+                assert_eq!(s.issue_calls, 0);
+            });
+        }
+    }
+
+    #[test]
+    fn changed_execution_session_policy_and_native_object_are_rejected() {
+        for changed in 0..8 {
+            let code = code();
+            setup(code.clone());
+            let request = pending(&empty_state(), code);
+            let decision = approval(request.binding(), Choice::AllowOnce);
+            let mut current = peer(202);
+            let mut session = session();
+            let mut generation = 3;
+            match changed {
+                0 => current.instance.endpoint += 1,
+                1 => current.instance.revision += 1,
+                2 => current.instance.digest[0] ^= 1,
+                3 => session.generation += 1,
+                4 => generation += 1,
+                5 => STATE.with_borrow_mut(|s| s.same_object = false),
+                6 => STATE.with_borrow_mut(|s| {
+                    s.same_error = Some(SysError::from(NativeError::BackingFailure.into_raw()))
+                }),
+                _ => current.instance.process += 1,
+            }
+            assert!(
+                request
+                    .complete(decision, &current, session, generation)
+                    .is_err()
+            );
+            no_issue();
+            closed();
+            STATE.with_borrow(|s| assert_eq!(s.issue_calls, 0));
+        }
+    }
+
+    #[test]
+    fn cancelled_requests_and_failed_publication_release_the_retained_process() {
+        let code = code();
+        setup(code.clone());
+        drop(pending(&empty_state(), code.clone()));
+        no_issue();
+        closed();
+        setup(code.clone());
+        let request = pending(&empty_state(), code);
+        let decision = approval(request.binding(), Choice::AllowOnce);
+        let error = SysError::from(NativeError::ResourceUnavailable.into_raw());
+        STATE.with_borrow_mut(|s| s.issue_error = Some(error));
+        assert_eq!(
+            request.complete(decision, &peer(202), session(), 3),
+            Err(error)
+        );
+        closed();
+        no_issue();
+        STATE.with_borrow(|s| assert_eq!(s.issue_calls, 1));
+    }
+
+    #[test]
+    fn a_persistent_decision_cannot_be_silently_treated_as_allow_once() {
+        let code = code();
+        setup(code.clone());
+        let request = pending(&empty_state(), code);
+        let decision = approval(request.binding(), Choice::AllowPersistently);
+        assert!(
+            request
+                .complete(decision, &peer(202), session(), 3)
+                .is_err()
+        );
+        no_issue();
+        closed();
+    }
+
+    #[test]
+    fn construction_rejects_replaced_bytes_and_invalid_request_ownership() {
+        for changed in 0..10 {
+            let mut code = code();
+            setup(code.clone());
+            let selection = signed_image::select_snapshot(&empty_state(), None, &code).unwrap();
+            let mut requester = peer(101);
+            let mut session = session();
+            let mut generation = 3;
+            let key = match changed {
+                0 => "",
+                1 => "bad\0key",
+                _ => "opaque:approval",
+            };
+            match changed {
+                2 => code[9] ^= 1,
+                3 => requester.instance.process = 0,
+                4 => requester.instance.endpoint = 0,
+                5 => requester.instance.thread = 0,
+                6 => session.id = 0,
+                7 => generation = 0,
+                9 => requester.process.0 = 0,
+                _ => {}
+            }
+            let key = if changed == 8 {
+                "a".repeat(256)
+            } else {
+                key.into()
+            };
+            assert!(Pending::new(selection, code, requester, &key, session, generation).is_err());
+            no_issue();
+            if changed != 9 {
+                closed();
+            }
+        }
+    }
+
+    #[test]
+    fn an_approval_for_one_exec_key_cannot_be_applied_to_another_request() {
+        let code = code();
+        setup(code.clone());
+        let first = Pending::new(
+            signed_image::select_snapshot(&empty_state(), None, &code).unwrap(),
+            code.clone(),
+            peer(101),
+            "first",
+            session(),
+            3,
+        )
+        .unwrap();
+        let second = Pending::new(
+            signed_image::select_snapshot(&empty_state(), None, &code).unwrap(),
+            code,
+            peer(102),
+            "second",
+            session(),
+            3,
+        )
+        .unwrap();
+        assert_ne!(
+            first.binding().requirements_digest,
+            second.binding().requirements_digest
+        );
+        assert!(
+            second
+                .complete(
+                    approval(first.binding(), Choice::AllowOnce),
+                    &peer(202),
+                    session(),
+                    3
+                )
+                .is_err()
+        );
+        drop(first);
+        no_issue();
+        STATE.with_borrow(|s| {
+            assert_eq!(s.issue_calls, 0);
+            for id in [101, 102] {
+                assert_eq!(s.closed.iter().filter(|closed| **closed == id).count(), 1);
+            }
+        });
+    }
+
+    #[test]
+    fn measured_initial_execution_revision_zero_is_preserved_in_the_native_request() {
+        let code = code();
+        setup(code.clone());
+        let selection = signed_image::select_snapshot(&empty_state(), None, &code).unwrap();
+        let mut requester = peer(101);
+        requester.instance.revision = 0;
+        let request = Pending::new(selection, code, requester, "initial", session(), 3).unwrap();
+        let decision = approval(request.binding(), Choice::AllowOnce);
+        let mut current = peer(202);
+        current.instance.revision = 0;
+        request.complete(decision, &current, session(), 3).unwrap();
+        closed();
+        STATE.with_borrow(|s| {
+            assert_eq!(s.issue_calls, 1);
+            assert!(
+                std::str::from_utf8(&s.issued[0].2)
+                    .unwrap()
+                    .contains("__MNU_EXEC_IMAGE_REVISION=0\0")
+            );
+        });
+    }
+
+    #[test]
+    fn requirements_commitment_is_canonical_and_binds_the_full_grant_set() {
+        let names: Vec<_> = mnu_abi::capability::CAPABILITIES
+            .iter()
+            .filter(|c| c.user_grantable && c.delegable)
+            .map(|c| c.name)
+            .take(2)
+            .collect();
+        assert_eq!(names.len(), 2);
+        let mut commitments = Vec::new();
+        for requested in [
+            vec![names[0], names[1]],
+            vec![names[1], names[0]],
+            vec![names[0]],
+        ] {
+            let code = declared(&format!(
+                "[[binary]]\npath='main'\nrequires={requested:?}\n"
+            ));
+            setup(code.clone());
+            let request = pending(&empty_state(), code);
+            commitments.push(request.binding().requirements_digest);
+            drop(request);
+            closed();
+            no_issue();
+        }
+        assert_eq!(commitments[0], commitments[1]);
+        assert_ne!(commitments[0], commitments[2]);
+    }
 }

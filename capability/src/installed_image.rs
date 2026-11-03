@@ -74,6 +74,12 @@ pub(crate) fn select(
 }
 
 impl Selection {
+    pub(crate) fn authority(
+        &self,
+    ) -> (&crate::resolver::ApplicationIdentity, &[String], &[u8; 32]) {
+        (&self.verified.identity, &self.requested, &self.digest)
+    }
+
     pub(crate) fn authorize(
         &self,
         policy: &AppPromptPolicy,
