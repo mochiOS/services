@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 use mochios_posix_protocol as posix_protocol;
 use posix_protocol::file_time::{Change, Update};
-use std::ffi::{c_char, c_int};
+use std::ffi::{c_char, c_int, c_void};
 
 #[path = "../../../user/crates/newlib-runtime/src/file_time_input.rs"]
 mod input;
@@ -150,4 +150,28 @@ fn input_layout_and_sentinels_match_runtime_and_mochios_rust_libc() {
     let libc = include_str!("../../../libraries/libc/newlib/mochios.rs");
     assert!(libc.contains("pub const UTIME_NOW: c_long = -2;"));
     assert!(libc.contains("pub const UTIME_OMIT: c_long = -1;"));
+}
+
+#[test]
+fn second_resolution_times_snapshot_both_fields_and_preserve_signed_seconds() {
+    assert_eq!(input::read_seconds(std::ptr::null()), Ok(Update::now()));
+    let bytes = [(-1i64).to_ne_bytes(), i64::MAX.to_ne_bytes()].concat();
+    assert_eq!(
+        input::read_seconds(bytes.as_ptr().cast()),
+        Ok(Update {
+            access: Change::Set {
+                seconds: -1,
+                nanoseconds: 0
+            },
+            modification: Change::Set {
+                seconds: i64::MAX,
+                nanoseconds: 0
+            },
+        })
+    );
+    assert_eq!(input::read_seconds(1usize as *const c_void), Err(EFAULT));
+    let second = bytes.as_ptr() as usize + 8;
+    user_copy_native::DENIED.with_borrow_mut(|denied| *denied = Some(second..second + 8));
+    assert_eq!(input::read_seconds(bytes.as_ptr().cast()), Err(EFAULT));
+    user_copy_native::DENIED.with_borrow_mut(|denied| *denied = None);
 }
