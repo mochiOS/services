@@ -55,7 +55,7 @@ unsafe impl std::alloc::GlobalAlloc for Allocator {
 #[global_allocator]static ALLOCATOR:Allocator=Allocator;
 mod task {
     pub mod process {
-        #[derive(PartialEq)]pub enum PendingExecKind {Spawn,SpawnInherit,ImageReplace}
+        #[derive(PartialEq)]pub enum PendingExecKind {Spawn,SpawnInherit,ImageReplace,ImageInstall{image_revision:u64}}
         pub struct PendingExecSecurity {
             pub kind:PendingExecKind,pub executable_digest:[u8;32],pub execution_class:crate::ExecutionClass,
             pub capabilities:(),pub kernel_authorities:(),pub identity:(),
@@ -185,6 +185,8 @@ fn main() {
     check(length,Error::AccessDenied.into_raw());assert!(!authorized());assert_eq!(EXPORTS.get(),0);assert_eq!(CREATES.get(),0);
     let length=reset();PROCESS.with_borrow_mut(|p|p.authorization.as_mut().unwrap().kind=task::process::PendingExecKind::ImageReplace);
     check(length,Error::AccessDenied.into_raw());assert!(!authorized());assert_eq!(EXPORTS.get(),0);
+    let length=reset();PROCESS.with_borrow_mut(|p|p.authorization.as_mut().unwrap().kind=task::process::PendingExecKind::ImageInstall{image_revision:1});
+    check(length,Error::AccessDenied.into_raw());assert!(!authorized());assert_eq!(EXPORTS.get(),0);assert_eq!(CREATES.get(),0);
     let length=reset();BYTES.with_borrow_mut(|bytes| {
         let offset=bytes.len()-mnu_abi::process_create::VALUE_LEN-mnu_abi::process_create::HANDLE_LEN+16;
         bytes[offset..offset+8].copy_from_slice(&u64::MAX.to_le_bytes());

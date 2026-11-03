@@ -43,6 +43,7 @@ mod task {
         }
         #[derive(Clone, Copy, PartialEq, Eq)]
         pub enum PendingExecKind {
+            ImageInstall { image_revision: u64 },
             Spawn,
             SpawnInherit,
             ImageReplace,
@@ -173,6 +174,8 @@ fn rejects_replace_and_user_privilege_increase() {
         request.execution_class = mnu_abi::exec::ExecutionClass::Privileged;
         assert_eq!(origin.permits(&request), privilege != PrivilegeLevel::User);
         request.kind = PendingExecKind::ImageReplace;
+        assert!(!origin.permits(&request));
+        request.kind = PendingExecKind::ImageInstall { image_revision: 1 };
         assert!(!origin.permits(&request));
     }
 }

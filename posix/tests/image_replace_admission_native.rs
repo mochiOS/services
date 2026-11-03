@@ -53,7 +53,7 @@ unsafe impl std::alloc::GlobalAlloc for Allocator {
 #[global_allocator]static ALLOCATOR:Allocator=Allocator;
 mod task {
     pub mod process {
-        #[derive(PartialEq)]pub enum PendingExecKind {Spawn,ImageReplace}
+        #[derive(PartialEq)]pub enum PendingExecKind {Spawn,ImageReplace,ImageInstall{image_revision:u64}}
         pub struct PendingExecSecurity {pub kind:PendingExecKind,pub execution_class:crate::ExecutionClass,pub executable_digest:[u8;32]}
     }
     pub struct Process {pub authorization:Option<process::PendingExecSecurity>}
@@ -152,6 +152,10 @@ fn main() {
         let lengths=reset();REPLACE_ERROR.set(error);check(lengths,error);assert!(!authorized());assert_eq!(REPLACES.get(),1);
         check(lengths,Error::AccessDenied.into_raw());assert_eq!(REPLACES.get(),1,"consumed authorization cannot be replayed");
     }
+    let lengths=reset();PROCESS.with_borrow_mut(|p|p.authorization.as_mut().unwrap().kind=task::process::PendingExecKind::ImageInstall{image_revision:1});
+    check(lengths,Error::BackingFailure.into_raw());assert_eq!(REPLACES.get(),1);assert!(!authorized());
+    let lengths=reset();PROCESS.with_borrow_mut(|p|{let a=p.authorization.as_mut().unwrap();a.kind=task::process::PendingExecKind::ImageInstall{image_revision:1};a.execution_class=ExecutionClass::Privileged;});
+    check(lengths,Error::AccessDenied.into_raw());assert_eq!(READS.get(),0);assert!(!authorized());
 }
 "#,
     );

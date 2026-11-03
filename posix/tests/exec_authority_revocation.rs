@@ -14,10 +14,11 @@ extern crate self as mnu_abi;
 #[derive(Debug,PartialEq,Eq)]pub enum Error{NotReady,AccessDenied,LimitExceeded}
 pub mod status{pub use super::Error;}
 #[derive(Clone,Copy,Debug,PartialEq,Eq)]struct Grants(u8);
-impl Grants{fn is_subset_of(&self,held:&Self)->bool{(0..8).all(|bit|self.0&(1<<bit)==0 || held.0&(1<<bit)!=0)}}
-#[derive(Clone,Copy,Debug,PartialEq,Eq)]enum PendingExecKind{ImageReplace,Spawn,SpawnInherit}
+impl Grants{fn is_empty(&self)->bool{self.0==0}fn is_subset_of(&self,held:&Self)->bool{(0..8).all(|bit|self.0&(1<<bit)==0 || held.0&(1<<bit)!=0)}}
+#[derive(Clone,Copy,Debug,PartialEq,Eq)]enum PendingExecKind{ImageReplace,ImageInstall{image_revision:u64},Spawn,SpawnInherit}
 #[derive(Clone,Debug)]struct PendingExecSecurity{identity:u8,executable_digest:[u8;32],path:String,authorized_thread:u64,capabilities:Grants,kernel_authorities:Grants,kind:PendingExecKind,authority_revision:u64}
-#[derive(Clone)]struct Process{application_identity:Option<u8>,image_digest:Option<[u8;32]>,pending_exec_security:Option<PendingExecSecurity>,capabilities:Grants,kernel_authorities:Grants,exec_authority_revision:u64}
+#[derive(Clone)]struct Process{application_identity:Option<u8>,image_digest:Option<[u8;32]>,pending_exec_security:Option<PendingExecSecurity>,capabilities:Grants,kernel_authorities:Grants,exec_authority_revision:u64,image_revision:u64}
+struct ProcessObject(u64);impl ProcessObject{fn image_revision(&self)->u64{self.0}}
 type CapabilitySet=Grants;type KernelAuthoritySet=Grants;
 mod task{
  pub type ThreadId=u64;pub type ProcessId=u64;
@@ -26,6 +27,7 @@ mod task{
  pub fn with_process<T>(pid:u64,operation:impl FnOnce(&crate::Process)->T)->Option<T>{assert_eq!(pid,7);CURRENT.with_borrow(|p|p.as_ref().map(operation))}
 }
 impl Process{
+ fn process_object(&self)->ProcessObject{ProcessObject(self.image_revision)}
 "#,
     );
     program.push_str(probe::between(
@@ -51,8 +53,22 @@ impl Process{
     ));
     program.push_str(r#"
 fn permit(caps:u8,authority:u8,kind:PendingExecKind)->PendingExecSecurity{PendingExecSecurity{identity:9,executable_digest:[7;32],path:"opaque-image-key".into(),authorized_thread:11,capabilities:Grants(caps),kernel_authorities:Grants(authority),kind,authority_revision:1}}
-fn process(caps:u8,authority:u8,permit:PendingExecSecurity)->Process{Process{application_identity:Some(9),image_digest:Some([7;32]),capabilities:Grants(caps),kernel_authorities:Grants(authority),pending_exec_security:Some(permit),exec_authority_revision:1}}
+fn process(caps:u8,authority:u8,permit:PendingExecSecurity)->Process{Process{application_identity:Some(9),image_digest:Some([7;32]),capabilities:Grants(caps),kernel_authorities:Grants(authority),pending_exec_security:Some(permit),exec_authority_revision:1,image_revision:1}}
+fn mutate(p:&mut Process, operation:u8) {match operation {
+  0 => { *p.capabilities_mut()=Grants(0); *p.capabilities_mut()=Grants(7); }
+  1 => { *p.kernel_authorities_mut()=Grants(0); *p.kernel_authorities_mut()=Grants(7); }
+  2 => p.set_capabilities_for_exec(Grants(7)),
+  _ => p.set_kernel_authorities_for_exec(Grants(7)),
+ }}
 fn main(){
+ for held in 0..8 {for desired in 0..8 {for revision in [0,1,2] {for native_desired in 0..8 {
+  let mut p=process(held,7,permit(desired,native_desired,PendingExecKind::ImageInstall{image_revision:revision}));
+  let expected=revision==1 && native_desired==0;
+  assert_eq!(p.permits_image_authorization(p.pending_exec_security.as_ref().unwrap()),expected);
+  assert_eq!(p.take_exec_authorization("opaque-image-key",11).is_some(),expected);
+  assert!(p.pending_exec_security.is_none());
+  assert_eq!(p.capabilities,Grants(held));assert_eq!(p.kernel_authorities,Grants(7));
+ }}}}
  for kind in [PendingExecKind::ImageReplace,PendingExecKind::SpawnInherit] {
  for held in 0..8 {for desired in 0..8 {for native_held in 0..8 {for native_desired in 0..8 {
   let expected=(desired&!held)==0 && (native_desired&!native_held)==0;
@@ -69,6 +85,24 @@ fn main(){
   assert!(p.take_exec_authorization("opaque-image-key",11).is_none());
   p.capabilities=Grants(1);p.kernel_authorities=Grants(1);
   assert!(p.take_exec_authorization("opaque-image-key",11).is_none());
+ }
+ // Explicit installation has the same revocation and late-image checks;
+ // consuming the permit grants nothing to the currently running image.
+ for operation in 0..4 {
+  let kind=PendingExecKind::ImageInstall{image_revision:1};
+  let mut p=process(0,0,permit(7,0,kind));
+  p.authorize_next_exec(permit(7,0,kind)).unwrap();
+  let authorization=p.take_exec_authorization("opaque-image-key",11).unwrap();
+  assert_eq!(p.capabilities,Grants(0));assert_eq!(p.kernel_authorities,Grants(0));
+  mutate(&mut p,operation);
+  assert!(!p.permits_image_authorization(&authorization));
+ }
+ for current_revision in [0,2,u64::MAX] {
+  let mut p=process(0,0,permit(7,0,PendingExecKind::ImageInstall{image_revision:1}));
+  let authorization=p.take_exec_authorization("opaque-image-key",11).unwrap();
+  p.image_revision=current_revision;
+  task::CURRENT.with_borrow_mut(|slot|*slot=Some(p));
+  assert_eq!(check_image_authorization(7,&authorization),Err(Error::AccessDenied));
  }
  // Successful consumption is not the last check: a sibling can revoke while
  // image bytes/VM are prepared. The late check uses the then-current state.
@@ -95,12 +129,6 @@ fn main(){
 
  // Every mutation API invalidates stored permits, including a no-op access
  // or a revoke/restore cycle. Publication always stamps the native revision.
- let mutate = |p:&mut Process, operation| match operation {
-  0 => { *p.capabilities_mut()=Grants(0); *p.capabilities_mut()=Grants(7); }
-  1 => { *p.kernel_authorities_mut()=Grants(0); *p.kernel_authorities_mut()=Grants(7); }
-  2 => p.set_capabilities_for_exec(Grants(7)),
-  _ => p.set_kernel_authorities_for_exec(Grants(7)),
- };
  for kind in [PendingExecKind::ImageReplace,PendingExecKind::SpawnInherit,PendingExecKind::Spawn] {
   for operation in 0..4 {
    let mut p=process(7,7,permit(7,7,kind));

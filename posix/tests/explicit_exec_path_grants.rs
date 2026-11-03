@@ -19,16 +19,20 @@ fn execution_authorization_is_exact_thread_bound_and_consumed_once() {
 
     let mut program = String::from(
         r#"
+extern crate self as mnu_abi;
+pub mod status{#[derive(Debug)]pub enum Error{LimitExceeded}}
 mod task {pub type ThreadId=u64;}
 // Only the fields accessed by these methods are modeled. Image contents and
 // digest enforcement have separate read_all/image-admission runtime tests.
 #[derive(Clone,Copy,Debug)]struct Grants;
-impl Grants{fn is_subset_of(&self,_other:&Self)->bool{true}}
-#[derive(Debug,PartialEq,Eq)]enum PendingExecKind{ImageReplace,SpawnInherit}
+impl Grants{fn is_empty(&self)->bool{true}fn is_subset_of(&self,_other:&Self)->bool{true}}
+#[derive(Debug,PartialEq,Eq)]enum PendingExecKind{ImageReplace,ImageInstall{image_revision:u64},SpawnInherit}
 #[derive(Debug)]
-struct PendingExecSecurity {identity:u8,path:String,authorized_thread:u64,executable_digest:[u8;32],kind:PendingExecKind,capabilities:Grants,kernel_authorities:Grants}
-struct Process {application_identity:Option<u8>,image_digest:Option<[u8;32]>,pending_exec_security:Option<PendingExecSecurity>,capabilities:Grants,kernel_authorities:Grants}
+struct PendingExecSecurity {identity:u8,path:String,authorized_thread:u64,executable_digest:[u8;32],kind:PendingExecKind,capabilities:Grants,kernel_authorities:Grants,authority_revision:u64}
+struct Process {application_identity:Option<u8>,image_digest:Option<[u8;32]>,pending_exec_security:Option<PendingExecSecurity>,capabilities:Grants,kernel_authorities:Grants,exec_authority_revision:u64}
+struct ProcessObject;impl ProcessObject{fn image_revision(&self)->u64{1}}
 impl Process {
+fn process_object(&self)->ProcessObject{ProcessObject}
 "#,
     );
     program.push_str(probe::between(
@@ -40,11 +44,11 @@ impl Process {
         r#"
 }
 fn main() {
-    let mut process=Process{application_identity:Some(1),image_digest:Some([1;32]),pending_exec_security:None,capabilities:Grants,kernel_authorities:Grants};
+    let mut process=Process{application_identity:Some(1),image_digest:Some([1;32]),pending_exec_security:None,capabilities:Grants,kernel_authorities:Grants,exec_authority_revision:1};
     assert!(process.take_exec_authorization("/bin/app",7).is_none());
     process.authorize_next_exec(PendingExecSecurity{
-        identity:1,path:"/bin/app".into(),authorized_thread:7,executable_digest:[1;32],kind:PendingExecKind::ImageReplace,capabilities:Grants,kernel_authorities:Grants,
-    });
+        identity:1,path:"/bin/app".into(),authorized_thread:7,executable_digest:[1;32],kind:PendingExecKind::ImageReplace,capabilities:Grants,kernel_authorities:Grants,authority_revision:0,
+    }).unwrap();
     for wrong in ["/bin/other","/bin/./app","/bin/../bin/app","/bin/app/","app",""] {
         assert!(process.take_exec_authorization(wrong,7).is_none());
         assert!(process.pending_exec_security.is_some());
@@ -57,11 +61,11 @@ fn main() {
     assert!(process.take_exec_authorization("/bin/app",7).is_none());
 
     process.authorize_next_exec(PendingExecSecurity{
-        identity:1,path:"/bin/old".into(),authorized_thread:7,executable_digest:[2;32],kind:PendingExecKind::ImageReplace,capabilities:Grants,kernel_authorities:Grants,
-    });
+        identity:1,path:"/bin/old".into(),authorized_thread:7,executable_digest:[2;32],kind:PendingExecKind::ImageReplace,capabilities:Grants,kernel_authorities:Grants,authority_revision:0,
+    }).unwrap();
     process.authorize_next_exec(PendingExecSecurity{
-        identity:1,path:"opaque-image-identity".into(),authorized_thread:8,executable_digest:[3;32],kind:PendingExecKind::ImageReplace,capabilities:Grants,kernel_authorities:Grants,
-    });
+        identity:1,path:"opaque-image-identity".into(),authorized_thread:8,executable_digest:[3;32],kind:PendingExecKind::ImageReplace,capabilities:Grants,kernel_authorities:Grants,authority_revision:0,
+    }).unwrap();
     assert!(process.take_exec_authorization("/bin/old",7).is_none());
     assert!(process.take_exec_authorization("opaque-image-identity",7).is_none());
     assert_eq!(process.take_exec_authorization("opaque-image-identity",8).unwrap().executable_digest,[3;32]);
