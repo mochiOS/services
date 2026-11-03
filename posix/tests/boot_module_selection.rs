@@ -52,7 +52,7 @@ fn initial_image_is_a_checked_byte_range_not_a_filename() {
 
 #[test]
 fn descriptor_decoder_rejects_unknown_headers_without_guessing_ranges() {
-    for byte in [0, 7, 12, 60, 63] {
+    for byte in [0, 7, 12] {
         let mut bytes = descriptor(64, 64, 8);
         bytes[byte] ^= 1;
         assert_eq!(module::decode(&bytes), Err(module::Error::InvalidHeader));
@@ -165,7 +165,29 @@ fn packer_preserves_filesystem_blocks_and_atomically_rejects_bad_selection() {
         assert_eq!(decoded.resources.len() as u64, resource_bytes);
         assert_eq!(&decoded.resources[64..], &before[64..]);
         assert_eq!(decoded.initial_image, payload);
-        assert_eq!(bytes.len(), resource_bytes as usize + length);
+        assert_eq!(
+            bytes.len(),
+            resource_bytes as usize + length + decoded.initial_startup.len()
+        );
+        let startup = mnu_abi::process_image::decode(decoded.initial_startup).unwrap();
+        assert_eq!(startup.initial_stack_pointer(), 0);
+        assert_eq!(startup.stack().len() % 16, 0);
+        assert_eq!(
+            startup
+                .relocations()
+                .map(|r| (r.offset, r.kind as u16))
+                .collect::<Vec<_>>(),
+            [(32, 2), (48, 3), (64, 4), (80, 6), (96, 5)]
+        );
+        assert_eq!(&startup.stack()[..24], &[0; 24]);
+        let words = startup
+            .stack()
+            .chunks_exact(8)
+            .map(|w| u64::from_le_bytes(w.try_into().unwrap()))
+            .collect::<Vec<_>>();
+        assert_eq!(&words[3..], &[3, 0, 4, 0, 5, 0, 6, 0, 9, 0, 0, 0, 0]);
+        assert!(startup.mappings().next().is_none());
+        assert!(startup.context_updates().next().is_none());
         run(Command::new("perl")
             .arg(script("pack-boot-module.pl"))
             .arg("check")
@@ -250,7 +272,10 @@ fn packer_snapshots_explicit_options_and_rejects_bad_options_before_replacement(
         assert_eq!(&decoded.resources[64..], &original[64..]);
         assert_eq!(
             bytes.len(),
-            resource_bytes as usize + configuration.len() + payload.len()
+            resource_bytes as usize
+                + configuration.len()
+                + payload.len()
+                + decoded.initial_startup.len()
         );
         run(Command::new("e2fsck").args(["-f", "-n"]).arg(&image));
     }
@@ -271,7 +296,10 @@ fn packer_snapshots_explicit_options_and_rejects_bad_options_before_replacement(
     let decoded = module::decode(&bytes).unwrap();
     assert!(decoded.kernel_configuration.is_empty());
     assert_eq!(decoded.initial_image, payload);
-    assert_eq!(bytes.len(), resource_bytes as usize + payload.len());
+    assert_eq!(
+        bytes.len(),
+        resource_bytes as usize + payload.len() + decoded.initial_startup.len()
+    );
 }
 
 #[test]

@@ -6,6 +6,10 @@ mod probe;
 fn kernel_launches_only_the_boot_selected_bytes_and_rejects_legacy_or_invalid_modules() {
     let mut program = String::from("#![allow(dead_code)]\nmod mnu_abi {pub mod status {\n");
     program.push_str(include_str!("../../../core/crates/abi/src/status.rs"));
+    program.push_str("}\npub mod process_image {\n");
+    program.push_str(include_str!(
+        "../../../core/crates/abi/src/process_image.rs"
+    ));
     program.push_str("}\npub mod boot_module {\n");
     program.push_str(include_str!("../../../core/crates/abi/src/boot_module.rs"));
     program.push_str("}\n}\n");
@@ -30,17 +34,18 @@ impl ExecMeasurement {
 fn start()->Self{STARTS.fetch_add(1,Ordering::Relaxed);Self}
 fn finish(self,result:u64)->u64{result}
 }
-enum ImageLaunch{Bootstrap}
+enum ImageLaunch<'a>{Bootstrap(Option<mnu_abi::process_image::StartupImage<'a>>)}
 fn exec_with_data(data:&[u8],name:&str,identity:&str,caps:Option<CapabilitySet>,
 authorities:Option<KernelAuthoritySet>,privilege:Option<task::PrivilegeLevel>,
 application:Option<()>,handles:&[()],values:&[()],launch:ImageLaunch,_:&mut ExecMeasurement)->u64 {
 assert_eq!(data,b"selected");assert!(name.is_empty()&&identity.is_empty());
 assert_eq!(caps,Some(CapabilitySet));assert_eq!(authorities,Some(KernelAuthoritySet));
 assert_eq!(privilege,Some(task::PrivilegeLevel::Service));assert_eq!(application,None);
-assert!(handles.is_empty()&&values.is_empty());assert!(matches!(launch,ImageLaunch::Bootstrap));37
+assert!(handles.is_empty()&&values.is_empty());assert!(matches!(launch,ImageLaunch::Bootstrap(None)));37
 }
 "#,
     );
+    program.push_str(&format!("const PROCESS_MAX_OBJECT_HANDLES:usize={}; const MEMORY_ACCESS_ALL:u64={}; const MEMORY_ACCESS_WRITE:u64={}; const MEMORY_ACCESS_EXECUTE:u64={}; const MEMORY_MAP_SHARED:u64={};\n", mnu_abi::PROCESS_MAX_OBJECT_HANDLES, mnu_abi::MEMORY_ACCESS_ALL, mnu_abi::MEMORY_ACCESS_WRITE, mnu_abi::MEMORY_ACCESS_EXECUTE, mnu_abi::MEMORY_MAP_SHARED));
     program.push_str(probe::between(
         include_str!("../../../core/src/syscall/exec.rs"),
         "pub(crate) fn launch_bootstrap_image(",

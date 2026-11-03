@@ -59,8 +59,8 @@ unsafe impl std::alloc::GlobalAlloc for Allocator {
 type CapabilitySet=();type KernelAuthoritySet=();
 struct InheritedHandleGrant;struct InheritedValueSpec;struct ExecMeasurement;
 struct Sha256;impl Sha256 {fn digest(_:&[u8])->[u8;32]{[0;32]}}
-enum ImageLaunch<'a>{Bootstrap,Created(&'a ())}
-impl ImageLaunch<'_>{fn is_bootstrap(&self)->bool{matches!(self,Self::Bootstrap)}fn startup(&self)->Option<()>{if self.is_bootstrap(){None}else{Some(())}}}
+enum ImageLaunch<'a>{Bootstrap(Option<&'a ()>),Created(&'a ())}
+impl ImageLaunch<'_>{fn is_bootstrap(&self)->bool{matches!(self,Self::Bootstrap(_))}fn startup(&self)->Option<()>{match self {Self::Bootstrap(value)=>value.copied(),Self::Created(_)=>Some(())}}}
 struct ElfImageLayout {entry:u64,phdr_vaddr:u64,phentsize:u64,phnum:u64,deferred_zero_regions:Vec<task::MemoryRegion>}
 fn next_aslr_seed(_:&str)->u64 {0}
 fn aslr_offset_pages(_:u64,_:u64)->u64 {0}
@@ -76,6 +76,7 @@ fn map_elf_image(_:&[u8],table:u64,_:&mut ExecMeasurement)->Result<ElfImageLayou
 }
 fn build_relocatable_user_stack(_:u64,_:(),_:u64,_:u64,_:u64,_:u64)->Result<InitialUserStack,Error>{bootstrap_stack::empty(0x800000,32)}
 fn map_initial_tls(table:u64,_:u64)->Result<u64,Error>{assert_eq!(table,17);if STAGE.get()==5 {Err(Error::ResourceUnavailable)}else{Ok(0x600000)}}
+mod initial_mappings {pub fn prepare(_:u64,_:(),_:&mut Vec<crate::task::MemoryRegion>)->Result<(),crate::Error>{Ok(())}}
 mod config {
     pub struct Exec {pub stack_top_base:u64,pub stack_aslr_max_pages:u64,pub user_stack_size_pages:usize,pub kernel_thread_stack_size:usize}
     pub struct Config{pub exec:Exec}
@@ -144,14 +145,14 @@ fn main(){
             (4,Error::ResourceUnavailable),(5,Error::ResourceUnavailable),(8,Error::ResourceUnavailable),
             (9,Error::ResourceUnavailable),(10,Error::ResourceUnavailable),(12,Error::AccessDenied),
             (13,Error::AlreadyExists),(14,Error::ResourceUnavailable)] {
-            reset(stage);let launch=if native{ImageLaunch::Created(&())}else{ImageLaunch::Bootstrap};
+            reset(stage);let launch=if native{ImageLaunch::Created(&())}else{ImageLaunch::Bootstrap(None)};
             assert_eq!(exec_with_data(&[],"name","opaque:target",None,None,None,None,&[],&[],launch,&mut ExecMeasurement),error.into_raw());
             assert_eq!(DESTROYS.get(),usize::from(stage!=1));assert_eq!(PROCESSES.get(),0);
             assert_eq!(CLOSES.get(),usize::from(native&&matches!(stage,8|9|10)));
             assert_eq!(RELEASES.get(),usize::from(!native&&matches!(stage,8|9|10)));
             assert_eq!(FREES.get(),usize::from(stage==10));
         }
-        {reset(0);let launch=if native{ImageLaunch::Created(&())}else{ImageLaunch::Bootstrap};
+        {reset(0);let launch=if native{ImageLaunch::Created(&())}else{ImageLaunch::Bootstrap(None)};
             assert_eq!(exec_with_data(&[],"name","opaque:target",None,None,None,None,&[],&[],launch,&mut ExecMeasurement),if native{91}else{7});
             assert_eq!(DESTROYS.get(),0);assert_eq!(PROCESSES.get(),1);assert_eq!(CLOSES.get(),0);assert_eq!(RELEASES.get(),0);assert_eq!(FREES.get(),0);
             // Only the two stack mapping operations are implicit. User heaps
@@ -160,7 +161,8 @@ fn main(){
         }
     }
     reset(6);assert_eq!(exec_with_data(&[],"name","opaque:target",None,None,None,None,&[],&[],ImageLaunch::Created(&()),&mut ExecMeasurement),Error::NotReady.into_raw());assert_eq!(DESTROYS.get(),1);assert_eq!(PROCESSES.get(),0);assert_eq!(CLOSES.get(),0);
-    reset(7);assert_eq!(exec_with_data(&[],"name","opaque:target",None,None,None,None,&[],&[],ImageLaunch::Bootstrap,&mut ExecMeasurement),Error::AlreadyExists.into_raw());assert_eq!(DESTROYS.get(),1);assert_eq!(PROCESSES.get(),0);assert_eq!(RELEASES.get(),0);
+    reset(7);assert_eq!(exec_with_data(&[],"name","opaque:target",None,None,None,None,&[],&[],ImageLaunch::Bootstrap(None),&mut ExecMeasurement),Error::AlreadyExists.into_raw());assert_eq!(DESTROYS.get(),1);assert_eq!(PROCESSES.get(),0);assert_eq!(RELEASES.get(),0);
+    reset(0);assert_eq!(exec_with_data(&[],"name","opaque:target",None,None,None,None,&[],&[],ImageLaunch::Bootstrap(Some(&())),&mut ExecMeasurement),7);assert_eq!(PROCESSES.get(),1);assert_eq!(CLOSES.get(),0);
     reset(0);FAIL_NEXT.set(true);
     let result=exec_with_data(&[],"name","opaque:target",None,None,None,None,&[],&[],ImageLaunch::Created(&()),&mut ExecMeasurement);
     assert!(!FAIL_NEXT.get());assert_eq!(result,Error::ResourceUnavailable.into_raw());assert_eq!(DESTROYS.get(),0);assert_eq!(MAPS.get(),0);assert_eq!(PROCESSES.get(),0);

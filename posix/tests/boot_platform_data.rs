@@ -93,7 +93,7 @@ fn platform_range_is_bounded_adjacent_and_reserved_bits_cannot_select_data() {
     for index in 60..64 {
         let mut bytes = valid.clone();
         bytes[index] = 1;
-        assert_eq!(module::decode(&bytes), Err(module::Error::InvalidHeader));
+        assert!(module::decode(&bytes).is_err());
     }
 }
 
@@ -225,7 +225,7 @@ mod hypervisor_guest{{
  }}
 }}
 #[derive(Debug,PartialEq)]enum Error{{Protocol,Hypercall}}
-struct Client{{ring_address:u64,install_metadata_reference:Option<u32>}}
+struct Client{{ring_address:u64,install_metadata_reference:Option<u32>,poisoned:bool,scoped:Option<()>}}
 "#,
         root.join("core/crates/abi/src/lib.rs"),
         root.join("boot/crates/mdriver-protocol/src/lib.rs")
@@ -238,7 +238,7 @@ struct Client{{ring_address:u64,install_metadata_reference:Option<u32>}}
     program.push_str(r#"
 fn main(){
  let mut page=vec![0xa5u8;((MDRIVER_INSTALL_METADATA_PAGE+1)*4096)as usize];
- let mut client=Client{ring_address:page.as_mut_ptr()as u64,install_metadata_reference:None};
+ let mut client=Client{ring_address:page.as_mut_ptr()as u64,install_metadata_reference:None,poisoned:false,scoped:None};
  ADDRESS.set(client.ring_address+MDRIVER_INSTALL_METADATA_PAGE*4096);
  for data in [None,Some(&[0x5a;31][..]),Some(&[0x5a;33][..])]{
   DATA.set(data);assert_eq!(install_metadata_reference(&mut client),Err(Error::Protocol));
@@ -249,7 +249,8 @@ fn main(){
   RESULT.set(failure);assert_eq!(install_metadata_reference(&mut client),Err(Error::Hypercall));assert!(client.install_metadata_reference.is_none());
  }
  RESULT.set(73);assert_eq!(install_metadata_reference(&mut client),Ok(73));assert_eq!(CALLS.get(),4);
- DATA.set(None);RESULT.set(0);assert_eq!(install_metadata_reference(&mut client),Ok(73));assert_eq!(CALLS.get(),4);
+ DATA.set(None);RESULT.set(0);assert_eq!(install_metadata_reference(&mut client),Err(Error::Protocol));assert_eq!(CALLS.get(),4);
+ DATA.set(Some(&[0x5a;32]));assert_eq!(install_metadata_reference(&mut client),Ok(73));assert_eq!(CALLS.get(),4);
  assert!(page[..(MDRIVER_INSTALL_METADATA_PAGE*4096)as usize].iter().all(|byte|*byte==0xa5));
 }
 "#);

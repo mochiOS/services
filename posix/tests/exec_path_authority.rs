@@ -40,7 +40,7 @@ mod performance {
 }
 mod util { pub mod log { pub fn release_boot_marker(_:std::fmt::Arguments<'_>){} } }
 struct ExecMeasurement;
-enum ImageLaunch { Bootstrap }
+enum ImageLaunch<'a> { Bootstrap(Option<mnu_abi::process_image::StartupImage<'a>>) }
 impl ExecMeasurement {
     fn start()->Self { Self }
     fn finish(self,result:u64)->u64 { result }
@@ -51,7 +51,7 @@ fn exec_with_data(data:&[u8],name:&str,path:&str,
     assert_eq!(data,[1,2,3]); assert!(name.is_empty()&&path.is_empty());
     assert!(handles.is_empty()&&values.is_empty());
     assert_eq!((caps,authorities,privilege),(Some(7),Some(9),Some(task::PrivilegeLevel::Service)));
-    assert!(identity.is_none()&&matches!(launch,ImageLaunch::Bootstrap));
+    assert!(identity.is_none()&&matches!(launch,ImageLaunch::Bootstrap(None)));
     CALLS.fetch_add(1,Ordering::Relaxed);
     RESULT.load(Ordering::Relaxed)
 }
@@ -59,9 +59,14 @@ fn exec_with_data(data:&[u8],name:&str,path:&str,
     );
     program.push_str("mod mnu_abi {pub mod status {\n");
     program.push_str(include_str!("../../../core/crates/abi/src/status.rs"));
+    program.push_str("}\npub mod process_image {\n");
+    program.push_str(include_str!(
+        "../../../core/crates/abi/src/process_image.rs"
+    ));
     program.push_str("}\npub mod boot_module {\n");
     program.push_str(include_str!("../../../core/crates/abi/src/boot_module.rs"));
     program.push_str("}}\n");
+    program.push_str(&format!("const PROCESS_MAX_OBJECT_HANDLES:usize={}; const MEMORY_ACCESS_ALL:u64={}; const MEMORY_ACCESS_WRITE:u64={}; const MEMORY_ACCESS_EXECUTE:u64={}; const MEMORY_MAP_SHARED:u64={};\n", mnu_abi::PROCESS_MAX_OBJECT_HANDLES, mnu_abi::MEMORY_ACCESS_ALL, mnu_abi::MEMORY_ACCESS_WRITE, mnu_abi::MEMORY_ACCESS_EXECUTE, mnu_abi::MEMORY_MAP_SHARED));
     program.push_str(&source[begin..end]);
     program.push_str(r#"
 fn main(){

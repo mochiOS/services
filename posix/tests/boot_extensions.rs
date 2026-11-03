@@ -93,7 +93,7 @@ fn boot_module_separates_config_modules_and_image_and_rejects_legacy_descriptors
     assert_eq!(decoded.kernel_configuration, b"cfg");
     assert_eq!(decoded.native_modules, selected);
     assert_eq!(decoded.initial_image, b"image");
-    for version in [1u32, 2, 3, 5] {
+    for version in [1u32, 2, 3, 4, 6] {
         let mut bad = bytes.clone();
         bad[8..12].copy_from_slice(&version.to_le_bytes());
         assert_eq!(

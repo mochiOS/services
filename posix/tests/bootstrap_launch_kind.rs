@@ -11,8 +11,13 @@ fn launch_kind_is_explicit_and_preserves_the_native_startup_image() {
     let created = ImageLaunch::Created(startup);
     assert!(!created.is_bootstrap());
     assert_eq!(created.startup(), Some(startup));
-    assert!(ImageLaunch::Bootstrap.is_bootstrap());
-    assert_eq!(ImageLaunch::Bootstrap.startup(), None);
+    assert!(ImageLaunch::Bootstrap(None).is_bootstrap());
+    assert_eq!(ImageLaunch::Bootstrap(None).startup(), None);
+    assert!(ImageLaunch::Bootstrap(Some(startup)).is_bootstrap());
+    assert_eq!(
+        ImageLaunch::Bootstrap(Some(startup)).startup(),
+        Some(startup)
+    );
 }
 
 #[test]
