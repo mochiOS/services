@@ -2,6 +2,26 @@
 use mochios_posix_client::{Client, ClientError, Transport, newlib_errno::*};
 use mochios_posix_protocol::{self as posix_protocol, account as wire};
 use std::ffi::{c_char, c_int};
+use std::ptr;
+struct RuntimeMutex<T>(std::sync::Mutex<T>);
+impl<T> RuntimeMutex<T> {
+    const fn new(value: T) -> Self {
+        Self(std::sync::Mutex::new(value))
+    }
+    fn lock(&self) -> std::sync::MutexGuard<'_, T> {
+        self.0.lock().unwrap()
+    }
+}
+struct State {
+    passwd: actual::Cache,
+}
+static STATE: RuntimeMutex<State> = RuntimeMutex::new(State {
+    passwd: actual::Cache::new(),
+});
+thread_local! { static ERRNO: std::cell::Cell<i32> = const { std::cell::Cell::new(0) }; }
+fn set_errno(error: c_int) {
+    ERRNO.set(error);
+}
 #[path = "../../../user/crates/newlib-runtime/src/passwd.rs"]
 mod actual;
 #[path = "../../../user/crates/newlib-runtime/src/user_copy.rs"]
@@ -25,7 +45,7 @@ impl Transport for Accounts {
         if error == 32 {
             return Err(32);
         }
-        let status = if error != 0 {
+        let status = if error > 0 {
             -error
         } else if !found {
             -2
@@ -36,8 +56,8 @@ impl Transport for Accounts {
         let n = if status == 0 {
             wire::encode_record(
                 wire::Record {
-                    uid: 1000,
-                    gid: 20,
+                    uid: if error == -1 { 65536 } else { 1000 },
+                    gid: if error == -2 { 65536 } else { 20 },
                     name: "testuser",
                     display_name: "テスト利用者",
                     home: "/home/testuser",
@@ -97,8 +117,9 @@ fn actual_reentrant_calls_publish_c_layout_and_strings_in_the_callers_buffer() {
     );
     assert_eq!(result, output);
     assert_eq!((first[0], first[57]), (0xa5, 0xa5));
-    assert_eq!(u32::from_ne_bytes(first[17..21].try_into().unwrap()), 1000);
-    assert_eq!(u32::from_ne_bytes(first[21..25].try_into().unwrap()), 20);
+    assert_eq!(u16::from_ne_bytes(first[17..19].try_into().unwrap()), 1000);
+    assert_eq!(u16::from_ne_bytes(first[19..21].try_into().unwrap()), 20);
+    assert_eq!(&first[21..25], &[0; 4]);
     for (offset, expected) in [
         (0, "testuser"),
         (8, "x"),
@@ -180,7 +201,7 @@ fn range_missing_service_error_and_bad_pointers_return_an_error_code_without_fak
         assert_eq!(output, [0xa5; 56]);
     }
     assert_eq!(
-        unsafe { actual::getpwuid_r(u32::MAX, target, std::ptr::null_mut(), 0, &mut result) },
+        unsafe { actual::getpwuid_r(u16::MAX, target, std::ptr::null_mut(), 0, &mut result) },
         0
     );
     for (buffer, result_pointer) in [
@@ -205,4 +226,55 @@ fn range_missing_service_error_and_bad_pointers_return_an_error_code_without_fak
         EFAULT
     );
     assert_eq!(output, [0xa5; 56]);
+}
+
+#[test]
+fn unrepresentable_account_ids_are_rejected_before_publishing_any_storage() {
+    for mode in [-1, -2] {
+        MODE.set(mode);
+        let mut output = [0xa5; 56];
+        let mut text = [0x5a; 256];
+        let mut result = output.as_mut_ptr().cast();
+        assert_eq!(
+            unsafe {
+                actual::getpwnam_r(
+                    c"testuser".as_ptr(),
+                    output.as_mut_ptr().cast(),
+                    text.as_mut_ptr().cast(),
+                    text.len(),
+                    &mut result,
+                )
+            },
+            EOVERFLOW
+        );
+        assert!(result.is_null());
+        assert_eq!(output, [0xa5; 56]);
+        assert_eq!(text, [0x5a; 256]);
+    }
+}
+
+#[test]
+fn nonreentrant_calls_reuse_owned_storage_preserve_errno_and_report_real_failures() {
+    ERRNO.set(71);
+    MODE.set(0);
+    let first = unsafe { actual::getpwuid(1000) };
+    assert!(!first.is_null());
+    let name = unsafe { first.cast::<*const c_char>().read() };
+    assert_eq!(
+        unsafe { std::ffi::CStr::from_ptr(name) }.to_bytes(),
+        b"testuser"
+    );
+    // A pointer returned by the previous call is a valid lookup input.
+    assert_eq!(unsafe { actual::getpwnam(name) }, first);
+    assert_eq!(ERRNO.get(), 71);
+    assert!(unsafe { actual::getpwuid(65000) }.is_null());
+    assert_eq!(ERRNO.get(), 71);
+    for error in [EIO, EACCES, 32] {
+        MODE.set(error);
+        assert!(unsafe { actual::getpwuid(1000) }.is_null());
+        assert_eq!(ERRNO.get(), error);
+    }
+    MODE.set(0);
+    assert!(unsafe { actual::getpwnam(1usize as *const c_char) }.is_null());
+    assert_eq!(ERRNO.get(), EFAULT);
 }
