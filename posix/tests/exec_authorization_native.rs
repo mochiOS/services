@@ -193,10 +193,16 @@ fn main(){
         let n=reset("image-install",b"fs.read.all");TARGET.set(if endpoint==0{23}else{41});revision_field("1");REVOKE_MANAGE.set(true);
         check(endpoint,n,Error::AccessDenied.into_raw());assert_eq!(WRITES.get(),0);
     }
-    for value in ["","0","-1","+1","18446744073709551616","x"] {
+    for value in ["","-1","+1","18446744073709551616","x"] {
         let n=reset("image-install",b"");revision_field(value);check(0,n,Error::InvalidArgument.into_raw());assert_eq!(WRITES.get(),0);
     }
     let n=reset("image-install",b"");check(0,n,Error::InvalidArgument.into_raw());assert_eq!(WRITES.get(),0);
+    for endpoint in [0,123] {
+        let n=reset("image-install",b"fs.read.all");IMAGE_REVISION.set(0);GRANTED.set(0);TARGET.set(if endpoint==0{23}else{41});revision_field("0");
+        check(endpoint,n,0);assert_eq!(WRITES.get(),1);assert_eq!(GRANTED.get(),0);
+        let n=reset("image-install",b"fs.read.all");IMAGE_REVISION.set(0);TARGET.set(if endpoint==0{23}else{41});revision_field("0");DIGEST_PRESENT.set(false);
+        check(endpoint,n,Error::AccessDenied.into_raw());assert_eq!(WRITES.get(),0);
+    }
     let n=reset("image-install",b"");revision_field("1");revision_field("1");check(0,n,Error::InvalidArgument.into_raw());assert_eq!(WRITES.get(),0);
     for kind in ["spawn","image-replace"] {let n=reset(kind,b"");revision_field("1");check(0,n,Error::InvalidArgument.into_raw());assert_eq!(WRITES.get(),0);}
     let n=reset("image-install",b"memory.phys.map@0x1000:4096");revision_field("1");check(0,n,Error::AccessDenied.into_raw());assert_eq!(WRITES.get(),0);

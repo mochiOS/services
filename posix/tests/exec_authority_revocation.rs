@@ -61,6 +61,12 @@ fn mutate(p:&mut Process, operation:u8) {match operation {
   _ => p.set_kernel_authorities_for_exec(Grants(7)),
  }}
 fn main(){
+ for measured in [false,true] {
+  let mut p=process(0,0,permit(7,0,PendingExecKind::ImageInstall{image_revision:0}));
+  p.image_revision=0;if !measured {p.image_digest=None;}
+  assert_eq!(p.take_exec_authorization("opaque-image-key",11).is_some(),measured);
+  assert_eq!(p.capabilities,Grants(0));assert_eq!(p.kernel_authorities,Grants(0));
+ }
  for held in 0..8 {for desired in 0..8 {for revision in [0,1,2] {for native_desired in 0..8 {
   let mut p=process(held,7,permit(desired,native_desired,PendingExecKind::ImageInstall{image_revision:revision}));
   let expected=revision==1 && native_desired==0;
