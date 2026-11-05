@@ -40,6 +40,9 @@ mod execution_requests;
 #[allow(dead_code)]
 #[path = "../../capability/src/execution_frontend.rs"]
 mod execution_frontend;
+#[allow(dead_code)]
+#[path = "../../capability/src/text_evidence.rs"]
+mod text_evidence;
 #[path = "support/execution_frontend_364.rs"]
 mod frontend_handoff;
 #[allow(dead_code)]

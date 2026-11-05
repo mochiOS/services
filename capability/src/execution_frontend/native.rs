@@ -40,11 +40,53 @@ impl Authority for Native<'_> {
         }
     }
     fn requester_kind(&self, peer: &Peer) -> Result<Kind, SysError> {
-        Ok(if self.trusted.role(peer)? == Some(Role::TextPrompt) {
+        self.current(peer)?;
+        let process = crate::consent_peer::ProcessReference(p::process::open_handle_for_endpoint(
+            peer.instance.endpoint,
+            p::handle::HANDLE_RIGHT_WAIT | p::handle::HANDLE_RIGHT_TRANSFER,
+        )?);
+        if !p::handle::same_object(process.0, peer.process.0)? {
+            return Err(denied());
+        }
+        let terminal = crate::persistent_grant::with_client(|client| {
+            client.process_has_terminal(mochios_posix_client::ObjectHandleAttachment {
+                handle: process.0,
+                rights: p::handle::HANDLE_RIGHT_WAIT,
+            })
+        })?;
+        self.current(peer)?;
+        Ok(if terminal || self.trusted.role(peer)? == Some(Role::TextPrompt) {
             Kind::Text
         } else {
             Kind::Graphical
         })
+    }
+    fn text_matches(&self, master: u32, requester: &Peer) -> Result<bool, SysError> {
+        self.current(requester)?;
+        let process = crate::consent_peer::ProcessReference(p::process::open_handle_for_endpoint(
+            requester.instance.endpoint,
+            p::handle::HANDLE_RIGHT_WAIT | p::handle::HANDLE_RIGHT_TRANSFER,
+        )?);
+        if !p::handle::same_object(process.0, requester.process.0)? {
+            return Err(denied());
+        }
+        let included = crate::persistent_grant::with_client(|client| {
+            client.terminal_process_foreground(
+                mochios_posix_client::ObjectHandleAttachment {
+                    handle: master,
+                    rights: p::handle::HANDLE_RIGHT_CONTROL | p::handle::HANDLE_RIGHT_TRANSFER,
+                },
+                mochios_posix_client::ObjectHandleAttachment {
+                    handle: process.0,
+                    rights: p::handle::HANDLE_RIGHT_WAIT,
+                },
+            )
+        })?;
+        self.current(requester)?;
+        Ok(included)
+    }
+    fn same_terminal(&self, left: u32, right: u32) -> Result<bool, SysError> {
+        p::handle::same_object(left, right)
     }
     fn current(&self, expected: &Peer) -> Result<(), SysError> {
         let current = consent_peer::capture(expected.instance.endpoint)?;

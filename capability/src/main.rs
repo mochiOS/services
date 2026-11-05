@@ -17,6 +17,7 @@ mod execution_approval;
 mod execution_requests;
 mod execution_frontend;
 mod execution_grant;
+mod text_evidence;
 mod bootstrap_file;
 mod dynamic_grant;
 mod consent;

@@ -50,7 +50,7 @@ fn dispatch_captured(
     controller: &mut crate::consent::Controller,
     frontends: &mut crate::execution_frontend::Frontends,
     authority: &mut impl crate::execution_frontend::Authority,
-) -> Result<Option<(crate::consent::Offer, u64)>, mochi_user_syscall::SysError> {
+) -> Result<Option<(crate::consent::Offer, Option<u64>)>, mochi_user_syscall::SysError> {
     if !captured.selection.needs_consent(policy) {
         captured.authorize(policy)?;
         return Ok(None);
@@ -83,8 +83,11 @@ fn deliver_prompt(
     frontends: &mut crate::execution_frontend::Frontends,
     authority: &mut impl crate::execution_frontend::Authority,
     offer: crate::consent::Offer,
-    destination: u64,
+    destination: Option<u64>,
 ) {
+    let Some(destination) = destination else {
+        return;
+    };
     let result = (|| {
         let mut bytes = [0; platform::capability::consent::prompt::MAX_MESSAGE_BYTES];
         let length = requests.write_prompt(
@@ -509,6 +512,7 @@ pub(crate) fn serve_capability_requests(mut state: CapabilityServiceState) -> ! 
                     .map_err(|_| {
                         mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EACCES as i64)
                     })?;
+                frontends.observe_text_input(event);
                 #[cfg(mochios_consent_input_probe_306)]
                 if let Some(probe) = input_probe.as_mut() {
                     if probe
@@ -540,6 +544,67 @@ pub(crate) fn serve_capability_requests(mut state: CapabilityServiceState) -> ! 
             capability_reply(sender, status);
             continue;
         }
+        if opcode == platform::capability::consent::frontend::TEXT_POLL_OPCODE
+            || opcode == platform::capability::consent::frontend::TEXT_RELEASE_OPCODE
+        {
+            use platform::capability::consent::{frontend as wire, prompt};
+            let mut output = [0; prompt::MAX_MESSAGE_BYTES];
+            let result = (|| {
+                let release = wire::decode_text_poll(slice)
+                    .map_err(|_| mochi_user_syscall::SysError::from_raw(-22))?;
+                if !attached.is_user_delivery()
+                    || attached.count != 1
+                    || attached.handles[0].handle == 0
+                    || attached.handles[0].reserved != 0
+                    || attached.handles[0].rights
+                        != (platform::handle::HANDLE_RIGHT_CONTROL
+                            | platform::handle::HANDLE_RIGHT_TRANSFER)
+                {
+                    return Err(mochi_user_syscall::SysError::from_raw(-22));
+                }
+                let peer = crate::consent_peer::capture(sender)?;
+                let mut authority = crate::execution_frontend::native::Native {
+                    trusted: &state.trusted_images,
+                    sessions: &desktop_sessions,
+                    display: display_authority.as_ref(),
+                    input: input_authority.as_mut(),
+                };
+                if release {
+                    frontends.release_text(
+                        &mut execution_requests,
+                        &mut state.consent,
+                        &peer,
+                        attached.handles[0].handle,
+                        &mut authority,
+                        retained_reply,
+                    )?;
+                    Ok(None)
+                } else {
+                    let master = crate::consent_peer::ProcessReference(attached.handles[0].handle);
+                    attached.handles[0].handle = 0;
+                    match frontends.poll_text(peer, master, &authority)? {
+                        Some(correlation) => execution_requests
+                            .write_prompt(
+                                correlation,
+                                frontends.presenter_instance(correlation)?,
+                                platform::time::monotonic_nanoseconds()?,
+                                &mut output,
+                            )
+                            .map(Some),
+                        None => Ok(None),
+                    }
+                }
+            })();
+            close_received_handles(&attached);
+            match result {
+                Ok(Some(length)) => {
+                    let _ = platform::ipc::reply(sender, &output[..length]);
+                }
+                Ok(None) => capability_reply(sender, REPLY_OK),
+                Err(reason) => capability_reply(sender, error_status(reason)),
+            }
+            continue;
+        }
         if opcode == platform::capability::consent::frontend::WAIT_OPCODE
             || opcode == platform::capability::consent::frontend::COMMAND_OPCODE
         {
@@ -558,6 +623,9 @@ pub(crate) fn serve_capability_requests(mut state: CapabilityServiceState) -> ! 
                 if opcode == wire::WAIT_OPCODE {
                     let kind = wire::decode_wait(slice)
                         .map_err(|_| mochi_user_syscall::SysError::from_raw(-22))?;
+                    if kind != wire::Kind::Graphical {
+                        return Err(mochi_user_syscall::SysError::from_raw(-22));
+                    }
                     frontends.wait(peer, kind, &authority)?;
                     Ok(true)
                 } else {

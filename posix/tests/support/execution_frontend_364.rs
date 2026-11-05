@@ -21,6 +21,8 @@ fn route() -> InputRoute {
     }
 }
 struct NativeObservations {
+    text: bool,
+    foreground: bool,
     trusted: bool,
     alive: bool,
     member: bool,
@@ -34,6 +36,8 @@ struct NativeObservations {
 impl Default for NativeObservations {
     fn default() -> Self {
         Self {
+            text: false,
+            foreground: true,
             trusted: true,
             alive: true,
             member: true,
@@ -51,7 +55,10 @@ fn error(error: NativeError) -> SysError {
 }
 impl Authority for NativeObservations {
     fn presenter(&self, peer: &consent_peer::Peer, kind: Kind) -> Result<(), SysError> {
-        if self.trusted && peer.instance == approvals::instance(2) && kind == Kind::Graphical {
+        if self.trusted
+            && peer.instance == approvals::instance(2)
+            && (kind == Kind::Graphical || self.text && kind == Kind::Text)
+        {
             Ok(())
         } else {
             Err(error(NativeError::AccessDenied))
@@ -59,6 +66,15 @@ impl Authority for NativeObservations {
     }
     fn requester_kind(&self, _: &consent_peer::Peer) -> Result<Kind, SysError> {
         Ok(Kind::Graphical)
+    }
+    fn text_matches(&self, master: u32, requester: &consent_peer::Peer) -> Result<bool, SysError> {
+        Ok(self.text
+            && self.foreground
+            && master == 401
+            && requester.instance != approvals::instance(2))
+    }
+    fn same_terminal(&self, a: u32, b: u32) -> Result<bool, SysError> {
+        Ok(a == b)
     }
     fn current(&self, _: &consent_peer::Peer) -> Result<(), SysError> {
         if self.alive {
@@ -158,7 +174,7 @@ fn begin_at(
             authority,
         )
         .unwrap();
-    assert_eq!(destination, 2);
+    assert_eq!(destination, if authority.text { None } else { Some(2) });
     offer
 }
 fn command(
@@ -743,4 +759,166 @@ fn dead_presenter_cancels_the_source_and_wait_plan_keeps_native_refs() {
     let mut watched = Vec::new();
     frontends.process_handles(|handle| watched.push(handle));
     assert!(watched.is_empty());
+}
+
+#[test]
+fn text_offer_is_bound_to_its_controller_and_requires_matching_physical_choice() {
+    let (mut frontends, mut registry, mut controller, mut authority) = initialized();
+    authority.text = true;
+    assert_eq!(
+        frontends
+            .poll_text(renderer(), consent_peer::ProcessReference(401), &authority)
+            .unwrap(),
+        None
+    );
+    let offer = begin(
+        &mut frontends,
+        &mut registry,
+        &mut controller,
+        &mut authority,
+    );
+    assert_eq!(
+        frontends
+            .poll_text(renderer(), consent_peer::ProcessReference(401), &authority)
+            .unwrap(),
+        Some(offer.correlation)
+    );
+    assert!(
+        frontends
+            .poll_text(renderer(), consent_peer::ProcessReference(402), &authority)
+            .is_err()
+    );
+    let mut replies = Vec::new();
+    command(
+        &mut frontends,
+        &mut registry,
+        &mut controller,
+        &mut authority,
+        offer,
+        Command::Presented,
+        3,
+        &mut replies,
+    )
+    .unwrap();
+    use platform_real::capability::input_authority as input;
+    for (serial, control, transition) in [
+        (21, 0x1e, input::Transition::PhysicalPress),
+        (22, 0x1e, input::Transition::AllReleased),
+        (23, 0x1c, input::Transition::PhysicalPress),
+    ] {
+        let event = input::Event {
+            generation: 8,
+            correlation: offer.correlation,
+            observation: input::Observation {
+                serial,
+                control,
+                transition,
+            },
+        };
+        controller
+            .input(
+                route().source,
+                offer.correlation,
+                route(),
+                serial,
+                transition.into(),
+                110,
+            )
+            .unwrap();
+        frontends.observe_text_input(event);
+    }
+    // A physical 'a' + Enter cannot be reinterpreted as Allow Once.
+    assert!(
+        command(
+            &mut frontends,
+            &mut registry,
+            &mut controller,
+            &mut authority,
+            offer,
+            Command::Decide(Choice::AllowOnce),
+            3,
+            &mut replies
+        )
+        .is_err()
+    );
+    no_issue();
+    command(
+        &mut frontends,
+        &mut registry,
+        &mut controller,
+        &mut authority,
+        offer,
+        Command::Decide(Choice::AllowPersistently),
+        3,
+        &mut replies,
+    )
+    .unwrap();
+    assert_eq!(replies.len(), 1);
+    assert_eq!(replies[0].result, Ok(()));
+    STATE.with_borrow(|state| {
+        assert_eq!(state.issue_calls, 1);
+        assert_eq!(state.grant_writes, 1);
+        assert_eq!(state.issued_caps[0], b"net.connect\0");
+    });
+}
+
+#[test]
+fn terminal_foreground_change_or_explicit_withdrawal_cancels_the_retained_execution() {
+    for change_foreground in [false, true] {
+        let (mut frontends, mut registry, mut controller, mut authority) = initialized();
+        authority.text = true;
+        frontends
+            .poll_text(renderer(), consent_peer::ProcessReference(401), &authority)
+            .unwrap();
+        let offer = begin(
+            &mut frontends,
+            &mut registry,
+            &mut controller,
+            &mut authority,
+        );
+        let mut replies = Vec::new();
+        command(
+            &mut frontends,
+            &mut registry,
+            &mut controller,
+            &mut authority,
+            offer,
+            Command::Presented,
+            3,
+            &mut replies,
+        )
+        .unwrap();
+        if change_foreground {
+            authority.foreground = false;
+            assert!(
+                command(
+                    &mut frontends,
+                    &mut registry,
+                    &mut controller,
+                    &mut authority,
+                    offer,
+                    Command::Decide(Choice::AllowOnce),
+                    3,
+                    &mut replies
+                )
+                .is_err()
+            );
+        } else {
+            frontends
+                .release_text(
+                    &mut registry,
+                    &mut controller,
+                    &renderer(),
+                    401,
+                    &mut authority,
+                    |reply| replies.push(reply),
+                )
+                .unwrap();
+        }
+        assert_eq!(replies.len(), 1);
+        assert!(replies[0].result.is_err());
+        assert_eq!(registry.len(), 0);
+        assert_eq!(controller.len(), 0);
+        no_issue();
+    }
 }

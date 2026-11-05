@@ -47,6 +47,26 @@ fn text_and_graphical_presenters_receive_one_exact_broker_description() {
 }
 
 #[test]
+fn terminal_poll_and_release_have_strict_bounded_frames_and_no_scalar_authority() {
+    use mochios_capability_protocol::consent::frontend as w;
+    for release in [false, true] {
+        let bytes = w::encode_text_poll(release);
+        assert_eq!(w::decode_text_poll(&bytes), Ok(release));
+        for len in 0..bytes.len() {
+            assert!(w::decode_text_poll(&bytes[..len]).is_err());
+        }
+        for pos in 4..bytes.len() {
+            let mut invalid = bytes;
+            invalid[pos] ^= 0x80;
+            assert!(w::decode_text_poll(&invalid).is_err());
+        }
+        let mut extended = bytes.to_vec();
+        extended.push(0);
+        assert!(w::decode_text_poll(&extended).is_err());
+    }
+}
+
+#[test]
 fn always_shortcut_is_available_only_when_offered_and_is_never_allow_all() {
     assert_eq!(prompt().choice_for_shortcut(b'a'), None);
     assert_eq!(prompt().choice_for_shortcut(b'y'), Some(Choice::AllowOnce));

@@ -40,6 +40,8 @@ pub(crate) struct Witness {
 pub(crate) trait Authority {
     fn presenter(&self, peer: &Peer, kind: Kind) -> Result<(), SysError>;
     fn requester_kind(&self, peer: &Peer) -> Result<Kind, SysError>;
+    fn text_matches(&self, master: u32, requester: &Peer) -> Result<bool, SysError>;
+    fn same_terminal(&self, left: u32, right: u32) -> Result<bool, SysError>;
     fn current(&self, peer: &Peer) -> Result<(), SysError>;
     fn session(&self, peer: &Peer) -> Result<Session, SysError>;
     fn route(&self) -> Result<InputRoute, SysError>;
@@ -66,16 +68,24 @@ struct Active {
     route: InputRoute,
     offer: Offer,
     armed: bool,
+    terminal: Option<crate::consent_peer::ProcessReference>,
+    text_input: crate::text_evidence::Evidence,
+}
+struct TextWaiter {
+    peer: Peer,
+    master: crate::consent_peer::ProcessReference,
 }
 pub(crate) struct Frontends {
     idle: [Option<Peer>; 2],
     active: Option<Active>,
+    text: Vec<TextWaiter>,
 }
 impl Frontends {
     pub(crate) fn new() -> Self {
         Self {
             idle: [None, None],
             active: None,
+            text: Vec::new(),
         }
     }
     fn index(kind: Kind) -> usize {
@@ -104,6 +114,90 @@ impl Frontends {
         *slot = Some(peer);
         Ok(())
     }
+    pub(crate) fn poll_text(
+        &mut self,
+        peer: Peer,
+        master: crate::consent_peer::ProcessReference,
+        authority: &impl Authority,
+    ) -> Result<Option<Correlation>, SysError> {
+        authority.presenter(&peer, Kind::Text)?;
+        authority.current(&peer)?;
+        // A valid false query authenticates the provider/controller object;
+        // the Terminal UI process need not itself have a controlling terminal.
+        let _ = authority.text_matches(master.0, &peer)?;
+        if let Some(active) = &self.active {
+            if active.peer.instance == peer.instance && active.terminal.is_some() {
+                if authority.same_terminal(active.terminal.as_ref().unwrap().0, master.0)? {
+                    return Ok(Some(active.offer.correlation));
+                }
+                return Err(busy());
+            }
+        }
+        for waiter in &self.text {
+            if waiter.peer.instance == peer.instance {
+                return if authority.same_terminal(waiter.master.0, master.0)? {
+                    Ok(None)
+                } else {
+                    Err(busy())
+                };
+            }
+        }
+        if self.text.len() == 16 {
+            return Err(busy());
+        }
+        self.text
+            .try_reserve(1)
+            .map_err(|_| error(NativeError::ResourceUnavailable))?;
+        self.text.push(TextWaiter { peer, master });
+        Ok(None)
+    }
+    pub(crate) fn release_text(
+        &mut self,
+        registry: &mut Registry,
+        controller: &mut Controller,
+        peer: &Peer,
+        master: u32,
+        authority: &mut impl Authority,
+        emit: impl FnMut(Reply),
+    ) -> Result<(), SysError> {
+        authority.presenter(peer, Kind::Text)?;
+        if let Some(active) = &self.active {
+            if active.peer.instance == peer.instance {
+                if let Some(terminal) = &active.terminal {
+                    if authority.same_terminal(terminal.0, master)? {
+                        self.cancel(
+                            registry,
+                            controller,
+                            NativeError::AccessDenied,
+                            authority,
+                            emit,
+                        );
+                        return Ok(());
+                    }
+                }
+            }
+        }
+        for index in 0..self.text.len() {
+            let waiter = &self.text[index];
+            if waiter.peer.instance == peer.instance
+                && authority.same_terminal(waiter.master.0, master)?
+            {
+                self.text.remove(index);
+                break;
+            }
+        }
+        Ok(())
+    }
+    pub(crate) fn observe_text_input(&mut self, event: p::capability::input_authority::Event) {
+        if let Some(active) = self.active.as_mut() {
+            if active.armed
+                && active.terminal.is_some()
+                && active.offer.correlation == event.correlation
+            {
+                active.text_input.observe(event.observation);
+            }
+        }
+    }
     pub(crate) fn begin(
         &mut self,
         reservation: Reservation<'_>,
@@ -115,13 +209,28 @@ impl Frontends {
         generation: u64,
         now: u64,
         authority: &mut impl Authority,
-    ) -> Result<(Offer, u64), SysError> {
+    ) -> Result<(Offer, Option<u64>), SysError> {
         if self.active.is_some() {
             return Err(busy());
         }
-        let kind = authority.requester_kind(&requester)?;
+        let mut text_index = None;
+        for (index, waiter) in self.text.iter().enumerate() {
+            if authority.text_matches(waiter.master.0, &requester)? {
+                if text_index.replace(index).is_some() {
+                    return Err(denied());
+                }
+            }
+        }
+        let kind = if text_index.is_some() {
+            Kind::Text
+        } else {
+            authority.requester_kind(&requester)?
+        };
         let slot = Self::index(kind);
-        let peer = self.idle[slot].as_ref().ok_or_else(busy)?;
+        let peer = match text_index {
+            Some(index) => &self.text[index].peer,
+            None => self.idle[slot].as_ref().ok_or_else(busy)?,
+        };
         authority.presenter(peer, kind)?;
         authority.current(peer)?;
         let session = authority.session(&requester)?;
@@ -151,8 +260,13 @@ impl Frontends {
                 return Err(reason);
             }
         };
-        let peer = self.idle[slot].take().unwrap();
-        let destination = peer.instance.endpoint;
+        let (peer, terminal) = if let Some(index) = text_index {
+            let waiter = self.text.remove(index);
+            (waiter.peer, Some(waiter.master))
+        } else {
+            (self.idle[slot].take().unwrap(), None)
+        };
+        let destination = terminal.is_none().then_some(peer.instance.endpoint);
         self.active = Some(Active {
             peer,
             requester,
@@ -160,6 +274,8 @@ impl Frontends {
             route,
             offer,
             armed: false,
+            terminal,
+            text_input: crate::text_evidence::Evidence::default(),
         });
         Ok((offer, destination))
     }
@@ -205,6 +321,8 @@ impl Frontends {
                 }
             }
         }
+        self.text
+            .retain(|waiter| authority.current(&waiter.peer).is_ok());
         if self.active.as_ref().is_some_and(|active| {
             !registry.contains(active.offer.correlation) || authority.current(&active.peer).is_err()
         }) {
@@ -218,6 +336,9 @@ impl Frontends {
         }
     }
     pub(crate) fn process_handles(&self, mut emit: impl FnMut(u32)) {
+        for waiter in &self.text {
+            emit(waiter.peer.process.0);
+        }
         for peer in self.idle.iter().flatten() {
             emit(peer.process.0);
         }
@@ -279,6 +400,18 @@ impl Frontends {
                 return Err(reason);
             }
         };
+        if let Some(master) = &active.terminal {
+            if !authority.text_matches(master.0, &witness.requester)? {
+                self.cancel(
+                    registry,
+                    controller,
+                    NativeError::AccessDenied,
+                    authority,
+                    emit,
+                );
+                return Err(denied());
+            }
+        }
         if action == Action::Presented {
             if active.armed {
                 authority.synchronized()?;
@@ -335,6 +468,7 @@ impl Frontends {
                 return Err(denied());
             }
             self.active.as_mut().unwrap().armed = true;
+            self.active.as_mut().unwrap().text_input.arm(released);
             return Ok(());
         }
         if !active.armed {
@@ -344,6 +478,9 @@ impl Frontends {
         let Action::Decide(choice) = action else {
             unreachable!()
         };
+        if active.terminal.is_some() && !active.text_input.accepts(choice) {
+            return Err(busy());
+        }
         let approval =
             match controller.propose(peer.instance, correlation, choice, witness.current, now) {
                 Ok(Outcome::Approved(approval)) => approval,
