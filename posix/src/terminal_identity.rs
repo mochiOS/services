@@ -2,6 +2,33 @@
 use crate::pty::PtyManager;
 use mnu_abi::{HANDLE_RIGHT_TRANSFER, IpcObjectHandles};
 
+/// Controller observations require a master CONTROL reference, never a slave
+/// or a guessed provider object ID. This does not read terminal input/output.
+pub fn lookup_master(
+    manager: &PtyManager,
+    attached: &IpcObjectHandles,
+    identify: impl FnOnce(u32) -> Result<u64, i64>,
+) -> Result<u64, i32> {
+    if attached.delivery_flags != mnu_abi::IPC_DELIVERY_ENDPOINT_HANDLE {
+        return Err(13);
+    }
+    if attached.count != 1 {
+        return Err(22);
+    }
+    let source = attached.handles[0];
+    if source.handle == 0
+        || source.reserved != 0
+        || source.rights != (mnu_abi::HANDLE_RIGHT_CONTROL | HANDLE_RIGHT_TRANSFER)
+    {
+        return Err(13);
+    }
+    let id = identify(source.handle)
+        .map_err(|error| -mochios_posix_protocol::status::normalize_failure(error))?;
+    manager
+        .master_terminal_id(id)
+        .map_err(|error| if error == 9 { 25 } else { error })
+}
+
 /// Positive wire errno. Native identification is meaningful only on the
 /// creating provider endpoint; a foreign provider is a valid non-terminal,
 /// not a bad process-local FD. No inline object ID or sender claim is accepted.

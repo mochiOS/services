@@ -17,6 +17,9 @@ mod child_cpu_state;
 #[path = "support/process_domain.rs"]
 mod process_domain;
 
+#[path = "support/terminal_process.rs"]
+mod terminal_process;
+
 #[path = "support/orphan_group_transition.rs"]
 mod orphan_group_transition;
 

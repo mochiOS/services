@@ -22,6 +22,7 @@ pub mod pty_master;
 pub mod pty_grant;
 pub mod pty_grant_ipc;
 pub mod terminal_identity;
+mod terminal_process;
 pub mod terminal_namespace;
 pub mod terminal_publication;
 pub mod named_semaphore;
@@ -4010,6 +4011,8 @@ impl<H: Copy> PosixService<H> {
             | protocol::OP_TIMER_CREATE_PROCESS_CPU
             | protocol::OP_PROCESS_SPAWNED
             | protocol::OP_PROCESS_SESSION_INFO
+            | protocol::OP_TERMINAL_PROCESS_FOREGROUND
+            | protocol::OP_PROCESS_HAS_TERMINAL
             | protocol::process_domain::OP_CREATE
             | protocol::process_domain::OP_CONTAINS
             | protocol::process_domain::OP_SPAWN

@@ -65,6 +65,7 @@ const PTY_SYNC_MAGIC: [u8; 4] = *b"PTYS";
 
 #[cfg(target_os = "mochios")]
 const PTY_IDENTIFY_MAGIC: [u8; 4] = *b"PTYI";
+const PTY_MASTER_IDENTIFY_MAGIC: [u8; 4] = *b"PTYM";
 
 #[cfg(target_os = "mochios")]
 const PTY_WAKE_MAGIC: [u8; 4] = *b"PTYW";
@@ -549,6 +550,27 @@ fn main() {
         }
         // Do not hold POSIX state across provider RPC: concurrent terminal I/O
         // must be able to acquire that same state to authorize its caller.
+        let identified_controller = if peer.is_some()
+            && attachments_valid
+            && attachments.len() == 2
+            && attachments[0].rights
+                == (platform::handle::HANDLE_RIGHT_CONTROL
+                    | platform::handle::HANDLE_RIGHT_TRANSFER)
+            && attachments[1].rights == platform::handle::HANDLE_RIGHT_WAIT
+            && decoded.is_some_and(|(header, payload)| {
+                header.opcode == protocol::OP_TERMINAL_PROCESS_FOREGROUND
+                    && header.flags == 0
+                    && header.status == 0
+                    && payload.is_empty()
+            }) {
+            Some(identify_pty_object(
+                provider_endpoint_handle,
+                attachments[0].handle,
+                true,
+            ))
+        } else {
+            None
+        };
         let identified_terminal = if peer.is_some()
             && attachments_valid
             && attachments.len() == 1
@@ -1662,6 +1684,62 @@ fn main() {
                 })
             }
             (Some(peer), Some((header, payload)), true)
+                if header.opcode == protocol::OP_PROCESS_HAS_TERMINAL
+                    && header.flags == 0
+                    && header.status == 0
+                    && payload.is_empty()
+                    && attachments.len() == 1 =>
+            {
+                let result = posix_service::process_domain_native::authenticate(attachments[0])
+                    .and_then(|process| {
+                        service.process_has_terminal(peer, process, |a, b| {
+                            platform::handle::same_object(a, b)
+                                .map_err(|e| protocol::status::normalize_failure(e.raw()))
+                        })
+                    });
+                let response = match result {
+                    Ok(included) => posix_service::Response {
+                        header: protocol::Header {
+                            payload_len: 1,
+                            ..success_response(header.request_id).header
+                        },
+                        payload: vec![u8::from(included)],
+                    },
+                    Err(status) => status_response(header.request_id, status),
+                };
+                Some(posix_service::ObjectResponse {
+                    response,
+                    handles: Vec::new(),
+                })
+            }
+            (Some(peer), Some((header, _)), true)
+                if header.opcode == protocol::OP_TERMINAL_PROCESS_FOREGROUND
+                    && identified_controller.is_some() =>
+            {
+                let result = identified_controller.unwrap().and_then(|terminal| {
+                    let process =
+                        posix_service::process_domain_native::authenticate(attachments[1])?;
+                    service.terminal_process_foreground(peer, process, terminal, |a, b| {
+                        platform::handle::same_object(a, b)
+                            .map_err(|error| protocol::status::normalize_failure(error.raw()))
+                    })
+                });
+                let response = match result {
+                    Ok(included) => posix_service::Response {
+                        header: protocol::Header {
+                            payload_len: 1,
+                            ..success_response(header.request_id).header
+                        },
+                        payload: vec![u8::from(included)],
+                    },
+                    Err(status) => status_response(header.request_id, status),
+                };
+                Some(posix_service::ObjectResponse {
+                    response,
+                    handles: Vec::new(),
+                })
+            }
+            (Some(peer), Some((header, payload)), true)
                 if matches!(
                     header.opcode,
                     protocol::OP_TERMINAL_ACQUIRE
@@ -2152,6 +2230,28 @@ fn run_pty_provider(
             );
             continue;
         }
+        if request[..request_length] == PTY_MASTER_IDENTIFY_MAGIC {
+            let status = ptys
+                .lock()
+                .map_err(|_| 5)
+                .and_then(|manager| {
+                    posix_service::terminal_identity::lookup_master(
+                        &manager,
+                        &attachments,
+                        |handle| {
+                            platform::handle::identify_provider_object(handle)
+                                .map_err(|error| error.raw())
+                        },
+                    )
+                })
+                .and_then(|id| i64::try_from(id).map_err(|_| 75))
+                .unwrap_or_else(|errno| -i64::from(errno));
+            for attachment in attachments.handles.iter().take(count) {
+                let _ = platform::handle::close(attachment.handle);
+            }
+            let _ = platform::ipc::reply(sender, &status.to_le_bytes());
+            continue;
+        }
         if request[..request_length] == PTY_IDENTIFY_MAGIC {
             let status = ptys
                 .lock()
@@ -2306,6 +2406,11 @@ fn notify_terminal_signal(
 
 #[cfg(target_os = "mochios")]
 fn identify_pty_terminal(endpoint: u32, terminal: u32) -> Result<u64, i32> {
+    identify_pty_object(endpoint, terminal, false)
+}
+
+#[cfg(target_os = "mochios")]
+fn identify_pty_object(endpoint: u32, terminal: u32, master: bool) -> Result<u64, i32> {
     use mochi_user_platform as platform;
 
     let mut attachments = platform::ipc::IpcObjectHandles::default();
@@ -2313,12 +2418,21 @@ fn identify_pty_terminal(endpoint: u32, terminal: u32) -> Result<u64, i32> {
     attachments.handles[0] = platform::ipc::IpcObjectHandle {
         handle: terminal,
         reserved: 0,
-        rights: platform::handle::HANDLE_RIGHT_TRANSFER,
+        rights: platform::handle::HANDLE_RIGHT_TRANSFER
+            | if master {
+                platform::handle::HANDLE_RIGHT_CONTROL
+            } else {
+                0
+            },
     };
     let mut response = [0u8; 8];
     let message = platform::ipc::call_object_handles(
         endpoint,
-        &PTY_IDENTIFY_MAGIC,
+        if master {
+            &PTY_MASTER_IDENTIFY_MAGIC
+        } else {
+            &PTY_IDENTIFY_MAGIC
+        },
         &mut response,
         &mut attachments,
     )

@@ -1169,6 +1169,14 @@ impl PtyManager {
         Ok(id)
     }
 
+    pub fn master_terminal_id(&self, object_id: u64) -> Result<u64, i32> {
+        let (id, side) = self.endpoint(object_id)?;
+        if side != PtySide::Master || !self.terminals.get(&id).is_some_and(|pty| pty.master_open) {
+            return Err(EBADF);
+        }
+        Ok(id)
+    }
+
     /// The master is the terminal controller, not a job's terminal endpoint.
     /// Zero-length data operations do not consume or produce terminal data.
     /// Setting terminal parameters requires SIGTTOU policy even without TOSTOP;

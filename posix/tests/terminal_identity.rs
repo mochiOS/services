@@ -41,6 +41,37 @@ fn only_the_identified_live_slave_can_name_a_terminal() {
 }
 
 #[test]
+fn controller_observation_requires_the_live_master_and_control_authority() {
+    use posix_service::terminal_identity::lookup_master;
+    let mut manager = PtyManager::new();
+    let pair = manager.open().unwrap();
+    let mut objects = attached();
+    objects.handles[0].rights = C | T;
+    let id = manager.slave_terminal_id(pair.slave_object_id).unwrap();
+    assert_eq!(
+        lookup_master(&manager, &objects, |_| Ok(pair.master_object_id)),
+        Ok(id)
+    );
+    assert_eq!(
+        lookup_master(&manager, &objects, |_| Ok(pair.slave_object_id)),
+        Err(25)
+    );
+    for rights in [0, T, C, C | T | mnu_abi::HANDLE_RIGHT_WRITE] {
+        let mut invalid = objects;
+        invalid.handles[0].rights = rights;
+        assert_eq!(
+            lookup_master(&manager, &invalid, |_| panic!("insufficient authority")),
+            Err(13)
+        );
+    }
+    manager.discard(pair);
+    assert_eq!(
+        lookup_master(&manager, &objects, |_| Ok(pair.master_object_id)),
+        Err(25)
+    );
+}
+
+#[test]
 fn provenance_and_exact_transfer_authority_precede_identity_lookup() {
     let manager = PtyManager::new();
     for flags in [0, u32::MAX] {
