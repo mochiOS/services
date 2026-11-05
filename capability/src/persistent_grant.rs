@@ -18,6 +18,18 @@ const GRANTS_OLD_PATH: &str = "/var/lib/security/capability-grants.db.old";
 const POLICY_DIR: &str = "/var/lib/security";
 const FILE_MODE_644: u32 = 0o644;
 
+#[derive(Clone, Copy)]
+pub(crate) struct PolicyFileSet {
+    pub current: &'static str,
+    pub temporary: &'static str,
+    pub previous: &'static str,
+}
+const GRANT_FILES: PolicyFileSet = PolicyFileSet {
+    current: GRANTS_PATH,
+    temporary: GRANTS_NEW_PATH,
+    previous: GRANTS_OLD_PATH,
+};
+
 type PosixClient = Client<EndpointTransport>;
 
 static POSIX_CLIENT: Mutex<Option<PosixClient>> = Mutex::new(None);
@@ -112,7 +124,7 @@ fn hex_digest(digest: &[u8; 32]) -> String {
     out
 }
 
-fn ensure_policy_dir() -> Result<(), mochi_user_syscall::SysError> {
+pub(crate) fn ensure_policy_dir() -> Result<(), mochi_user_syscall::SysError> {
     for path in ["/var", "/var/lib", POLICY_DIR] {
         let result = with_client(|client| client.mkdir_at(OpenAtBase::ProcessRoot, 0o755, path));
         if let Err(error) = result
@@ -124,12 +136,12 @@ fn ensure_policy_dir() -> Result<(), mochi_user_syscall::SysError> {
     Ok(())
 }
 
-fn write_file(path: &str, bytes: &[u8]) -> Result<(), mochi_user_syscall::SysError> {
+fn write_file(path: &str, bytes: &[u8], mode: u32) -> Result<(), mochi_user_syscall::SysError> {
     let file = with_client(|client| {
         client.open_at(
             OpenAtBase::ProcessRoot,
             posix::OPEN_WRITE | posix::OPEN_CREATE | posix::OPEN_TRUNCATE,
-            FILE_MODE_644,
+            mode,
             path,
         )
     })?;
@@ -155,22 +167,37 @@ fn write_file(path: &str, bytes: &[u8]) -> Result<(), mochi_user_syscall::SysErr
 }
 
 pub(crate) fn read_file(path: &str) -> Result<Vec<u8>, mochi_user_syscall::SysError> {
+    read_file_bounded(path, usize::MAX)
+}
+
+pub(crate) fn read_file_bounded(
+    path: &str,
+    maximum: usize,
+) -> Result<Vec<u8>, mochi_user_syscall::SysError> {
     let file =
         with_client(|client| client.open_at(OpenAtBase::ProcessRoot, posix::OPEN_READ, 0, path))?;
-    let mut output = Vec::new();
-    let mut buffer = [0u8; 4096];
-    loop {
-        match platform::handle::read(file.handle, &mut buffer) {
-            Ok(0) => break,
-            Ok(length) => output.extend_from_slice(&buffer[..length]),
-            Err(error) => {
-                let _ = platform::handle::close(file.handle);
-                return Err(error);
+    let result = (|| {
+        let mut output = Vec::new();
+        let mut buffer = [0u8; 4096];
+        loop {
+            let length = platform::handle::read(file.handle, &mut buffer)?;
+            if length == 0 {
+                return Ok(output);
             }
+            if length > buffer.len() || output.len().checked_add(length).is_none_or(|n| n > maximum)
+            {
+                return Err(mochi_user_syscall::SysError::from(
+                    mochi_user_syscall::NativeError::LimitExceeded.into_raw(),
+                ));
+            }
+            output
+                .try_reserve(length)
+                .map_err(|_| sys_error(mochi_user_syscall::ENOMEM))?;
+            output.extend_from_slice(&buffer[..length]);
         }
-    }
-    platform::handle::close(file.handle)?;
-    Ok(output)
+    })();
+    let closed = platform::handle::close(file.handle);
+    result.and_then(|bytes| closed.map(|_| bytes))
 }
 
 pub(crate) fn read_dir_names(path: &str) -> Result<Vec<String>, mochi_user_syscall::SysError> {
@@ -241,40 +268,54 @@ fn remove(path: &str) -> Result<(), mochi_user_syscall::SysError> {
 }
 
 fn recover_grant_db() -> Result<(), mochi_user_syscall::SysError> {
-    let current = path_exists(GRANTS_PATH)?;
-    let old = path_exists(GRANTS_OLD_PATH)?;
+    recover_policy_file(GRANT_FILES)
+}
+
+pub(crate) fn recover_policy_file(
+    files: PolicyFileSet,
+) -> Result<(), mochi_user_syscall::SysError> {
+    let current = path_exists(files.current)?;
+    let old = path_exists(files.previous)?;
     if !current && old {
-        rename(GRANTS_OLD_PATH, GRANTS_PATH)?;
+        rename(files.previous, files.current)?;
         sync_policy_dir()?;
     } else if current && old {
-        remove(GRANTS_OLD_PATH)?;
+        remove(files.previous)?;
         sync_policy_dir()?;
     }
-    if path_exists(GRANTS_NEW_PATH)? {
-        remove(GRANTS_NEW_PATH)?;
+    if path_exists(files.temporary)? {
+        remove(files.temporary)?;
         sync_policy_dir()?;
     }
     Ok(())
 }
 
 fn replace_grant_db(bytes: &[u8]) -> Result<(), mochi_user_syscall::SysError> {
-    recover_grant_db()?;
-    write_file(GRANTS_NEW_PATH, bytes)?;
+    replace_policy_file(GRANT_FILES, bytes, FILE_MODE_644)
+}
+
+pub(crate) fn replace_policy_file(
+    files: PolicyFileSet,
+    bytes: &[u8],
+    mode: u32,
+) -> Result<(), mochi_user_syscall::SysError> {
+    recover_policy_file(files)?;
+    write_file(files.temporary, bytes, mode)?;
     sync_policy_dir()?;
-    let had_current = path_exists(GRANTS_PATH)?;
+    let had_current = path_exists(files.current)?;
     if had_current {
-        rename(GRANTS_PATH, GRANTS_OLD_PATH)?;
+        rename(files.current, files.previous)?;
     }
-    if let Err(error) = rename(GRANTS_NEW_PATH, GRANTS_PATH) {
+    if let Err(error) = rename(files.temporary, files.current) {
         if had_current {
-            let _ = rename(GRANTS_OLD_PATH, GRANTS_PATH);
+            let _ = rename(files.previous, files.current);
         }
         let _ = sync_policy_dir();
         return Err(error);
     }
     sync_policy_dir()?;
     if had_current {
-        remove(GRANTS_OLD_PATH)?;
+        remove(files.previous)?;
         sync_policy_dir()?;
     }
     Ok(())

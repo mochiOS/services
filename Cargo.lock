@@ -1837,6 +1837,7 @@ dependencies = [
  "rustls-rustcrypto",
  "webpki-roots",
  "x509-cert",
+ "zeroize",
 ]
 
 [[package]]

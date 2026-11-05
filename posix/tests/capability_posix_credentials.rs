@@ -233,7 +233,7 @@ fn all_permission_paths_use_the_posix_credential_adapter() {
             "thread_security_context(sender)?",
         ),
         (
-            include_str!("../../capability/src/dynamic_grant.rs"),
+            include_str!("../../capability/src/execution_grant/native.rs"),
             "thread_security_context(requester_thread)?",
         ),
         (

@@ -30,6 +30,11 @@ mod object_image;
 #[path = "../../capability/src/execution_approval.rs"]
 mod execution_approval;
 #[allow(dead_code)]
+#[path = "../../capability/src/execution_grant.rs"]
+mod execution_grant;
+#[path = "support/remembered_execution.rs"]
+mod remembered_execution;
+#[allow(dead_code)]
 #[path = "../../capability/src/execution_requests.rs"]
 mod execution_requests;
 #[allow(dead_code)]
@@ -107,6 +112,12 @@ mod persistent_grant {
 
 #[derive(Default)]
 struct State {
+    uid: u32,
+    uid_error: Option<SysError>,
+    grant_bytes: Option<Vec<u8>>,
+    grant_read_error: Option<SysError>,
+    grant_write_error: Option<SysError>,
+    grant_writes: usize,
     same_object: bool,
     same_error: Option<SysError>,
     comparisons: usize,
@@ -129,6 +140,29 @@ struct State {
     file_reads: Vec<String>,
 }
 thread_local! { static STATE: RefCell<State> = RefCell::new(State::default()); }
+
+mod execution_grant_io {
+    use super::*;
+    pub(crate) fn requester_uid(_: &consent_peer::Peer) -> Result<u32, SysError> {
+        STATE.with_borrow(|s| s.uid_error.map_or(Ok(s.uid), Err))
+    }
+    pub(crate) fn read() -> Result<Option<Vec<u8>>, SysError> {
+        STATE.with_borrow(|s| {
+            s.grant_read_error
+                .map_or_else(|| Ok(s.grant_bytes.clone()), Err)
+        })
+    }
+    pub(crate) fn replace(bytes: &[u8]) -> Result<(), SysError> {
+        STATE.with_borrow_mut(|s| {
+            s.grant_writes += 1;
+            if let Some(error) = s.grant_write_error {
+                return Err(error);
+            }
+            s.grant_bytes = Some(bytes.to_vec());
+            Ok(())
+        })
+    }
+}
 
 pub mod capability {
     pub use crate::platform_real::capability::{consent, input_authority};
@@ -216,6 +250,7 @@ fn setup(bytes: Vec<u8>) -> (Vec<u8>, ipc::IpcObjectHandles) {
     let length = bytes.len() as u64;
     STATE.with_borrow_mut(|s| {
         *s = State {
+            uid: 1000,
             same_object: true,
             allowed: true,
             bytes,
@@ -1067,7 +1102,7 @@ mod request_registry {
         assert_eq!(rendered.deadline, queued.offer.deadline);
         assert_eq!(rendered.capabilities().collect::<Vec<_>>(), ["net.connect"]);
         assert!(rendered.package.starts_with("local.elf."));
-        assert_eq!(rendered.choices.bits(), Choices::ONCE);
+        assert_eq!(rendered.choices.bits(), Choices::ONCE | Choices::PERSISTENT);
         assert_eq!(registry.len(), 1);
         no_native_issue();
     }
@@ -1693,7 +1728,7 @@ mod approvals {
         let selection = signed_image::select_snapshot(state, None, &code).unwrap();
         Pending::new(selection, code, peer(101), "opaque:approval", session(), 3).unwrap()
     }
-    fn approval(binding: Binding, choice: Choice) -> Approval {
+    pub(super) fn approval(binding: Binding, choice: Choice) -> Approval {
         let presenter = Presenter {
             instance: instance(2),
             registration: 4,
@@ -1959,17 +1994,24 @@ mod approvals {
     }
 
     #[test]
-    fn a_persistent_decision_cannot_be_silently_treated_as_allow_once() {
+    fn a_persistent_decision_is_saved_before_native_authorization() {
         let code = code();
         setup(code.clone());
         let request = pending(&empty_state(), code);
         let decision = approval(request.binding(), Choice::AllowPersistently);
-        assert!(
-            request
-                .complete(decision, &peer(202), session(), 3)
-                .is_err()
-        );
-        no_issue();
+        request
+            .complete(decision, &peer(202), session(), 3)
+            .unwrap();
+        STATE.with_borrow(|s| {
+            assert_eq!(s.grant_writes, 1);
+            assert_eq!(
+                execution_grant::decode(s.grant_bytes.as_ref().unwrap())
+                    .unwrap()
+                    .len(),
+                1
+            );
+            assert_eq!(s.issue_calls, 1);
+        });
         closed();
     }
 

@@ -47,6 +47,34 @@ fn text_and_graphical_presenters_receive_one_exact_broker_description() {
 }
 
 #[test]
+fn always_shortcut_is_available_only_when_offered_and_is_never_allow_all() {
+    assert_eq!(prompt().choice_for_shortcut(b'a'), None);
+    assert_eq!(prompt().choice_for_shortcut(b'y'), Some(Choice::AllowOnce));
+    assert_eq!(prompt().choice_for_shortcut(b'n'), Some(Choice::Deny));
+    let offered = Prompt {
+        choices: Choices::new(Choices::ONCE | Choices::PERSISTENT).unwrap(),
+        ..prompt()
+    };
+    assert_eq!(
+        offered.choice_for_shortcut(b'a'),
+        Some(Choice::AllowPersistently)
+    );
+    assert_eq!(
+        offered.choice_for_shortcut(b'A'),
+        Some(Choice::AllowPersistently)
+    );
+    for key in [b'p', b'\n', b'\r', 0x1b, 0, 0xff] {
+        assert_eq!(offered.choice_for_shortcut(key), None);
+    }
+    let mut text = String::new();
+    offered.write_text(&mut text).unwrap();
+    assert!(text.contains("[a] Always Allow"));
+    assert!(text.contains("[y] Allow Once"));
+    assert!(text.contains("[n] Don't Allow"));
+    assert!(!text.contains("Allow for This Process"));
+}
+
+#[test]
 fn every_truncation_trailing_byte_and_reserved_field_is_rejected() {
     let bytes = encoded();
     for end in 0..bytes.len() {
@@ -208,6 +236,7 @@ fn frontend_wait_and_choice_proposals_are_exact_bounded_messages_without_witness
         wire::Action::Dismissed,
         wire::Action::Decide(Choice::Deny),
         wire::Action::Decide(Choice::AllowOnce),
+        wire::Action::Decide(Choice::AllowPersistently),
     ] {
         let bytes = wire::encode(prompt().correlation, action).unwrap();
         assert_eq!(wire::decode(&bytes), Ok((prompt().correlation, action)));

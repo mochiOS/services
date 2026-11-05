@@ -2,7 +2,7 @@
 //! A renderer supplies neither the source, grants nor the execution identity.
 use alloc::{string::String, vec::Vec};
 use mochi_user_platform as p;
-use p::capability::consent::Choice;
+use p::capability::consent::{Choice, Choices};
 use p::syscall::{NativeError, SysError};
 use sha2::{Digest, Sha256};
 
@@ -36,6 +36,31 @@ impl Selection {
         }
     }
 
+    pub(crate) fn authorize_remembered(
+        &self,
+        requester: &Peer,
+        key: &str,
+    ) -> Result<bool, SysError> {
+        let uid = crate::execution_grant::requester_uid(requester)?;
+        let (identity, capabilities, digest) = self.authority();
+        let remembered = crate::execution_grant::Key::new(uid, identity, capabilities, *digest)?;
+        if !crate::execution_grant::contains(remembered)? {
+            return Ok(false);
+        }
+        if crate::execution_grant::requester_uid(requester)? != uid {
+            return Err(error(NativeError::AccessDenied));
+        }
+        crate::resolver::authorize_image_install(
+            requester.instance.endpoint,
+            key,
+            identity,
+            capabilities,
+            digest,
+            requester.instance.revision,
+        )?;
+        Ok(true)
+    }
+
     pub(crate) fn authorize(
         &self,
         policy: &crate::policy::AppPromptPolicy,
@@ -53,7 +78,7 @@ fn error(error: NativeError) -> SysError {
     SysError::from_raw(error.into_raw() as i64)
 }
 
-fn requirements(key: &str, capabilities: &[String]) -> Result<[u8; 32], SysError> {
+pub(crate) fn requirements(key: &str, capabilities: &[String]) -> Result<[u8; 32], SysError> {
     let length = capabilities.iter().try_fold(0usize, |length, name| {
         if name.is_empty() || name.as_bytes().contains(&0) {
             return None;
@@ -91,6 +116,7 @@ pub(crate) struct Pending {
     requester: Peer,
     key: String,
     binding: Binding,
+    remembered: crate::execution_grant::Key,
 }
 
 impl Pending {
@@ -121,6 +147,13 @@ impl Pending {
         if Sha256::digest(&source).as_slice() != digest {
             return Err(error(NativeError::AccessDenied));
         }
+        let (identity, _, _) = selection.authority();
+        let remembered = crate::execution_grant::Key::new(
+            crate::execution_grant::requester_uid(&requester)?,
+            identity,
+            capabilities,
+            *digest,
+        )?;
         let binding = Binding {
             requester: requester.instance,
             session,
@@ -141,6 +174,7 @@ impl Pending {
             requester,
             key: retained_key,
             binding,
+            remembered,
         })
     }
 
@@ -156,6 +190,9 @@ impl Pending {
     pub(crate) fn subject(&self) -> (&ApplicationIdentity, &[String]) {
         let (identity, capabilities, _) = self.selection.authority();
         (identity, capabilities)
+    }
+    pub(crate) fn choices(&self) -> Choices {
+        Choices::new(Choices::ONCE | Choices::PERSISTENT).expect("execution consent choices")
     }
 
     /// Generate frontend content from the retained authenticated selection,
@@ -206,8 +243,8 @@ impl Pending {
 
     /// Adapters supply fresh authenticated peer/session observations. Approval
     /// is consumed before any native I/O; failures require a new transaction.
-    /// Only AllowOnce is implemented here, so persistent/process scopes must
-    /// not be offered by this launch continuation yet.
+    /// Remembered consent is scoped to this user, authenticated image and exact
+    /// requirements. A storage failure cannot become a successful Allow Once.
     pub(crate) fn complete(
         self,
         approval: Approval,
@@ -216,7 +253,7 @@ impl Pending {
         policy_generation: u64,
     ) -> Result<(), SysError> {
         let (binding, choice) = approval.into_parts();
-        if choice != Choice::AllowOnce
+        if !matches!(choice, Choice::AllowOnce | Choice::AllowPersistently)
             || binding != self.binding
             || current.instance != self.requester.instance
             || session != self.binding.session
@@ -224,6 +261,12 @@ impl Pending {
             || !p::handle::same_object(current.process.0, self.requester.process.0)?
         {
             return Err(error(NativeError::AccessDenied));
+        }
+        if crate::execution_grant::requester_uid(current)? != self.remembered.uid() {
+            return Err(error(NativeError::AccessDenied));
+        }
+        if choice == Choice::AllowPersistently {
+            crate::execution_grant::remember(self.remembered)?;
         }
         let (identity, capabilities, digest) = self.selection.authority();
         crate::resolver::authorize_image_install(

@@ -56,6 +56,12 @@ fn dispatch_captured(
         return Ok(None);
     }
     let requester = crate::consent_peer::capture(captured.sender)?;
+    if captured
+        .selection
+        .authorize_remembered(&requester, captured.key)?
+    {
+        return Ok(None);
+    }
     frontends
         .begin(
             reservation,

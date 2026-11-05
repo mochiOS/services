@@ -2,7 +2,7 @@
 //! runs here; the service can receive other messages while these calls are held.
 use alloc::vec::Vec;
 use mochi_user_platform as p;
-use p::capability::consent::{Choices, Correlation, Ticket};
+use p::capability::consent::{Correlation, Ticket};
 use p::syscall::{HandleWaitItem, NativeError, SysError};
 
 use crate::{
@@ -367,7 +367,7 @@ impl Reservation<'_> {
                 request.binding(),
                 presenter,
                 input,
-                Choices::new(Choices::ONCE).expect("fixed execution choices"),
+                request.choices(),
                 now,
                 timeout,
             )
