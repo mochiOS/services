@@ -33,6 +33,11 @@ mod execution_approval;
 #[path = "../../capability/src/execution_requests.rs"]
 mod execution_requests;
 #[allow(dead_code)]
+#[path = "../../capability/src/execution_frontend.rs"]
+mod execution_frontend;
+#[path = "support/execution_frontend_364.rs"]
+mod frontend_handoff;
+#[allow(dead_code)]
 #[path = "../../capability/src/consent.rs"]
 mod consent;
 mod consent_peer {
@@ -878,7 +883,8 @@ fn service_dispatch_releases_received_references_before_replying() {
         let steps = [
             format!("crate::{module}::prepare"),
             "execution_requests.reserve_image".into(),
-            "source.authorize(&state)".into(),
+            "source.captured(&state)".into(),
+            "dispatch_captured".into(),
             "close_received_handles(&attached)".into(),
             "capability_reply".into(),
         ];

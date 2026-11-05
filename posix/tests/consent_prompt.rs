@@ -189,3 +189,34 @@ fn fetch_request_contains_only_the_exact_correlation_not_a_claimed_identity() {
     }
     assert!(decode_fetch(&[bytes.as_slice(), &[0]].concat()).is_err());
 }
+
+#[test]
+fn frontend_wait_and_choice_proposals_are_exact_bounded_messages_without_witnesses() {
+    use mochios_capability_protocol::consent::frontend as wire;
+    for kind in [wire::Kind::Text, wire::Kind::Graphical] {
+        let bytes = wire::encode_wait(kind);
+        assert_eq!(wire::decode_wait(&bytes), Ok(kind));
+        for end in 0..bytes.len() {
+            assert!(wire::decode_wait(&bytes[..end]).is_err());
+        }
+        let mut invalid = bytes;
+        invalid[12] = 1;
+        assert!(wire::decode_wait(&invalid).is_err());
+    }
+    for action in [
+        wire::Action::Presented,
+        wire::Action::Dismissed,
+        wire::Action::Decide(Choice::Deny),
+        wire::Action::Decide(Choice::AllowOnce),
+    ] {
+        let bytes = wire::encode(prompt().correlation, action).unwrap();
+        assert_eq!(wire::decode(&bytes), Ok((prompt().correlation, action)));
+        for end in 0..bytes.len() {
+            assert!(wire::decode(&bytes[..end]).is_err());
+        }
+        let mut invalid = bytes;
+        invalid[13] = 1;
+        assert!(wire::decode(&invalid).is_err());
+        assert!(wire::decode(&[bytes.as_slice(), &[21, 0, 0, 0, 0, 0, 0, 0]].concat()).is_err());
+    }
+}

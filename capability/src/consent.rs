@@ -412,6 +412,43 @@ impl Controller {
         }
     }
 
+    /// A measured frontend proposes a choice, never an input serial. Resolve
+    /// its witness from observations already delivered by the input authority.
+    pub fn propose(
+        &mut self,
+        peer: Instance,
+        correlation: Correlation,
+        choice: Choice,
+        current: Current,
+        now: u64,
+    ) -> Result<Outcome, Error> {
+        self.clock(now)?;
+        let index = self.locate(correlation)?;
+        let pending = self.live(index, now)?;
+        if peer != pending.presenter.instance {
+            return Err(Error::WrongPeer);
+        }
+        if !pending.matches(current) {
+            self.pending[index] = None;
+            return Err(Error::Changed);
+        }
+        let gesture = if choice == Choice::Deny {
+            0
+        } else {
+            let Stage::Armed(presence) = pending.stage else {
+                return Err(Error::MissingPresence);
+            };
+            presence.gesture.ok_or(Error::MissingPresence)?
+        };
+        self.feedback(
+            peer,
+            correlation,
+            Feedback::Decision { choice, gesture },
+            current,
+            now,
+        )
+    }
+
     /// The registered input authority snapshots its current serial/key state
     /// AFTER the presenter has acknowledged display. Frontend-supplied serials
     /// or an old snapshot cannot substitute for this separate message.

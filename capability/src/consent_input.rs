@@ -32,6 +32,17 @@ pub(crate) struct Channel {
     last_serial: u64,
 }
 impl Channel {
+    pub fn idle(&self) -> bool {
+        self.active.is_none()
+    }
+    pub fn synchronized(&self) -> Result<(), p::syscall::SysError> {
+        if self.status()?.serial != self.last_serial {
+            return Err(p::syscall::SysError::from(
+                p::syscall::NativeError::NotReady.into_raw(),
+            ));
+        }
+        Ok(())
+    }
     pub fn connect(trusted: &TrustedImages) -> Result<Self, p::syscall::SysError> {
         let peer = consent_peer::capture(p::process::find_by_name("input.service")?)?;
         if trusted.role(&peer)? != Some(Role::Input) {

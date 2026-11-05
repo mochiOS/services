@@ -67,8 +67,11 @@ impl Presentation {
         Box::new(
             Dialog::new()
                 .accessibility_label("Application capability permission")
+                .on_dismiss(move || propose(offer.correlation, Choice::Deny))
                 .content(
                     VStack::new()
+                        .alignment(StackAlignment::Center)
+                        .distribution(StackDistribution::Center)
                         .gap(StackGap::Large)
                         .child(Text::styled(
                             format!("Allow {} to use these capabilities?", offer.package),

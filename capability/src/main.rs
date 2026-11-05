@@ -15,6 +15,7 @@ mod installed_image;
 mod standalone_image;
 mod execution_approval;
 mod execution_requests;
+mod execution_frontend;
 mod bootstrap_file;
 mod dynamic_grant;
 mod consent;

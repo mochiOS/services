@@ -31,6 +31,7 @@ struct Runtime {
     mboot_agent: Option<(NativeProcess, u64)>,
     deferred_requests: VecDeque<DeferredMessage>,
     permission_prompt: crate::portal::PermissionPrompts,
+    execution_prompt: crate::execution_prompt_worker::Presenter,
     iommu_warning: Option<NativeProcess>,
     keychain: Option<NativeProcess>,
     filesystem_endpoint: Option<platform::handle::Handle>,
@@ -209,6 +210,7 @@ impl Runtime {
             mboot_agent: None,
             deferred_requests: VecDeque::new(),
             permission_prompt: crate::portal::PermissionPrompts::default(),
+            execution_prompt: crate::execution_prompt_worker::Presenter::default(),
             iommu_warning: None,
             keychain: None,
             filesystem_endpoint: None,
@@ -1250,6 +1252,11 @@ fn resident(
         service_launcher::retry_failed_launch_cleanup();
         if let Some(runtime) = runtime.as_mut() {
             runtime.retry_failed_session_cleanup();
+            if active_session.is_some() && pending_logout.is_none() {
+                runtime
+                    .execution_prompt
+                    .maintain(runtime.logger_endpoint, &mut runtime.deferred_requests);
+            }
         }
         if let (Some(logout), Some(runtime)) = (pending_logout.as_mut(), runtime.as_mut()) {
             // Binder exits voluntarily on success. Do not acknowledge until

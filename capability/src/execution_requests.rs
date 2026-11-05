@@ -144,6 +144,9 @@ impl Registry {
             })
             .ok_or_else(|| error(NativeError::NotFound))
     }
+    pub(crate) fn contains(&self, correlation: Correlation) -> bool {
+        self.index(correlation).is_ok()
+    }
     fn release(&mut self, bytes: usize) {
         self.bytes = self
             .bytes

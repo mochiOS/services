@@ -20,6 +20,15 @@ pub(crate) enum Selection {
 }
 
 impl Selection {
+    pub(crate) fn needs_consent(&self, policy: &crate::policy::AppPromptPolicy) -> bool {
+        let (_, requested, _) = self.authority();
+        match self {
+            Self::Installed(_) => requested
+                .iter()
+                .any(|name| crate::policy::needs_app_prompt(policy, name)),
+            Self::Standalone(_) => !requested.is_empty(),
+        }
+    }
     fn authority(&self) -> (&ApplicationIdentity, &[String], &[u8; 32]) {
         match self {
             Self::Installed(source) => source.authority(),

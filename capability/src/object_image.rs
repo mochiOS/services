@@ -18,7 +18,7 @@ pub(crate) struct Source<'a> {
     digest: [u8; 32],
     key: &'a str,
 }
-impl Source<'_> {
+impl<'a> Source<'a> {
     pub(crate) fn length(&self) -> u64 {
         self.length
     }
@@ -26,12 +26,24 @@ impl Source<'_> {
         self,
         state: &crate::state::CapabilityServiceState,
     ) -> Result<(), SysError> {
+        self.captured(state)?.authorize(&state.app_prompt_policy)
+    }
+    pub(crate) fn captured(
+        self,
+        state: &crate::state::CapabilityServiceState,
+    ) -> Result<crate::signed_image::Captured<'a>, SysError> {
         let snapshot = crate::signed_image::capture(self.handle, self.length)?;
         use sha2::{Digest, Sha256};
         if <[u8; 32]>::from(Sha256::digest(&snapshot)) != self.digest {
             return Err(SysError::from_raw(EACCES as i64));
         }
-        crate::signed_image::authorize_snapshot(state, self.sender, self.key, None, &snapshot)
+        let selection = crate::signed_image::select_snapshot(state, None, &snapshot)?;
+        Ok(crate::signed_image::Captured {
+            selection,
+            source: snapshot,
+            sender: self.sender,
+            key: self.key,
+        })
     }
 }
 

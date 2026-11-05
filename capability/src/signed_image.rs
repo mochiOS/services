@@ -29,7 +29,21 @@ pub(crate) struct Source<'a> {
     key: &'a str,
     public_key: Option<&'a [u8; 32]>,
 }
-impl Source<'_> {
+pub(crate) struct Captured<'a> {
+    pub(crate) selection: crate::execution_approval::Selection,
+    pub(crate) source: Vec<u8>,
+    pub(crate) sender: u64,
+    pub(crate) key: &'a str,
+}
+impl Captured<'_> {
+    pub(crate) fn authorize(
+        &self,
+        policy: &crate::policy::AppPromptPolicy,
+    ) -> Result<(), SysError> {
+        self.selection.authorize(policy, self.sender, self.key)
+    }
+}
+impl<'a> Source<'a> {
     pub(crate) fn length(&self) -> u64 {
         self.length
     }
@@ -37,8 +51,20 @@ impl Source<'_> {
         self,
         state: &crate::state::CapabilityServiceState,
     ) -> Result<(), SysError> {
-        let snapshot = capture(self.handle, self.length)?;
-        authorize_snapshot(state, self.sender, self.key, self.public_key, &snapshot)
+        self.captured(state)?.authorize(&state.app_prompt_policy)
+    }
+    pub(crate) fn captured(
+        self,
+        state: &crate::state::CapabilityServiceState,
+    ) -> Result<Captured<'a>, SysError> {
+        let source = capture(self.handle, self.length)?;
+        let selection = select_snapshot(state, self.public_key, &source)?;
+        Ok(Captured {
+            selection,
+            source,
+            sender: self.sender,
+            key: self.key,
+        })
     }
 }
 

@@ -1,7 +1,8 @@
 mod authentication;
 mod clock;
-mod login;
 pub mod execution_prompt;
+mod execution_server;
+mod login;
 mod network_prompt;
 mod permission_server;
 mod portal_prompt;
@@ -12,6 +13,9 @@ mod virtualization_warning;
 mod wallpaper;
 
 pub fn run() -> Result<(), viewkit::ViewKitError> {
+    if execution_server::requested() {
+        return execution_server::run();
+    }
     if permission_server::requested() {
         return permission_server::run();
     }
