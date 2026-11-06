@@ -262,6 +262,127 @@ fn failed_installation_cleanup_outlives_the_relocation_scratch_buffer() {
 }
 
 #[test]
+fn owned_residency_survives_rebuilt_borrowed_scopes_and_owner_moves() {
+    exercise(|scope, fixture| {
+        use mochios_posix_client::pie::link_scope::resident::State;
+        let host = Host::default();
+        let mut state = State::<Host, 2>::default();
+        state
+            .bind(scope)
+            .unwrap()
+            .install(&mut vec![0; 128 * 1024], || host.clone())
+            .unwrap();
+        assert_eq!(state.phase(), Phase::Mapped);
+        let mut moved = Box::new(state);
+        // The parser views and scope can be recreated from independent copies
+        // of the exact authenticated inputs. State borrows neither allocation.
+        let copied = fixture.bytes.clone();
+        let images = copied
+            .each_ref()
+            .map(|bytes| Pie::parse_object(bytes).unwrap());
+        let objects = [
+            Object {
+                name: b"root.so",
+                image: &images[0],
+                bias: fixture.bases[0],
+            },
+            Object {
+                name: b"libresident.so",
+                image: &images[1],
+                bias: fixture.bases[1],
+            },
+        ];
+        let mut order = [0; 2];
+        let rebuilt = Scope::new(&objects, &mut order).unwrap();
+        moved
+            .bind(&rebuilt)
+            .unwrap()
+            .initialize(&mut [0; 8], invoke)
+            .unwrap();
+        assert_eq!(moved.phase(), Phase::Ready);
+        {
+            let loader = moved.bind(scope).unwrap();
+            let address = loader
+                .symbol(b"evaluate", Version::Default)
+                .unwrap()
+                .unwrap()
+                .address();
+            let evaluate: unsafe extern "C" fn(i32) -> i32 =
+                unsafe { std::mem::transmute(address) };
+            assert_eq!(unsafe { evaluate(7) }, 82);
+        }
+        moved
+            .bind(&rebuilt)
+            .unwrap()
+            .close(&mut [0; 8], invoke)
+            .unwrap();
+        assert_eq!(moved.phase(), Phase::Closed);
+        assert_eq!(moved.retained(), 0);
+        for base in fixture.bases {
+            assert!(access_at(base).is_none());
+        }
+    });
+}
+
+#[test]
+fn persistent_residency_rejects_changed_scope_and_recovers_abandoned_initialization() {
+    exercise(|scope, fixture| {
+        use mochios_posix_client::pie::link_scope::resident::State;
+        let host = Host::default();
+        let mut state = State::<Host, 2>::default();
+        state
+            .bind(scope)
+            .unwrap()
+            .install(&mut vec![0; 128 * 1024], || host.clone())
+            .unwrap();
+        let images = fixture
+            .bytes
+            .each_ref()
+            .map(|bytes| Pie::parse_object(bytes).unwrap());
+        let objects = [
+            Object {
+                name: b"different.so",
+                image: &images[0],
+                bias: fixture.bases[0],
+            },
+            Object {
+                name: b"libresident.so",
+                image: &images[1],
+                bias: fixture.bases[1],
+            },
+        ];
+        let mut order = [0; 2];
+        let changed = Scope::new(&objects, &mut order).unwrap();
+        assert!(state.bind(&changed).is_err());
+        assert_eq!(state.retained(), 2);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            state
+                .bind(scope)
+                .unwrap()
+                .initialize(&mut [0; 8], |_| panic!("abandon callback"))
+                .unwrap();
+        }));
+        assert!(result.is_err());
+        assert_eq!(state.phase(), Phase::Initializing);
+        state.abandon();
+        assert_eq!(state.phase(), Phase::Failed);
+        assert!(
+            state
+                .bind(scope)
+                .unwrap()
+                .symbol(b"evaluate", Version::Default)
+                .is_err()
+        );
+        state
+            .bind(scope)
+            .unwrap()
+            .close(&mut [0; 8], |_| Ok(()))
+            .unwrap();
+        assert_eq!(state.retained(), 0);
+    });
+}
+
+#[test]
 fn relro_preserves_execute_on_an_originally_executable_readable_load() {
     exercise_with(
         |fixture| {
