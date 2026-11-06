@@ -454,6 +454,45 @@ impl ReadyHandshake {
         Ok(())
     }
 
+    /// User and Network publish asynchronously on this shared handshake.
+    /// Preserve their authenticated endpoint ownership even while login is the
+    /// awaited event. Health failure is retained separately from endpoint use.
+    /// Unknown tokens leave ownership with the caller; invalid known deliveries
+    /// are closed here exactly once.
+    fn record_background_endpoint(
+        &mut self,
+        token: u64,
+        status: i32,
+        endpoint: platform::handle::Handle,
+        source_process: u64,
+    ) -> Result<bool, ReadyError> {
+        let (slot, owner, previous, valid_status) = if token == self.user_token {
+            (
+                &mut self.user_endpoint,
+                &mut self.user_endpoint_process,
+                &self.user_status,
+                status == 0,
+            )
+        } else if token == self.network_token {
+            (
+                &mut self.network_endpoint,
+                &mut self.network_endpoint_process,
+                &self.network_status,
+                status <= 0,
+            )
+        } else {
+            return Ok(false);
+        };
+        if slot.is_some() || previous.get().is_some() || !valid_status {
+            let _ = platform::handle::close(endpoint);
+            return Err(ReadyError::InvalidMessage);
+        }
+        *slot = Some(endpoint);
+        *owner = Some(source_process);
+        self.record(token, status)?;
+        Ok(true)
+    }
+
     pub(crate) fn wait_for_login_complete(
         &mut self,
         process_target: impl Into<ProcessWatchTarget>,
@@ -476,9 +515,21 @@ impl ReadyHandshake {
                         ready_result(status)?;
                         return Ok(identity);
                     }
-                    ReceivedNotification::Endpoint { endpoint, .. } => {
-                        let _ = platform::handle::close(endpoint);
-                        return Err(ReadyError::InvalidMessage);
+                    ReceivedNotification::Endpoint {
+                        token,
+                        status,
+                        endpoint,
+                        source_process,
+                    } => {
+                        if !self.record_background_endpoint(
+                            token,
+                            status,
+                            endpoint,
+                            source_process,
+                        )? {
+                            let _ = platform::handle::close(endpoint);
+                            return Err(ReadyError::InvalidMessage);
+                        }
                     }
                     ReceivedNotification::Deferred(message) => {
                         self.deferred.push_back(message);
@@ -519,30 +570,12 @@ impl ReadyHandshake {
                         endpoint,
                         source_process,
                     } => {
-                        if token == self.user_token {
-                            if self.user_endpoint.is_some()
-                                || self.user_status.get().is_some()
-                                || status != 0
-                            {
-                                let _ = platform::handle::close(endpoint);
-                                return Err(ReadyError::InvalidMessage);
-                            }
-                            self.user_endpoint = Some(endpoint);
-                            self.user_endpoint_process = Some(source_process);
-                            self.record(token, status)?;
-                            continue;
-                        }
-                        if token == self.network_token {
-                            if self.network_endpoint.is_some()
-                                || self.network_status.get().is_some()
-                                || status > 0
-                            {
-                                let _ = platform::handle::close(endpoint);
-                                return Err(ReadyError::InvalidMessage);
-                            }
-                            self.network_endpoint = Some(endpoint);
-                            self.network_endpoint_process = Some(source_process);
-                            self.record(token, status)?;
+                        if self.record_background_endpoint(
+                            token,
+                            status,
+                            endpoint,
+                            source_process,
+                        )? {
                             continue;
                         }
                         if token != self.posix_token || status != 0 || self.posix_endpoint.is_some()

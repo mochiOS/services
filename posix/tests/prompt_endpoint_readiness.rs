@@ -286,6 +286,47 @@ fn early_network_publication_is_retained_while_waiting_for_another_service() {
         Some(41)
     );
 }
+
+#[test]
+fn late_network_endpoint_during_login_does_not_abort_the_desktop() {
+    let _serial = TEST_LOCK.lock().unwrap();
+    *STATE.lock().unwrap() = Some(State::default());
+    let mut ready = readiness::ReadyHandshake::create().unwrap();
+    let network = ready.target(readiness::ReadyService::Network).token;
+    let secure_ui = ready.target(readiness::ReadyService::SecureUi).token;
+    let rights = handle::HANDLE_RIGHT_SEND | handle::HANDLE_RIGHT_TRANSFER;
+    let (_, handles) = publication(network, rights);
+    let identity = service_ready::SessionIdentity {
+        uid: 1000,
+        gid: 1000,
+    };
+    STATE.lock().unwrap().as_mut().unwrap().messages = VecDeque::from([
+        (
+            service_ready::handle_notification(network, -6).to_vec(),
+            handles,
+        ),
+        (
+            service_ready::session_notification(secure_ui, 0, identity).to_vec(),
+            ipc::IpcObjectHandles::default(),
+        ),
+    ]);
+    assert_eq!(
+        ready.wait_for_login_complete(process_watch::ProcessWatchTarget::RetainedHandle(7)),
+        Ok(identity)
+    );
+    assert_eq!(
+        ready.take_network_endpoint(process_watch::ProcessWatchTarget::RetainedHandle(7)),
+        Ok(Some(41))
+    );
+    assert_eq!(
+        ready.wait_for_service_ready(
+            readiness::ReadyService::Network,
+            process_watch::ProcessWatchTarget::RetainedHandle(7)
+        ),
+        Err(readiness::ReadyError::Failed(-6))
+    );
+    assert!(STATE.lock().unwrap().as_ref().unwrap().closed.is_empty());
+}
 #[test]
 fn invalid_network_publications_are_closed_and_cannot_replace_a_retained_endpoint() {
     let _serial = TEST_LOCK.lock().unwrap();
