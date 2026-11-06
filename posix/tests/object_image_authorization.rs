@@ -39,7 +39,13 @@ pub mod handle {
     }
 }
 mod state {
-    pub struct CapabilityServiceState;
+    pub struct CapabilityServiceState {
+        pub app_prompt_policy: (),
+    }
+    #[allow(non_upper_case_globals)]
+    pub const CapabilityServiceState: CapabilityServiceState = CapabilityServiceState {
+        app_prompt_policy: (),
+    };
 }
 pub mod memory {
     pub fn object_length(handle: u64) -> Result<u64, crate::SysError> {
@@ -48,6 +54,28 @@ pub mod memory {
     }
 }
 mod signed_image {
+    pub struct Selection;
+    pub struct Captured<'a> {
+        pub selection: Selection,
+        pub source: Vec<u8>,
+        pub sender: u64,
+        pub key: &'a str,
+    }
+    impl Captured<'_> {
+        pub fn authorize(&self, _: &()) -> Result<(), crate::SysError> {
+            let _ = &self.selection;
+            authorize_snapshot(&crate::state::CapabilityServiceState, self.sender,
+                self.key, None, &self.source)
+        }
+    }
+    pub fn select_snapshot(
+        _: &crate::state::CapabilityServiceState,
+        _: Option<&[u8; 32]>,
+        source: &[u8],
+    ) -> Result<Selection, crate::SysError> {
+        assert_eq!(source, b"retained RAM");
+        Ok(Selection)
+    }
     pub fn capture(handle: u32, length: u64) -> Result<Vec<u8>, crate::SysError> {
         assert_eq!((handle, length), (19, b"retained RAM".len() as u64));
         Ok(b"retained RAM".to_vec())
@@ -191,7 +219,7 @@ fn native_errors_and_received_reference_cleanup_are_preserved() {
         .next()
         .unwrap();
     assert!(
-        b.find("source.authorize(&state)").unwrap()
+        b.find("source.captured(&state)").unwrap()
             < b.find("close_received_handles(&attached)").unwrap()
     );
     assert!(
