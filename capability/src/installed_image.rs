@@ -23,6 +23,25 @@ pub(crate) fn select(
     length: u64,
     read: FileReader,
 ) -> Result<Option<Selection>, SysError> {
+    select_kind(index, digest, length, read, "application")
+}
+
+pub(crate) fn select_library(
+    index: &PackageIndex,
+    digest: &[u8; 32],
+    length: u64,
+    read: FileReader,
+) -> Result<Option<Selection>, SysError> {
+    select_kind(index, digest, length, read, "library")
+}
+
+fn select_kind(
+    index: &PackageIndex,
+    digest: &[u8; 32],
+    length: u64,
+    read: FileReader,
+    kind: &str,
+) -> Result<Option<Selection>, SysError> {
     if index.duplicate {
         return Err(SysError::from_raw(EACCES as i64));
     }
@@ -39,13 +58,14 @@ pub(crate) fn select(
             .binary(path)
             .ok_or_else(|| SysError::from_raw(EACCES as i64))?;
         let binding = image_catalog::declared_root_binding(&verified.manifest, path)?;
-        if binary.kind.as_deref() != Some("application")
+        if binary.kind.as_deref() != Some(kind)
             || binary.capability_profile.is_some()
             || verified.manifest.linux.is_some()
-            || !matches!(
+            || !(matches!(
                 verified.manifest.package_kind.as_deref(),
                 None | Some("application" | "binary")
-            )
+            ) || (kind == "library"
+                && verified.manifest.package_kind.as_deref() == Some("library")))
             || binding.digest != *digest
             || binding.size != length
         {

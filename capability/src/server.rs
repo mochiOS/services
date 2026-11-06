@@ -789,6 +789,16 @@ pub(crate) fn serve_capability_requests(mut state: CapabilityServiceState) -> ! 
             reply_spawn(sender, result);
             continue;
         }
+        if opcode == platform::capability::library_image::VERIFY_OPCODE {
+            let result = crate::library_image::verify(&state, sender, slice, &attached);
+            close_received_handles(&attached);
+            let reply = match result {
+                Ok(digest) => platform::capability::library_image::reply(0, Some(&digest)),
+                Err(error) => platform::capability::library_image::reply(error_status(error), None),
+            };
+            let _ = platform::ipc::reply(sender, &reply);
+            continue;
+        }
         if opcode == platform::capability::AUTHORIZE_EXEC_OBJECT_OPCODE {
             let result =
                 crate::object_image::prepare(sender, slice, &attached).and_then(|source| {

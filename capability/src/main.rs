@@ -11,6 +11,7 @@ mod native_bootstrap;
 mod prepared_image;
 mod object_image;
 mod signed_image;
+mod library_image;
 mod installed_image;
 mod standalone_image;
 mod execution_approval;

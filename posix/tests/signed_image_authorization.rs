@@ -17,6 +17,10 @@ mod fixture;
 mod resolver;
 #[path = "../../capability/src/signed_image.rs"]
 mod signed_image;
+#[path = "../../capability/src/library_image.rs"]
+mod library_image;
+#[path = "support/library_image.rs"]
+mod library_image_tests;
 #[path = "../../capability/src/standalone_image.rs"]
 mod standalone_image;
 #[allow(dead_code)]
@@ -115,6 +119,9 @@ mod persistent_grant {
 
 #[derive(Default)]
 struct State {
+    library_caps: std::collections::BTreeSet<String>,
+    peer_captures: usize,
+    changed_peer: bool,
     uid: u32,
     uid_error: Option<SysError>,
     grant_bytes: Option<Vec<u8>>,
@@ -171,10 +178,35 @@ pub mod capability {
     pub use crate::platform_real::capability::{consent, input_authority};
     pub use mochios_capability_protocol::{
         decode_authorize_captured_image_request, decode_authorize_exec_object_request, signed_image,
+        library_image,
     };
     pub fn check_thread(sender: u64, name: &str) -> Result<u64, crate::SysError> {
-        assert_eq!((sender, name), (77, "process.spawn"));
-        Ok(crate::STATE.with_borrow(|s| u64::from(s.allowed)))
+        assert_eq!(sender, 77);
+        Ok(crate::STATE.with_borrow(|s| u64::from(if name == "process.spawn" {
+            s.allowed
+        } else {
+            s.library_caps.contains(name)
+        })))
+    }
+}
+pub mod execution_peer {
+    pub struct Peer {
+        pub image: mnu_abi::ProcessImageInfo,
+        pub context: mnu_abi::ThreadSecurityContext,
+    }
+    pub fn capture(endpoint: u64) -> Result<Peer, crate::SysError> {
+        assert_eq!(endpoint, 77);
+        crate::STATE.with_borrow_mut(|s| {
+            s.peer_captures += 1;
+            Ok(Peer {
+                image: mnu_abi::ProcessImageInfo {
+                    process_id: 10,
+                    image_revision: u64::from(s.changed_peer && s.peer_captures > 1),
+                    ..Default::default()
+                },
+                context: Default::default(),
+            })
+        })
     }
 }
 pub mod ipc {

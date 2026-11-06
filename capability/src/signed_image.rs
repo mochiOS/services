@@ -151,11 +151,7 @@ pub(crate) fn select_snapshot(
     public_key: Option<&[u8; 32]>,
     snapshot: &[u8],
 ) -> Result<crate::execution_approval::Selection, SysError> {
-    let key = public_key
-        .map(SuppliedPublicKey::new)
-        .transpose()
-        .map_err(|_| SysError::from_raw(EACCES as i64))?;
-    if key.is_none() {
+    if public_key.is_none() {
         use sha2::{Digest, Sha256};
         let digest: [u8; 32] = Sha256::digest(&snapshot).into();
         if let Some(selection) = crate::installed_image::select(
@@ -167,6 +163,20 @@ pub(crate) fn select_snapshot(
             return Ok(crate::execution_approval::Selection::Installed(selection));
         }
     }
+    let evidence = verify_snapshot(public_key, snapshot)?;
+    crate::standalone_image::select(&evidence).map(crate::execution_approval::Selection::Standalone)
+}
+
+/// Common bounded signature gate; the consumer separately selects code kind
+/// and authority policy. A signature alone never grants developer trust.
+pub(crate) fn verify_snapshot<'a>(
+    public_key: Option<&[u8; 32]>,
+    snapshot: &'a [u8],
+) -> Result<mochios_elf_signature::VerifiedImage<'a>, SysError> {
+    let key = public_key
+        .map(SuppliedPublicKey::new)
+        .transpose()
+        .map_err(|_| SysError::from_raw(EACCES as i64))?;
     let evidence = verify_image(
         &snapshot,
         key.as_ref().map(|k| k as &dyn PublicKeyResolver),
@@ -184,5 +194,5 @@ pub(crate) fn select_snapshot(
     if key.is_some() && evidence.signature().kind != SignatureKind::Ed25519 {
         return Err(SysError::from_raw(EACCES as i64));
     }
-    crate::standalone_image::select(&evidence).map(crate::execution_approval::Selection::Standalone)
+    Ok(evidence)
 }
