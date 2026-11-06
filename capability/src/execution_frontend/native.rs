@@ -9,10 +9,10 @@ use p::capability::presentation as w;
 
 fn observed<T>(stage: &str, result: Result<T, SysError>) -> Result<T, SysError> {
     result.inspect_err(|reason| {
-        p::logln!(
-            "capability.service: execution consent {stage} failed raw={}",
+        let _ = p::logger::write_status_fmt(format_args!(
+            "capability.service: execution consent {stage} failed raw={}\n",
             reason.raw()
-        );
+        ));
     })
 }
 
@@ -70,7 +70,7 @@ impl Authority for Native<'_> {
         if !p::handle::same_object(process.0, requester.process.0)? {
             return Err(denied());
         }
-        let included = crate::persistent_grant::with_client(|client| {
+        let included = observed("terminal foreground", crate::persistent_grant::with_client(|client| {
             client.terminal_process_foreground(
                 mochios_posix_client::ObjectHandleAttachment {
                     handle: master,
@@ -81,7 +81,7 @@ impl Authority for Native<'_> {
                     rights: p::handle::HANDLE_RIGHT_WAIT,
                 },
             )
-        })?;
+        }))?;
         self.current(requester)?;
         Ok(included)
     }
@@ -177,7 +177,13 @@ impl Authority for Native<'_> {
         }
         match receipt.stage {
             w::Stage::Pending => return Err(error(NativeError::NotReady)),
-            w::Stage::Revoked => return Err(denied()),
+            w::Stage::Revoked => {
+                let _ = p::logger::write_status_fmt(format_args!(
+                    "capability.service: execution consent display revoked surface={} content={} focus={}\n",
+                    receipt.surface, receipt.content_generation, receipt.focus_generation
+                ));
+                return Err(denied());
+            }
             w::Stage::Presented => {}
         }
         if receipt.surface == 0
