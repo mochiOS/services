@@ -431,8 +431,7 @@ pub(crate) fn composite_and_present(
                 }
                 if selected.is_none_or(|selected_index| {
                     let selected = &surfaces[selected_index];
-                    (surface.role.stack_layer(), surface.z)
-                        < (selected.role.stack_layer(), selected.z)
+                    (surface.stack_layer(), surface.z) < (selected.stack_layer(), selected.z)
                 }) {
                     selected = Some(index);
                 }

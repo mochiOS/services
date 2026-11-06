@@ -62,6 +62,58 @@ fn fixture() -> (Registry<()>, w::Receipt) {
     (r, receipt)
 }
 #[test]
+fn window_elevation_is_bound_to_one_live_authenticated_presentation() {
+    for retirement in 0..3 {
+        let mut registry = Registry::default();
+        registry.update_context(context()).unwrap();
+        let registration = registry
+            .register(41, context(), correlation(7), w::Kind::Window, (), image())
+            .unwrap();
+        let mut current = observed();
+        assert!(!registry.protects(current.surface));
+        registry.bind(correlation(7), current).unwrap();
+        assert!(registry.protects(current.surface));
+        let foreign = SurfaceKey {
+            client: current.surface.client + 1,
+            ..current.surface
+        };
+        assert!(!registry.protects(foreign));
+        current.content += 1;
+        current.ready = true;
+        registry.full_presented(|_, _| Some(current));
+        assert!(registry.protects(current.surface));
+        match retirement {
+            0 => {
+                registry
+                    .cancel(41, correlation(7), registration.registration)
+                    .unwrap();
+            }
+            1 => {
+                current.focused = false;
+                registry.observe(|_, _| Some(current));
+            }
+            _ => {
+                registry
+                    .update_context(w::Context {
+                        active: false,
+                        ..context()
+                    })
+                    .unwrap();
+            }
+        }
+        assert!(!registry.protects(current.surface));
+        current.focused = true;
+        registry.full_presented(|_, _| Some(current));
+        assert!(!registry.protects(current.surface));
+    }
+    let (mut registry, _) = fixture();
+    registry.bind(correlation(7), observed()).unwrap();
+    assert!(
+        !registry.protects(observed().surface),
+        "overlay registrations do not elevate ordinary windows"
+    );
+}
+#[test]
 fn only_a_new_successfully_presented_full_frame_mints_evidence() {
     let (mut r, receipt) = fixture();
     let mut o = observed();

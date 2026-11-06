@@ -276,7 +276,7 @@ impl GpuCompositor {
             .collect();
         indices.sort_by_key(|index| {
             let surface = &surfaces[*index];
-            (surface.role.stack_layer(), surface.z)
+            (surface.stack_layer(), surface.z)
         });
         let desktop_key = DesktopGeometryKey {
             size: (display_width, display_height),

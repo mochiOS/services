@@ -142,6 +142,7 @@ pub(crate) struct Surface {
     pub(crate) handle: SurfaceHandle,
     pub(crate) token: u64,
     pub(crate) role: SurfaceRole,
+    pub(crate) protected_presentation: bool,
     pub(crate) rights: SurfaceRights,
     pub(crate) parent: Option<SurfaceHandle>,
     pub(crate) window: WindowId,
@@ -174,6 +175,13 @@ pub(crate) struct Surface {
 }
 
 impl Surface {
+    pub(crate) fn stack_layer(&self) -> u8 {
+        if self.protected_presentation {
+            SurfaceRole::SystemModal.stack_layer()
+        } else {
+            self.role.stack_layer()
+        }
+    }
     pub(crate) fn empty() -> Self {
         Self {
             input_regions: Vec::new(),
@@ -184,6 +192,7 @@ impl Surface {
             handle: SurfaceHandle(0),
             token: 0,
             role: SurfaceRole::Toplevel,
+            protected_presentation: false,
             rights: SurfaceRights::default(),
             parent: None,
             window: WindowId(0),
@@ -1759,6 +1768,18 @@ mod tests {
         assert!(!takes_keyboard_focus_on_create(SurfaceRole::Popup));
         assert!(!takes_keyboard_focus_on_create(SurfaceRole::Panel));
         assert!(!takes_keyboard_focus_on_create(SurfaceRole::Background));
+    }
+
+    #[test]
+    fn protected_windows_use_a_temporary_layer_without_changing_their_role() {
+        let mut surface = Surface::empty();
+        assert_eq!(surface.stack_layer(), SurfaceRole::Toplevel.stack_layer());
+        surface.protected_presentation = true;
+        assert!(surface.stack_layer() > SurfaceRole::Panel.stack_layer());
+        assert!(surface.stack_layer() < SurfaceRole::SecureOverlay.stack_layer());
+        assert!(surface.role == SurfaceRole::Toplevel);
+        surface.protected_presentation = false;
+        assert_eq!(surface.stack_layer(), SurfaceRole::Toplevel.stack_layer());
     }
 
     #[test]

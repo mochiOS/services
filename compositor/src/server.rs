@@ -614,7 +614,7 @@ pub(crate) fn run() -> ! {
     loop {
         if state.presentation.observe(
             &state.clients,
-            &state.surfaces,
+            &mut state.surfaces,
             state.keyboard_focus,
             state.display_width,
             state.display_height,
@@ -658,17 +658,34 @@ pub(crate) fn run() -> ! {
         if len <= buf.len() && len >= 4 {
             let opcode = u32::from_le_bytes(buf[..4].try_into().unwrap());
             if opcode == platform::capability::presentation::SESSION_OPCODE {
-                let status = state.presentation.session(sender, &buf[..len], &handles)
-                    .err().unwrap_or(0);
+                let result = state.presentation.session(
+                    sender,
+                    &buf[..len],
+                    &handles,
+                    &state.clients,
+                    &mut state.surfaces,
+                );
+                if result == Ok(true) {
+                    frame.queue(None, false);
+                }
+                let status = result.err().unwrap_or(0);
                 let _ = platform::ipc::reply(sender, &u64::from(status).to_le_bytes());
                 continue;
             }
             if opcode == platform::capability::presentation::CONTROL_OPCODE {
-                let reply = state.presentation.control(
-                    sender, &buf[..len], &mut handles,
-                    &state.clients, &state.surfaces, state.keyboard_focus,
-                    state.display_width, state.display_height,
+                let (reply, needs_present) = state.presentation.control(
+                    sender,
+                    &buf[..len],
+                    &mut handles,
+                    &state.clients,
+                    &mut state.surfaces,
+                    state.keyboard_focus,
+                    state.display_width,
+                    state.display_height,
                 );
+                if needs_present {
+                    frame.queue(None, false);
+                }
                 let _ = platform::ipc::reply(sender, &reply);
                 continue;
             }

@@ -48,6 +48,24 @@ pub(crate) struct Authority {
     registry: Registry<Renderer>,
 }
 impl Authority {
+    fn refresh_surfaces(&self, clients: &[Client], surfaces: &mut [Surface]) -> bool {
+        let mut changed = false;
+        for surface in surfaces {
+            let protected = surface.live
+                && clients.iter().any(|client| {
+                    client.live
+                        && client.id == surface.owner
+                        && self.registry.protects(SurfaceKey {
+                            token: surface.token,
+                            client: client.id.0,
+                            sender: client.sender,
+                        })
+                });
+            changed |= surface.protected_presentation != protected;
+            surface.protected_presentation = protected;
+        }
+        changed
+    }
     fn owner(&self, sender: u64) -> Result<MeasuredPeer, u32> {
         if p::capability::check_thread(sender, "capabilities.manage") != Ok(1) {
             return Err(13);
@@ -69,7 +87,9 @@ impl Authority {
         sender: u64,
         bytes: &[u8],
         handles: &ReceivedHandles,
-    ) -> Result<(), u32> {
+        clients: &[Client],
+        surfaces: &mut [Surface],
+    ) -> Result<bool, u32> {
         if handles.0.count != 0 || !handles.0.is_user_delivery() {
             return Err(22);
         }
@@ -79,7 +99,7 @@ impl Authority {
         if self.owner.is_none() {
             self.owner = Some(owner);
         }
-        Ok(())
+        Ok(self.refresh_surfaces(clients, surfaces))
     }
     pub fn control(
         &mut self,
@@ -87,11 +107,12 @@ impl Authority {
         bytes: &[u8],
         handles: &mut ReceivedHandles,
         clients: &[Client],
-        surfaces: &[Surface],
+        surfaces: &mut [Surface],
         keyboard_focus: Option<usize>,
         width: u32,
         height: u32,
-    ) -> Vec<u8> {
+    ) -> (Vec<u8>, bool) {
+        let mut needs_present = false;
         let result = (|| {
             if !handles.0.is_user_delivery() {
                 return Err(22);
@@ -173,7 +194,7 @@ impl Authority {
                     if handles.0.count != 0 {
                         return Err(22);
                     }
-                    self.observe(clients, surfaces, keyboard_focus, width, height);
+                    needs_present |= self.observe(clients, surfaces, keyboard_focus, width, height);
                     self.registry.status(sender, correlation, registration)
                 }
                 w::Command::Cancel {
@@ -188,21 +209,26 @@ impl Authority {
                 w::Command::Bind { .. } => unreachable!(),
             }
         })();
-        w::encode_receipt(result.unwrap_or_else(w::Receipt::failure))
+        let reply = w::encode_receipt(result.unwrap_or_else(w::Receipt::failure))
             .expect("validated compositor receipt")
-            .to_vec()
+            .to_vec();
+        (
+            reply,
+            self.refresh_surfaces(clients, surfaces) || needs_present,
+        )
     }
     pub fn observe(
         &mut self,
         clients: &[Client],
-        surfaces: &[Surface],
+        surfaces: &mut [Surface],
         focus: Option<usize>,
         width: u32,
         height: u32,
     ) -> bool {
-        self.registry.observe(|renderer, key| {
+        let needs_present = self.registry.observe(|renderer, key| {
             observation(renderer, key, clients, surfaces, focus, width, height)
-        })
+        });
+        self.refresh_surfaces(clients, surfaces) || needs_present
     }
     pub fn full_presented(
         &mut self,
@@ -263,9 +289,8 @@ fn observation(
         && top >= 0
         && right <= i64::from(width)
         && bottom <= i64::from(height);
-    let above = |other: &Surface| {
-        (other.role.stack_layer(), other.z) > (selected.role.stack_layer(), selected.z)
-    };
+    let above =
+        |other: &Surface| (other.stack_layer(), other.z) > (selected.stack_layer(), selected.z);
     let unobscured = !surfaces.iter().enumerate().any(|(other_index, other)| {
         if other_index == index || !other.live || !other.visible || !above(other) {
             return false;

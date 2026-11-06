@@ -148,7 +148,7 @@ fn hit_test(surfaces: &[Surface], windows: &[Window], x: i32, y: i32) -> Option<
             && x < right
             && y >= surface.y
             && y < bottom
-            && (surface.role.stack_layer(), surface.z) >= best_stack
+            && (surface.stack_layer(), surface.z) >= best_stack
             && point_inside_window_frame(surfaces, windows, surface, x, y)
         {
             if surface.role == SurfaceRole::Panel {
@@ -184,7 +184,7 @@ fn hit_test(surfaces: &[Surface], windows: &[Window], x: i32, y: i32) -> Option<
                 }
             }
             hit = Some(index);
-            best_stack = (surface.role.stack_layer(), surface.z);
+            best_stack = (surface.stack_layer(), surface.z);
         }
     }
     hit
@@ -230,7 +230,7 @@ pub(crate) fn frontmost_process_surface(surfaces: &[Surface], process: u64) -> O
                     SurfaceRole::Toplevel | SurfaceRole::SecureOverlay | SurfaceRole::SystemModal
                 )
         })
-        .max_by_key(|(_, surface)| (surface.role.stack_layer(), surface.z))
+        .max_by_key(|(_, surface)| (surface.stack_layer(), surface.z))
         .map(|(index, _)| index)
 }
 
@@ -506,7 +506,7 @@ pub(crate) fn restore_keyboard_focus(surfaces: &[Surface], keyboard_focus: &mut 
                     SurfaceRole::Toplevel | SurfaceRole::SecureOverlay | SurfaceRole::SystemModal
                 )
         })
-        .max_by_key(|(_, surface)| (surface.role.stack_layer(), surface.z))
+        .max_by_key(|(_, surface)| (surface.stack_layer(), surface.z))
         .map(|(index, _)| index);
     update_keyboard_focus(surfaces, keyboard_focus, next);
 }

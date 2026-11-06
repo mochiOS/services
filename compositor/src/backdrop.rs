@@ -21,7 +21,7 @@ pub(crate) fn sample_background(
                 )
         })
         .collect();
-    stack.sort_by_key(|surface| std::cmp::Reverse((surface.role.stack_layer(), surface.z)));
+    stack.sort_by_key(|surface| std::cmp::Reverse((surface.stack_layer(), surface.z)));
     let mut sums = [0.0; 4];
     for (fx, fy) in [(0.2, 0.3), (0.5, 0.3), (0.8, 0.3), (0.3, 0.7), (0.7, 0.7)] {
         let x = area.x.saturating_add((area.width as f32 * fx) as i32);

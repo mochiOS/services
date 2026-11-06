@@ -119,6 +119,15 @@ impl<H> Registry<H> {
             .ok_or(2u32)?;
         Ok((&e.renderer, e.receipt.renderer, e.kind))
     }
+    /// Only an authenticated, bound registration owns a temporary window layer.
+    /// A renderer cannot acquire it through surface creation or a wire flag.
+    pub fn protects(&self, surface: SurfaceKey) -> bool {
+        self.entries.iter().any(|entry| {
+            entry.kind == Kind::Window
+                && entry.receipt.stage != Stage::Revoked
+                && entry.bound.is_some_and(|(key, _, _)| key == surface)
+        })
+    }
     pub fn bind(
         &mut self,
         correlation: Correlation,
@@ -162,6 +171,20 @@ impl<H> Registry<H> {
                 && o.unobscured
                 && o.content >= baseline
         }) else {
+            #[cfg(target_os = "mochios")]
+            if let Some(o) = observation {
+                let _ = mochi_user_platform::logger::write_status_fmt(format_args!(
+                    "compositor.service: protected presentation revoked surface={} focused={} visible={} unobscured={} content={} baseline={} focus={} expected_focus={}\n",
+                    surface.token,
+                    o.focused,
+                    o.visible,
+                    o.unobscured,
+                    o.content,
+                    baseline,
+                    o.focus,
+                    focus
+                ));
+            }
             e.receipt.stage = Stage::Revoked;
             return false;
         };
