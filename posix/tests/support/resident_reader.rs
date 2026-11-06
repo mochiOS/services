@@ -105,7 +105,7 @@ fn owned_graph_authenticates_dependencies_before_mapping_then_calls_and_releases
         .unwrap();
     READS.with_borrow(|r| {
         assert_eq!(r.verified, 2);
-        assert!(r.files.is_empty());
+        assert_eq!(r.files.len(), 2); // pin opened inode identities until retirement
     });
     let host = Host::default();
     library.install(|| host.clone()).unwrap();
@@ -116,6 +116,8 @@ fn owned_graph_authenticates_dependencies_before_mapping_then_calls_and_releases
     assert_eq!(library.symbol(b"absent").unwrap(), None);
     library.close(invoke).unwrap();
     assert_eq!(library.retained(), 0);
+    drop(library);
+    READS.with_borrow(|r| assert!(r.files.is_empty()));
     for range in &host.0.borrow().releases {
         assert!(access_at(range.address).is_none());
     }
@@ -151,4 +153,50 @@ fn unauthenticated_dependency_never_allocates_executable_memory_or_leaks_files()
         assert_eq!(r.verified, 1);
         assert!(r.files.is_empty());
     });
+}
+
+#[test]
+fn different_roots_report_their_shared_dependency_before_a_second_mapping() {
+    let fixture = signed_fixture();
+    // Change only DT_SONAME, preserving valid code and dependency references.
+    let alternate = Fixture::new(false);
+    let mut different = alternate.bytes[0].clone();
+    let at = different
+        .windows(8)
+        .position(|bytes| bytes == b"root.so\0")
+        .unwrap();
+    different[at..at + 7].copy_from_slice(b"toor.so");
+    let different = mochios_elf_signature::sign_adhoc(&different).unwrap();
+    let second = fixture.directory.join("second.so");
+    std::fs::write(&second, different).unwrap();
+    READS.with_borrow_mut(|r| *r = Reads::default());
+    let mut first = input::resident::Library::<Reader, Host, 2>::default();
+    let mut next = input::resident::Library::<Reader, Host, 2>::default();
+    let env = input::Environment {
+        library_path: Some(fixture.directory.as_os_str().as_bytes()),
+        ..Default::default()
+    };
+    first
+        .open(
+            &Reader,
+            b"root.so",
+            env,
+            Default::default(),
+            fixture.bases[0],
+        )
+        .unwrap();
+    next.open(
+        &Reader,
+        second.as_os_str().as_bytes(),
+        env,
+        Default::default(),
+        fixture.bases[0] + 0x200000,
+    )
+    .unwrap();
+    assert_ne!(first.source(), next.source());
+    assert!(first.intersects(&next));
+    assert_eq!(first.retained(), 0);
+    assert_eq!(next.retained(), 0);
+    drop((first, next));
+    READS.with_borrow(|r| assert!(r.files.is_empty()));
 }
