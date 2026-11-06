@@ -18,6 +18,8 @@ use std::{
     rc::Rc,
     sync::atomic::{AtomicU64, Ordering},
 };
+#[path = "support/resident_reader.rs"]
+mod owned_reader;
 
 #[derive(Default)]
 struct Faults {
