@@ -26,7 +26,10 @@ pub(crate) fn remote(error: ClientError<Error>) -> i32 {
 /// Capture once without moving the shared open-file cursor. No path is reopened.
 pub(crate) fn capture(handle: u32) -> Result<Vec<u8>, Error> {
     let mut bytes = Vec::new();
-    let mut chunk = [0; mnu_abi::provider::MAX_DATA_LEN];
+    let mut chunk = Vec::new();
+    chunk.try_reserve_exact(mnu_abi::provider::MAX_SHARED_READ_LEN)
+        .map_err(|_| status(errno::ENOMEM))?;
+    chunk.resize(mnu_abi::provider::MAX_SHARED_READ_LEN, 0);
     loop {
         let count = p::handle::read_at(handle, &mut chunk, bytes.len() as u64)?;
         if count > chunk.len() {

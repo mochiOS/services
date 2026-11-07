@@ -178,7 +178,10 @@ pub(crate) fn read_file_bounded(
         with_client(|client| client.open_at(OpenAtBase::ProcessRoot, posix::OPEN_READ, 0, path))?;
     let result = (|| {
         let mut output = Vec::new();
-        let mut buffer = [0u8; 4096];
+        let mut buffer = Vec::new();
+        buffer.try_reserve_exact(4096)
+            .map_err(|_| sys_error(mochi_user_syscall::ENOMEM))?;
+        buffer.resize(4096, 0);
         loop {
             let length = platform::handle::read(file.handle, &mut buffer)?;
             if length == 0 {
@@ -194,6 +197,15 @@ pub(crate) fn read_file_bounded(
                 .try_reserve(length)
                 .map_err(|_| sys_error(mochi_user_syscall::ENOMEM))?;
             output.extend_from_slice(&buffer[..length]);
+            // Small policy files need only one page. For executable images,
+            // grow toward one shared transfer instead of one RPC per page.
+            if length == buffer.len() && buffer.len() < mnu_abi::provider::MAX_SHARED_READ_LEN {
+                let next = (buffer.len() * 2).min(mnu_abi::provider::MAX_SHARED_READ_LEN);
+                buffer
+                    .try_reserve_exact(next - buffer.len())
+                    .map_err(|_| sys_error(mochi_user_syscall::ENOMEM))?;
+                buffer.resize(next, 0);
+            }
         }
     })();
     let closed = platform::handle::close(file.handle);

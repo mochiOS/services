@@ -8,7 +8,9 @@ fn runtime_capability_digest_reads_use_the_installed_posix_endpoint() {
     assert_eq!(server.matches("crate::bootstrap_file::read_file").count(), 1);
     assert!(!server.contains("platform::file::"));
     assert!(server.contains("authorization_reader = crate::persistent_grant::read_file;"));
-    assert!(grant.contains("read_file(executable)?"));
+    // Prompt brokers are attested by the measured code instance, rather than
+    // reopening a caller-supplied executable pathname.
+    assert!(grant.contains("trusted.role(&peer)"));
     assert!(server.contains("crate::persistent_grant::read_file(path)?"));
     let start = reader.find("pub(crate) fn read_file(").unwrap();
     let end = reader[start..].find("\nfn path_exists(").unwrap() + start;
