@@ -839,14 +839,7 @@ impl BootstrapOperations for Runtime {
         let Some(process) = self.session_processes.get(&process_id) else {
             return false;
         };
-        let ready=self.wait_ready(ReadyService::Binder, process.watch_target());
-        if ready {
-            if let Some(input) = self.raw_input.as_ref() {
-                if let Err(error) = input.warmup_ime() {
-                    platform::logln!("service-manager.service: IME warmup failed: {error:?}");
-                }
-            }
-        }
+        let ready = self.wait_ready(ReadyService::Binder, process.watch_target());
         #[cfg(mochios_consent_input_probe_306)]
         if ready {consent_input_probe::run(self.raw_input.as_ref().expect("raw input ready").0);}
         ready
@@ -1231,6 +1224,14 @@ fn resident(
     })();
     if let Err(error) = initial_publication {
         platform::logln!("service-manager.service: consent session publication failed: {error:?}");
+    } else if active_session.is_some()
+        && let Some(input) = runtime.as_ref().and_then(|runtime| runtime.raw_input.as_ref())
+    {
+        // Finish publishing the authenticated desktop/session authority before
+        // dictionary I/O competes with initial application and chrome setup.
+        if let Err(error) = input.warmup_ime() {
+            platform::logln!("service-manager.service: IME warmup failed: {error:?}");
+        }
     }
     #[cfg(mochios_process_domain_probe_308)]
     if let (Some(runtime), Some(session)) = (runtime.as_ref(), active_session) {
