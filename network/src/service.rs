@@ -31,10 +31,10 @@ pub(crate) fn run() -> ! {
     let driver = match DriverClient::connect(now.saturating_add(START_TIMEOUT)) {
         Ok(driver) => driver,
         Err(errno) => {
-            platform::logln!(
-                "network.service: virtio-net driver unavailable errno={}",
+            let _ = platform::logger::write_status_fmt(format_args!(
+                "network.service: virtio-net driver unavailable errno={}\n",
                 errno
-            );
+            ));
             unavailable(ready, errno, authority, streams, dns_objects)
         }
     };
@@ -44,7 +44,9 @@ pub(crate) fn run() -> ! {
     let mut stack = match NetworkStack::new(driver, xid) {
         Ok(stack) => stack,
         Err(errno) => {
-            platform::logln!("network.service: interface query failed errno={}", errno);
+            let _ = platform::logger::write_status_fmt(format_args!(
+                "network.service: interface query failed errno={}\n", errno
+            ));
             unavailable(ready, errno, authority, streams, dns_objects)
         }
     };
@@ -71,7 +73,9 @@ pub(crate) fn run() -> ! {
         info.device_id
     );
     if let Err(errno) = stack.start(now) {
-        platform::logln!("network.service: DHCP startup deferred errno={}", errno);
+        let _ = platform::logger::write_status_fmt(format_args!(
+            "network.service: DHCP startup deferred errno={}\n", errno
+        ));
     }
     notify_ready(ready, 0, &authority);
     let mut tls = TlsManager::new();
