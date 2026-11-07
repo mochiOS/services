@@ -3,7 +3,7 @@
 mod probe;
 
 #[test]
-fn shared_read_native_failures_release_scratch_handles_and_keep_completed_prefixes() {
+fn shared_read_native_failures_release_scratch_handles_and_bound_each_call() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
         .canonicalize()
@@ -147,7 +147,7 @@ fn run(pointer:u64,length:usize)->u64{outcome(pointer,length).expect("not an inl
 fn read(length:usize)->u64{provider_read(&ProviderObject{object_id:41},1,length as u64)}
 fn main(){
     let chunk=provider::MAX_SHARED_READ_LEN;
-    reset();assert_eq!(run(1,chunk+3),(chunk+3)as u64);assert_eq!((CALLS.get(),COPIES.get()),(2,2));
+    reset();assert_eq!(run(1,chunk+3),chunk as u64);assert_eq!((CALLS.get(),COPIES.get()),(1,1));
     for error in [Error::InvalidArgument,Error::AccessDenied,Error::NotReady,Error::ResourceUnavailable,Error::BackingFailure]{
         reset();CREATE_ERROR.set(error.into_raw());assert_eq!(run(1,8),error.into_raw());assert_eq!(CALLS.get(),0);
         reset();LOOKUP_ERROR.set(Some(error));assert_eq!(run(1,8),error.into_raw());assert_eq!(CALLS.get(),0);
@@ -174,9 +174,10 @@ fn main(){
     reset();MODE.set(9);assert_eq!(outcome(1,8),None);assert_eq!(COPIES.get(),0);
     reset();MODE.set(9);assert_eq!(read(8192),8192);
     assert_eq!((CALLS.get(),INLINE_CALLS.get(),CLOSES.get()),(1,3,1));assert!(!LIVE.get());
-    // Declining a later chunk returns its completed prefix, never replays it.
+    // Later work belongs to the caller's next read. One large request must
+    // return after one shared transfer, without consuming or replaying it.
     reset();MODE.set(9);FAIL_AFTER.set(1);assert_eq!(read(chunk+8),chunk as u64);
-    assert_eq!((CALLS.get(),INLINE_CALLS.get(),CLOSES.get()),(2,0,1));
+    assert_eq!((CALLS.get(),INLINE_CALLS.get(),CLOSES.get()),(1,0,1));
     // A positioned zero count remains EOF and must not fall back.
     reset();MODE.set(10);assert_eq!(read(8192),0);assert_eq!(INLINE_CALLS.get(),0);
     for mode in [5,11,12]{reset();MODE.set(mode);assert_eq!(read(8192),Error::BackingFailure.into_raw());assert_eq!(INLINE_CALLS.get(),0);}
@@ -189,15 +190,15 @@ fn main(){
     // Positioned chunks keep source positions independent of shared-memory
     // offsets and validate the returned position before exposing any bytes.
     for offset in [0,41,u64::MAX-(chunk+3)as u64]{
-        reset();POSITION.set(Some(offset));assert_eq!(run(1,chunk+3),(chunk+3)as u64);
-        assert_eq!((CALLS.get(),COPIES.get()),(2,2));
+        reset();POSITION.set(Some(offset));assert_eq!(run(1,chunk+3),chunk as u64);
+        assert_eq!((CALLS.get(),COPIES.get()),(1,1));
     }
     reset();POSITION.set(Some(41));MODE.set(13);assert_eq!(run(1,8),Error::BackingFailure.into_raw());assert_eq!(COPIES.get(),0);
     reset();POSITION.set(Some(41));MODE.set(9);assert_eq!(outcome(1,8),None);assert_eq!((CALLS.get(),COPIES.get()),(1,0));
-    reset();POSITION.set(Some(41));MODE.set(9);FAIL_AFTER.set(1);assert_eq!(outcome(1,chunk+1),Some(chunk as u64));assert_eq!(CALLS.get(),2);
+    reset();POSITION.set(Some(41));MODE.set(9);FAIL_AFTER.set(1);assert_eq!(outcome(1,chunk+1),Some(chunk as u64));assert_eq!(CALLS.get(),1);
     for error in [Error::NotReady.into_raw(),(-38i64)as u64,Error::AccessDenied.into_raw()]{
         reset();POSITION.set(Some(41));IPC_ERROR.set(error);assert_eq!(run(1,8),error);assert_eq!(CALLS.get(),1);
-        reset();POSITION.set(Some(41));IPC_ERROR.set(error);FAIL_AFTER.set(1);assert_eq!(run(1,chunk+1),chunk as u64);assert_eq!(CALLS.get(),2);
+        reset();POSITION.set(Some(41));IPC_ERROR.set(error);FAIL_AFTER.set(1);assert_eq!(run(1,chunk+1),chunk as u64);assert_eq!(CALLS.get(),1);
     }
     reset();assert_eq!(provider_read_shared_at(&ProviderObject{object_id:41},77,1,8,u64::MAX),Some(Error::LimitExceeded.into_raw()));
     assert_eq!((CALLS.get(),CLOSES.get(),COPIES.get()),(0,0,0));assert!(!LIVE.get());
