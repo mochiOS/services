@@ -11,6 +11,7 @@ struct State {
     drops: usize,
     failed: usize,
     info: usize,
+    request: Vec<u8>,
 }
 thread_local! {static STATE:RefCell<State>=RefCell::new(State::default());}
 #[macro_export]
@@ -39,8 +40,14 @@ pub mod ipc {
             std::panic::panic_any(Stop);
         }
         crate::STATE.with_borrow_mut(|s| s.delivered = true);
-        let n = crate::wire::encode_empty(crate::wire::Opcode::GetInterfaceInfo, u64::MAX, bytes)
-            .unwrap();
+        let request = crate::STATE.with_borrow(|s| s.request.clone());
+        let n = if request.is_empty() {
+            crate::wire::encode_empty(crate::wire::Opcode::GetInterfaceInfo, u64::MAX, bytes)
+                .unwrap()
+        } else {
+            bytes[..request.len()].copy_from_slice(&request);
+            request.len()
+        };
         Ok((77 << 32) | n as u64)
     }
     pub fn reply(sender: u64, bytes: &[u8]) -> Result<(), mochi_user_syscall::SysError> {
@@ -107,10 +114,18 @@ mod device {
             crate::STATE.with_borrow_mut(|s| s.failed += 1);
         }
         pub fn transmit(&mut self, _: &[u8]) -> Result<(), NetError> {
-            panic!("unexpected transmit")
+            crate::STATE.with_borrow(|s| match s.mode {
+                4 => Err(NetError::QueueExhausted),
+                5 => Err(NetError::Failure(mochi_user_syscall::EIO)),
+                6 => Ok(()),
+                _ => panic!("unexpected transmit"),
+            })
         }
         pub fn receive(&mut self) -> Option<alloc::vec::Vec<u8>> {
-            panic!("unexpected receive")
+            crate::STATE.with_borrow(|s| {
+                assert_eq!(s.mode, 3, "unexpected receive");
+                None
+            })
         }
         pub fn statistics(&self) -> crate::wire::DeviceStatistics {
             panic!("unexpected statistics")
@@ -169,4 +184,32 @@ fn authenticated_raw_clients_still_receive_real_interface_information() {
         let (id, info) = wire::decode_interface_info(&s.replies[0]).unwrap();
         assert_eq!((id, info.mtu), (u64::MAX, 1500));
     });
+}
+
+#[test]
+fn empty_receive_and_transmit_failures_preserve_negative_wire_statuses() {
+    for (mode, request_opcode, reply_opcode, expected) in [
+        (3, wire::Opcode::ReceiveFrame, wire::Opcode::FrameReceived, -11),
+        (4, wire::Opcode::TransmitFrame, wire::Opcode::TransmitComplete, -11),
+        (5, wire::Opcode::TransmitFrame, wire::Opcode::TransmitComplete, -5),
+        (6, wire::Opcode::TransmitFrame, wire::Opcode::TransmitComplete, 0),
+    ] {
+        let mut request = vec![0; wire::HEADER_LEN + 4 + wire::MAX_FRAME_LEN];
+        let length = if request_opcode == wire::Opcode::ReceiveFrame {
+            wire::encode_empty(request_opcode, u64::MAX, &mut request).unwrap()
+        } else {
+            wire::encode_frame(request_opcode, u64::MAX, &[0; 14], &mut request).unwrap()
+        };
+        request.truncate(length);
+        STATE.with_borrow_mut(|s| *s = State {
+            mode, allowed: true, request, ..Default::default()
+        });
+        let result = std::panic::catch_unwind(service::run);
+        assert!(result.unwrap_err().is::<ipc::Stop>());
+        STATE.with_borrow(|s| {
+            assert_eq!(s.replies.len(), 1);
+            let (id, status) = wire::decode_status(reply_opcode, &s.replies[0]).unwrap();
+            assert_eq!((id, status), (u64::MAX, expected));
+        });
+    }
 }
