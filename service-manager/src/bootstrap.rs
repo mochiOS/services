@@ -1207,11 +1207,6 @@ fn resident(
             })
             .ok()
         });
-    if active_session.is_some()
-        && let Some(runtime) = runtime.as_mut()
-    {
-        crate::portal::prewarm(&mut runtime.permission_prompt, runtime.logger_endpoint);
-    }
     let mut request_bytes = [0u8; 1024];
     let mut consent_session = crate::consent_session::Epoch::default();
     let initial_context = active_session.map_or((1, false), |session| (session.id, true));
@@ -1225,12 +1220,17 @@ fn resident(
     if let Err(error) = initial_publication {
         platform::logln!("service-manager.service: consent session publication failed: {error:?}");
     } else if active_session.is_some()
-        && let Some(input) = runtime.as_ref().and_then(|runtime| runtime.raw_input.as_ref())
+        && let Some(runtime) = runtime.as_mut()
     {
+        // Presenters depend on this authenticated publication. Starting them
+        // beforehand can leave bootstrap waiting on their own session gate.
+        crate::portal::prewarm(&mut runtime.permission_prompt, runtime.logger_endpoint);
         // Finish publishing the authenticated desktop/session authority before
         // dictionary I/O competes with initial application and chrome setup.
-        if let Err(error) = input.warmup_ime() {
-            platform::logln!("service-manager.service: IME warmup failed: {error:?}");
+        if let Some(input) = runtime.raw_input.as_ref() {
+            if let Err(error) = input.warmup_ime() {
+                platform::logln!("service-manager.service: IME warmup failed: {error:?}");
+            }
         }
     }
     #[cfg(mochios_process_domain_probe_308)]
