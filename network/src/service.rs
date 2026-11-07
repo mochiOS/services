@@ -134,12 +134,7 @@ pub(crate) fn run() -> ! {
                 }
                 close_received(&handles);
             }
-            Err(error)
-                if error.native_error() == Some(mochi_user_syscall::NativeError::NotReady) =>
-            {
-                platform::thread::yield_now()
-            }
-            Err(_) => platform::thread::yield_now(),
+            Err(_) => idle(),
         }
     }
 }
@@ -534,13 +529,16 @@ fn unavailable(
                 }
                 close_received(&handles);
             }
-            Err(error)
-                if error.native_error() == Some(mochi_user_syscall::NativeError::NotReady) =>
-            {
-                platform::thread::yield_now()
-            }
-            Err(_) => platform::thread::yield_now(),
+            Err(_) => idle(),
         }
+    }
+}
+
+fn idle() {
+    // No packet or request is pending. Stay off the run queue for one timer
+    // period instead of immediately polling again after every scheduler yield.
+    if platform::thread::sleep_milliseconds(2).is_err() {
+        platform::thread::yield_now();
     }
 }
 
