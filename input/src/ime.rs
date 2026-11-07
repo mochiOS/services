@@ -30,7 +30,14 @@ impl InputMethod {
     pub fn start_system_dictionary() -> std::io::Result<Self> {
         Self::load_when_requested(|| {
             eprintln!("input.service: loading IME dictionary");
-            let engine = Engine::open(DICTIONARY_PATH).ok();
+            let started = std::time::Instant::now();
+            let engine = Engine::open(DICTIONARY_PATH)
+                .map_err(|error| {
+                    mochi_user_platform::logln!(
+                        "input.service: IME dictionary load failed: {error}"
+                    );
+                })
+                .ok();
             if engine.is_some() {
                 mochi_user_platform::logln!("input.service: Japanese IME dictionary loaded");
             } else {
@@ -40,8 +47,9 @@ impl InputMethod {
                 );
             }
             eprintln!(
-                "input.service: IME initialization finished available={}",
-                engine.is_some()
+                "input.service: IME initialization finished available={} elapsed_ms={}",
+                engine.is_some(),
+                started.elapsed().as_millis()
             );
             engine
         })
