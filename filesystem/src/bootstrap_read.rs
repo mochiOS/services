@@ -2,9 +2,10 @@
 //! The caller selects an authenticated partition; this module has no boot
 //! slot, service-name, pathname-policy, or kernel descriptor knowledge.
 
+use std::collections::VecDeque;
 use std::error::Error;
 use std::io;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use ext4plus::error::Ext4Error;
 use ext4plus::{Ext4, FollowSymlinks};
@@ -15,7 +16,13 @@ use crate::storage::{PartitionIo, SectorDevice};
 
 pub struct BootstrapReader {
     filesystem: Ext4,
+    // Only successful resolutions on this immutable partition are retained.
+    // Bound both the count and the key size independently of caller input.
+    inodes: Mutex<VecDeque<(String, Inode)>>,
 }
+
+const CACHED_INODES: usize = 64;
+const CACHED_PATH_BYTES: usize = 4096;
 
 pub struct BootstrapDirectoryPage {
     pub names: Vec<String>,
@@ -58,7 +65,10 @@ impl BootstrapReader {
         // Never attach a writer to the boot generation.
         let filesystem =
             Ext4::load(Box::new(ImmutableExt4Storage::new(partition))).map_err(filesystem_error)?;
-        Ok(Self { filesystem })
+        Ok(Self {
+            filesystem,
+            inodes: Mutex::new(VecDeque::new()),
+        })
     }
 
     fn inode(&self, path: &str) -> io::Result<Inode> {
@@ -68,13 +78,39 @@ impl BootstrapReader {
                 "absolute path required",
             ));
         }
-        self.filesystem
-            .path_to_inode(
-                path.try_into()
-                    .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?,
-                FollowSymlinks::All,
-            )
-            .map_err(filesystem_error)
+        let ext4_path = path
+            .try_into()
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+        let mut cached = self
+            .inodes
+            .lock()
+            .map_err(|_| io::Error::other("bootstrap inode cache lock poisoned"))?;
+        if let Some(index) = cached.iter().position(|(key, _)| key == path) {
+            let entry = cached
+                .remove(index)
+                .ok_or_else(|| io::Error::other("bootstrap inode cache entry disappeared"))?;
+            let inode = entry.1.clone();
+            cached.push_front(entry);
+            return Ok(inode);
+        }
+        let inode = self
+            .filesystem
+            .path_to_inode(ext4_path, FollowSymlinks::All)
+            .map_err(filesystem_error)?;
+        // Caching is optional under allocation pressure. Failed resolutions
+        // are never cached, and no mutable mount uses this reader.
+        let mut key = String::new();
+        if path.len() <= CACHED_PATH_BYTES
+            && key.try_reserve_exact(path.len()).is_ok()
+            && cached.try_reserve(1).is_ok()
+        {
+            key.push_str(path);
+            if cached.len() == CACHED_INODES {
+                cached.pop_back();
+            }
+            cached.push_front((key, inode.clone()));
+        }
+        Ok(inode)
     }
 
     fn regular_inode(&self, path: &str) -> io::Result<Inode> {

@@ -24,6 +24,13 @@ impl Fixture {
     }
 
     fn reader(&self) -> BootstrapReader {
+        self.reader_with_device(Disk)
+    }
+
+    fn reader_with_device<D>(&self, device: impl FnOnce(std::fs::File) -> D) -> BootstrapReader
+    where
+        D: SectorDevice<Error = std::io::Error> + Send + 'static,
+    {
         let source = self.0.join("source");
         std::fs::create_dir(&source).unwrap();
         std::fs::create_dir(source.join("directory")).unwrap();
@@ -31,6 +38,7 @@ impl Fixture {
         std::fs::write(source.join("empty"), b"").unwrap();
         let large: Vec<u8> = (0..130_000).map(|index| (index % 251) as u8).collect();
         std::fs::write(source.join("large"), large).unwrap();
+        std::fs::write(source.join("cache-churn"), vec![0x5a; 2 * 1024 * 1024]).unwrap();
         std::fs::create_dir(source.join("long-names")).unwrap();
         for index in 0..140 {
             let name = format!("{index:03}{}", "x".repeat(252));
@@ -57,7 +65,7 @@ impl Fixture {
         );
         let file = std::fs::File::open(image).unwrap();
         let sectors = file.metadata().unwrap().len() / 512;
-        BootstrapReader::load(Arc::new(PartitionIo::new(Disk(file), 0, sectors))).unwrap()
+        BootstrapReader::load(Arc::new(PartitionIo::new(device(file), 0, sectors))).unwrap()
     }
 }
 
@@ -204,6 +212,40 @@ fn bootstrap_errors_preserve_path_and_object_failures() {
 }
 
 struct Disk(std::fs::File);
+
+#[test]
+fn immutable_path_resolution_survives_data_read_ahead_eviction() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct CountingDisk(Disk, Arc<AtomicUsize>);
+    impl SectorDevice for CountingDisk {
+        type Error = std::io::Error;
+        fn read_sectors(&mut self, lba: u64, bytes: &mut [u8]) -> Result<(), Self::Error> {
+            self.1.fetch_add(1, Ordering::Relaxed);
+            self.0.read_sectors(lba, bytes)
+        }
+        fn write_sectors(&mut self, _: u64, _: &[u8]) -> Result<(), Self::Error> {
+            panic!("immutable reader attempted a write")
+        }
+        fn flush(&mut self) -> Result<(), Self::Error> {
+            panic!("immutable reader attempted a flush")
+        }
+    }
+
+    let fixture = Fixture::new();
+    let reads = Arc::new(AtomicUsize::new(0));
+    let reader = fixture.reader_with_device(|file| CountingDisk(Disk(file), reads.clone()));
+    let mut output = [0xaa];
+    assert_eq!(reader.read_at("/empty", 0, &mut output).unwrap(), 0);
+    assert_eq!(
+        reader.read("/cache-churn", 2 * 1024 * 1024).unwrap().len(),
+        2 * 1024 * 1024
+    );
+    let before = reads.load(Ordering::Relaxed);
+    assert_eq!(reader.read_at("/empty", 0, &mut output).unwrap(), 0);
+    assert_eq!(output, [0xaa]);
+    assert_eq!(reads.load(Ordering::Relaxed), before);
+}
 
 fn bootstrap_request(opcode: u16, path: &[u8], offset: u64, budget: u32) -> Vec<u8> {
     use mochios_filesystem_protocol as wire;
