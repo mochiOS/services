@@ -10,7 +10,8 @@
   "sdk": {
     "status": "unpublished development exec-replay candidate",
     "published_base_sha256": "f35b429915e5e703eddff984e9775428aea9d6f5d564fe3cf0cd0e56c67e4e5b",
-    "runtime_archive_sha256": "cec95d31f502a5eaeced1d08015fc52e07d1efd5e139f4897d87180bb242b8c4"
+    "runtime_archive_sha256": "3c2c793c186c6917615b974669c4fdb5bacab10c1b2c2935a691b003db431c32",
+    "artifact_verification": "Rebuilt native child is byte-identical to recorded staged child using this archive."
   },
   "native": {
     "complete": true,
