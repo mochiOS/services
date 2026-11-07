@@ -461,6 +461,9 @@ pub(crate) fn update_keyboard_focus(
         if let Some(surface) = surfaces.get(index)
             && surface.live
         {
+            // Preemption cancels the lease. A delayed release must never
+            // pull input away from the new focus owner.
+            surface.keyboard_capture.set(None);
             send_event(
                 surface.event_endpoint,
                 surface.token,
@@ -688,6 +691,15 @@ pub(crate) fn handle_input_event(
             None
         }
         platform::input::EVENT_KIND_KEY => {
+            let shell_blocked = crate::keyboard_capture::shell_shortcuts_blocked(surfaces);
+            if shell_blocked {
+                *app_switcher_active = false;
+                if let Some(index) = *keyboard_focus
+                    && surfaces[index].keyboard_capture.get().is_some()
+                {
+                    crate::keyboard_capture::release(surfaces, keyboard_focus, index);
+                }
+            }
             let pressed = event.flags & platform::input::FLAG_PRESS != 0;
             let released = event.flags & platform::input::FLAG_RELEASE != 0;
             let alt_tab = pressed
@@ -702,7 +714,7 @@ pub(crate) fn handle_input_event(
                     platform::input::KEY_LEFT_ALT | platform::input::KEY_RIGHT_ALT
                 );
             let escape = pressed && event.keycode == platform::input::KEY_ESC;
-            if alt_tab || *app_switcher_active {
+            if !shell_blocked && (alt_tab || *app_switcher_active) {
                 *app_switcher_active = !alt_released && !escape;
                 if let Some(panel) = surfaces
                     .iter()
@@ -725,7 +737,7 @@ pub(crate) fn handle_input_event(
                 }
                 return None;
             }
-            if alt_space {
+            if !shell_blocked && alt_space {
                 if let Some(panel) = surfaces
                     .iter()
                     .enumerate()

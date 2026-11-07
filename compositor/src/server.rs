@@ -225,6 +225,23 @@ fn handle_request(
             put_u32(&mut reply, 0, 0);
             put_u32(&mut reply, 4, renderer_caps);
         }
+        OP_SET_KEYBOARD_CAPTURE => {
+            let captured = read_u32(request, 12);
+            if request.len() != 16 || !matches!(captured, Some(0 | 1)) {
+                put_u32(&mut reply, 0, errno_status(mochi_user_syscall::EINVAL));
+                return reply;
+            }
+            let result = crate::keyboard_capture::set(
+                surfaces,
+                keyboard_focus,
+                modal_sessions,
+                client,
+                crate::surface::SurfaceHandle(read_u64(request, 4).unwrap_or(0)),
+                captured == Some(1),
+            );
+            put_u32(&mut reply, 0, result.err().unwrap_or(0));
+            *needs_present |= result.is_ok();
+        }
         OP_ACTIVATE_SURFACE => {
             let process = platform::ipc::endpoint_owner_process(sender).unwrap_or(0);
             if let Some(modal_process) = modal_sessions

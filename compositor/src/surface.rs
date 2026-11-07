@@ -56,7 +56,10 @@ impl SurfaceRole {
 
     pub(crate) fn privileged_overlay_rights(self) -> Result<SurfaceRights, u32> {
         match self {
-            Self::Background | Self::Panel | Self::Toplevel | Self::Popup | Self::SystemModal => {
+            Self::Panel => Ok(SurfaceRights {
+                bits: SurfaceRights::GENERAL_CLIENT.bits | SurfaceRights::FOCUS_CONTROL.bits,
+            }),
+            Self::Background | Self::Toplevel | Self::Popup | Self::SystemModal => {
                 Ok(SurfaceRights::GENERAL_CLIENT)
             }
             Self::SecureOverlay => Err(errno_status(mochi_user_syscall::EACCES)),
@@ -95,7 +98,6 @@ impl SurfaceRights {
     pub(crate) const SET_POSITION: Self = Self { bits: 1 << 4 };
     #[allow(dead_code)]
     pub(crate) const SET_Z_ORDER: Self = Self { bits: 1 << 5 };
-    #[allow(dead_code)]
     pub(crate) const FOCUS_CONTROL: Self = Self { bits: 1 << 6 };
     pub(crate) const GENERAL_CLIENT: Self = Self {
         bits: Self::ATTACH_BUFFER.bits | Self::DAMAGE.bits | Self::COMMIT.bits | Self::DESTROY.bits,
@@ -172,6 +174,7 @@ pub(crate) struct Surface {
     pub(crate) content_generation: u64,
     pub(crate) z: u32,
     pub(crate) panel_pointer_observed: std::cell::Cell<bool>,
+    pub(crate) keyboard_capture: std::cell::Cell<Option<crate::keyboard_capture::Capture>>,
 }
 
 impl Surface {
@@ -222,10 +225,12 @@ impl Surface {
             content_generation: 0,
             z: 0,
             panel_pointer_observed: std::cell::Cell::new(false),
+            keyboard_capture: std::cell::Cell::new(None),
         }
     }
 
     pub(crate) fn reset(&mut self) {
+        self.keyboard_capture.set(None);
         self.panel_pointer_observed.set(false);
         self.live = false;
         self.owner = ClientId(0);
@@ -303,6 +308,7 @@ pub(crate) fn destroy_surface_tree(
     while let Some(child) = surface_index_for_child(surfaces, handle) {
         destroy_surface_tree(surfaces, windows, child, pointer_focus, keyboard_focus);
     }
+    crate::keyboard_capture::release(surfaces, keyboard_focus, index);
     let window_id = surfaces[index].window;
     if surfaces[index].is_decoration {
         if let Some(window_index) = window_index_by_id(windows, window_id) {

@@ -13,6 +13,7 @@ mod frame_buffer;
 mod geometry;
 mod gpu_compositor;
 mod input;
+mod keyboard_capture;
 mod protocol;
 mod presentation;
 mod presentation_native;
