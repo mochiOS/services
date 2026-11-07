@@ -66,6 +66,7 @@ impl Presenter {
                 }
             }
         }
+        eprintln!("service-manager.service: preparing execution presenter");
         let result = (|| {
             let token = p::service_ready::generate_token()?;
             let target = p::service_ready::Target {
@@ -74,6 +75,7 @@ impl Presenter {
             };
             let posix = p::handle::inherited(mochios_posix_protocol::CONTROL_HANDLE_KEY)?;
             let process = crate::service_launcher::spawn_execution_prompt_server(logger, target)?;
+            eprintln!("service-manager.service: execution presenter process created");
             let mut worker = Worker {
                 process: Some(process),
                 watch: None,
@@ -105,6 +107,7 @@ impl Presenter {
         })();
         match result {
             Ok(worker) => {
+                eprintln!("service-manager.service: execution presenter ready");
                 let _ = p::logger::write_status_fmt(format_args!(
                     "service-manager.service: execution presenter ready pid={}\n",
                     worker.process.as_ref().unwrap().process_id()

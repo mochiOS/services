@@ -189,10 +189,25 @@ impl DriverController {
     pub(crate) fn wait_for_complete(
         &mut self,
         drivers_process: ProcessWatchTarget,
+        handshake: &mut crate::readiness::ReadyHandshake,
+        deferred: &mut alloc::collections::VecDeque<crate::readiness::DeferredMessage>,
     ) -> Result<(), DriverControlError> {
-        let mut buffer = [0u8; DRIVER_HELLO_LEN];
-        let length = wait_for_message(drivers_process, &mut buffer)?;
-        self.session.accept_complete(&buffer[..length])
+        let message = handshake
+            .wait_for_process_message(drivers_process, DRIVER_CONTROL_TIMEOUT_TICKS, deferred)
+            .map_err(|error| {
+                use crate::readiness::ReadyError;
+                match error {
+                    ReadyError::Ipc(error) => DriverControlError::Ipc(error),
+                    ReadyError::Clock(error) => DriverControlError::Clock(error),
+                    ReadyError::ProcessStatus(error) => {
+                        DriverControlError::ProcessStatus(error.errno())
+                    }
+                    ReadyError::ProcessExited(status) => DriverControlError::ProcessExited(status),
+                    ReadyError::TimedOut => DriverControlError::TimedOut,
+                    _ => DriverControlError::UnexpectedMessage,
+                }
+            })?;
+        self.session.accept_complete(&message.bytes)
     }
 }
 
@@ -215,8 +230,7 @@ fn wait_for_message(
                 };
             }
             Err(error)
-                if error.native_error() == Some(mochi_user_syscall::NativeError::NotReady) =>
-            {}
+                if error.native_error() == Some(mochi_user_syscall::NativeError::NotReady) => {}
             Err(error) => return Err(DriverControlError::Ipc(error.raw().unsigned_abs())),
         }
         if let Some(status) = process

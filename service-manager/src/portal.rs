@@ -302,6 +302,7 @@ pub(crate) fn prewarm(prompt_process: &mut PermissionPrompts, logger_endpoint: u
     if prompt_process.process.is_some() {
         return;
     }
+    eprintln!("service-manager.service: preparing permission presenter");
     let token = match platform::service_ready::generate_token() {
         Ok(token) => token,
         Err(error) => {
@@ -319,12 +320,16 @@ pub(crate) fn prewarm(prompt_process: &mut PermissionPrompts, logger_endpoint: u
         };
         let process =
             service_launcher::spawn_permission_prompt_server(logger_endpoint, token, target)?;
+        eprintln!("service-manager.service: permission presenter process created");
         let endpoint = match crate::readiness::wait_for_published_endpoint(
             token,
             process.watch_target(),
             &mut prompt_process.deferred,
         ) {
-            Ok(endpoint) => endpoint,
+            Ok(endpoint) => {
+                eprintln!("service-manager.service: permission presenter ready");
+                endpoint
+            }
             Err(error) => {
                 process.terminate();
                 platform::logln!(

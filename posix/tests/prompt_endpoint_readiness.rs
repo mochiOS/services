@@ -5,16 +5,9 @@ extern crate self as mochi_user_syscall;
 use std::collections::VecDeque;
 use std::sync::Mutex;
 
-pub use mochi_user_platform_real::syscall::NativeError;
-#[derive(Debug)]
-pub struct SysError;
-impl SysError {
-    pub fn raw(&self) -> i64 {
-        NativeError::NotReady.into_raw() as i64
-    }
-    pub fn native_error(&self) -> Option<NativeError> {
-        Some(NativeError::NotReady)
-    }
+pub use mochi_user_platform_real::syscall::{NativeError, SysError};
+pub mod syscall {
+    pub use mochi_user_platform_real::syscall::*;
 }
 
 #[derive(Default)]
@@ -77,7 +70,7 @@ pub mod ipc {
     ) -> Result<u64, super::SysError> {
         let mut state = super::STATE.lock().unwrap();
         let Some((message, attached)) = state.as_mut().unwrap().messages.pop_front() else {
-            return Err(super::SysError);
+            return Err(super::NativeError::NotReady.into_raw().into());
         };
         bytes[..message.len()].copy_from_slice(&message);
         *handles = attached;
@@ -146,6 +139,51 @@ fn publication(token: u64, rights: u64) -> (Vec<u8>, ipc::IpcObjectHandles) {
         service_ready::handle_notification(token, 0).to_vec(),
         handles,
     )
+}
+
+#[test]
+fn discovery_reply_survives_a_ready_wait_and_keeps_network_publication() {
+    let _serial = TEST_LOCK.lock().unwrap();
+    let target = process_watch::ProcessWatchTarget::RetainedHandle(7);
+    for handoff_first in [false, true] {
+        *STATE.lock().unwrap() = Some(State::default());
+        let mut ready = readiness::ReadyHandshake::create().unwrap();
+        let input = ready.target(readiness::ReadyService::Input).token;
+        let network = ready.target(readiness::ReadyService::Network).token;
+        STATE.lock().unwrap().as_mut().unwrap().messages = VecDeque::from([
+            (
+                b"discovery complete".to_vec(),
+                ipc::IpcObjectHandles::default(),
+            ),
+            publication(
+                network,
+                handle::HANDLE_RIGHT_SEND
+                    | handle::HANDLE_RIGHT_DUPLICATE
+                    | handle::HANDLE_RIGHT_TRANSFER,
+            ),
+            (
+                service_ready::notification(input, 0).to_vec(),
+                ipc::IpcObjectHandles::default(),
+            ),
+        ]);
+        ready
+            .wait_for_service_ready(readiness::ReadyService::Input, target)
+            .unwrap();
+        let mut deferred = if handoff_first {
+            ready.take_deferred()
+        } else {
+            VecDeque::new()
+        };
+        let ticks = STATE.lock().unwrap().as_ref().unwrap().ticks;
+        let reply = ready
+            .wait_for_process_message(target, 5000, &mut deferred)
+            .unwrap();
+        assert_eq!(reply.sender, 99);
+        assert_eq!(reply.bytes, b"discovery complete");
+        assert_eq!(STATE.lock().unwrap().as_ref().unwrap().ticks, ticks);
+        assert_eq!(ready.take_network_endpoint(target), Ok(Some(41)));
+        assert!(STATE.lock().unwrap().as_ref().unwrap().closed.is_empty());
+    }
 }
 
 #[test]

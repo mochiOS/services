@@ -1031,9 +1031,12 @@ impl BootstrapOperations for Runtime {
     }
 
     fn wait_discovery_complete(&mut self, process: &Self::DriversProcess) -> bool {
+        let Some(handshake) = self.ready.as_mut() else {
+            return false;
+        };
         match self
             .driver_controller
-            .wait_for_complete(process.watch_target())
+            .wait_for_complete(process.watch_target(), handshake, &mut self.deferred_requests)
         {
             Ok(()) => {
                 platform::logln!("service-manager.service: driver discovery complete");
@@ -1210,6 +1213,7 @@ fn resident(
     let mut request_bytes = [0u8; 1024];
     let mut consent_session = crate::consent_session::Epoch::default();
     let initial_context = active_session.map_or((1, false), |session| (session.id, true));
+    eprintln!("service-manager.service: publishing desktop session");
     let initial_publication = (|| {
         if let Some(session) = active_session {
             runtime.as_ref().ok_or_else(|| mochi_user_syscall::SysError::from_raw(-3))?
@@ -1217,6 +1221,7 @@ fn resident(
         }
         consent_session.native(initial_context.0, initial_context.1)
     })();
+    eprintln!("service-manager.service: desktop session publication finished success={}", initial_publication.is_ok());
     if let Err(error) = initial_publication {
         platform::logln!("service-manager.service: consent session publication failed: {error:?}");
     } else if active_session.is_some()

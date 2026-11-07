@@ -253,6 +253,74 @@ impl ReadyHandshake {
         core::mem::take(&mut self.deferred)
     }
 
+    /// Other startup waiters may already have received this process's reply.
+    /// Retain unrelated calls and route endpoint-bearing notifications through
+    /// the same handshake instead of consuming them as driver-control bytes.
+    pub(crate) fn wait_for_process_message(
+        &mut self,
+        target: ProcessWatchTarget,
+        timeout: u64,
+        deferred: &mut VecDeque<DeferredMessage>,
+    ) -> Result<DeferredMessage, ReadyError> {
+        let process = ProcessWatch::open(target).map_err(ReadyError::ProcessStatus)?;
+        let expected = process.process_id().map_err(ReadyError::ProcessStatus)?;
+        let started = current_ticks()?;
+        loop {
+            if let Some(message) = take_process_message(deferred, expected)
+                .or_else(|| take_process_message(&mut self.deferred, expected))
+            {
+                return Ok(message);
+            }
+            if let Some(notification) = receive_notification()? {
+                self.record_non_session_notification(notification)?;
+                if let Some(message) = take_process_message(&mut self.deferred, expected) {
+                    return Ok(message);
+                }
+            }
+            if let Some(status) = process.exit_status().map_err(ReadyError::ProcessStatus)? {
+                return Err(ReadyError::ProcessExited(status));
+            }
+            if current_ticks()?.saturating_sub(started) >= timeout {
+                return Err(ReadyError::TimedOut);
+            }
+            platform::thread::yield_now();
+        }
+    }
+
+    fn record_non_session_notification(
+        &mut self,
+        notification: ReceivedNotification,
+    ) -> Result<(), ReadyError> {
+        match notification {
+            ReceivedNotification::Ready { token, status } => self.record(token, status),
+            ReceivedNotification::Session { .. } => Err(ReadyError::InvalidMessage),
+            ReceivedNotification::Endpoint {
+                token,
+                status,
+                endpoint,
+                source_process,
+            } => {
+                if self.record_background_endpoint(token, status, endpoint, source_process)? {
+                    return Ok(());
+                }
+                if token != self.posix_token || status != 0 || self.posix_endpoint.is_some() {
+                    let _ = platform::handle::close(endpoint);
+                    return if status != 0 {
+                        self.record(token, status)
+                    } else {
+                        Err(ReadyError::InvalidMessage)
+                    };
+                }
+                self.posix_endpoint = Some(endpoint);
+                self.record(token, status)
+            }
+            ReceivedNotification::Deferred(message) => {
+                self.deferred.push_back(message);
+                Ok(())
+            }
+        }
+    }
+
     pub(crate) const fn target(&self, service: ReadyService) -> platform::service_ready::Target {
         let token = match service {
             ReadyService::Filesystem => self.filesystem_token,
@@ -557,43 +625,7 @@ impl ReadyHandshake {
                 return ready_result(status);
             }
             if let Some(notification) = receive_notification()? {
-                match notification {
-                    ReceivedNotification::Ready { token, status } => {
-                        self.record(token, status)?;
-                    }
-                    ReceivedNotification::Session { .. } => {
-                        return Err(ReadyError::InvalidMessage);
-                    }
-                    ReceivedNotification::Endpoint {
-                        token,
-                        status,
-                        endpoint,
-                        source_process,
-                    } => {
-                        if self.record_background_endpoint(
-                            token,
-                            status,
-                            endpoint,
-                            source_process,
-                        )? {
-                            continue;
-                        }
-                        if token != self.posix_token || status != 0 || self.posix_endpoint.is_some()
-                        {
-                            let _ = platform::handle::close(endpoint);
-                            if status != 0 {
-                                self.record(token, status)?;
-                                continue;
-                            }
-                            return Err(ReadyError::InvalidMessage);
-                        }
-                        self.posix_endpoint = Some(endpoint);
-                        self.record(token, status)?;
-                    }
-                    ReceivedNotification::Deferred(message) => {
-                        self.deferred.push_back(message);
-                    }
-                }
+                self.record_non_session_notification(notification)?;
             }
             if let Some(status) = self.status(service) {
                 return ready_result(status);
@@ -670,6 +702,18 @@ pub(crate) fn wait_for_published_endpoint(
     }
 }
 
+fn take_process_message(
+    messages: &mut VecDeque<DeferredMessage>,
+    expected_process: u64,
+) -> Option<DeferredMessage> {
+    // The expected identity is read from a retained ProcessHandle above.
+    // Message payloads never identify their sender or grant receive authority.
+    let index = messages.iter().position(|message| {
+        platform::ipc::endpoint_owner_process(message.sender) == Ok(expected_process)
+    })?;
+    messages.remove(index)
+}
+
 enum ReceivedNotification {
     Ready {
         token: u64,
@@ -706,7 +750,12 @@ fn receive_notification() -> Result<Option<ReceivedNotification>, ReadyError> {
         close_received_handles(&handles);
         return Err(ReadyError::InvalidMessage);
     };
-    let decoded = decode_received_notification(message, sender, &handles);
+    let decoded = decode_received_notification(
+        message,
+        sender,
+        &handles,
+        platform::ipc::endpoint_owner_process,
+    );
     if decoded.is_err() {
         close_received_handles(&handles);
     }
@@ -717,6 +766,7 @@ fn decode_received_notification(
     message: &[u8],
     sender: u64,
     handles: &platform::ipc::IpcObjectHandles,
+    owner: impl FnOnce(u64) -> platform::syscall::SysResult<u64>,
 ) -> Result<ReceivedNotification, ReadyError> {
     if let Ok((token, status)) = platform::service_ready::decode_handle_notification(message) {
         if handles.count != 1 {
@@ -737,7 +787,7 @@ fn decode_received_notification(
             token,
             status,
             endpoint: attached.handle,
-            source_process: platform::ipc::endpoint_owner_process(sender)
+            source_process: owner(sender)
                 .map_err(|error| ReadyError::Ipc(error.raw().unsigned_abs()))?,
         });
     }
@@ -810,12 +860,15 @@ mod tests {
                 | platform::handle::HANDLE_RIGHT_TRANSFER,
         };
         assert!(matches!(
-            decode_received_notification(&message, 99, &handles),
+            decode_received_notification(&message, 99, &handles, |sender| {
+                assert_eq!(sender, 99);
+                Ok(23)
+            }),
             Ok(ReceivedNotification::Endpoint {
                 token: 7,
                 status: 0,
                 endpoint: 41,
-                ..
+                source_process: 23,
             })
         ));
     }
@@ -825,7 +878,9 @@ mod tests {
         let message = platform::service_ready::handle_notification(7, 0);
         let mut handles = platform::ipc::IpcObjectHandles::default();
         assert!(matches!(
-            decode_received_notification(&message, 99, &handles),
+            decode_received_notification(&message, 99, &handles, |_| panic!(
+                "invalid handles must not resolve peers"
+            )),
             Err(ReadyError::InvalidMessage)
         ));
 
@@ -838,8 +893,27 @@ mod tests {
                 | platform::handle::HANDLE_RIGHT_TRANSFER,
         };
         assert!(matches!(
-            decode_received_notification(&message, 99, &handles),
+            decode_received_notification(&message, 99, &handles, |_| panic!(
+                "invalid handles must not resolve peers"
+            )),
             Err(ReadyError::InvalidMessage)
+        ));
+    }
+
+    #[test]
+    fn endpoint_ready_rejects_an_unauthenticated_owner() {
+        let message = platform::service_ready::handle_notification(7, 0);
+        let mut handles = platform::ipc::IpcObjectHandles::default();
+        handles.count = 1;
+        handles.handles[0] = platform::ipc::IpcObjectHandle {
+            handle: 41,
+            reserved: 0,
+            rights: platform::handle::HANDLE_RIGHT_SEND | platform::handle::HANDLE_RIGHT_TRANSFER,
+        };
+        let denied = mochi_user_syscall::NativeError::AccessDenied.into_raw();
+        assert!(matches!(
+            decode_received_notification(&message, 99, &handles, |_| Err(denied.into())),
+            Err(ReadyError::Ipc(error)) if error == (denied as i64).unsigned_abs()
         ));
     }
 }

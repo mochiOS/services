@@ -22,7 +22,9 @@ fn drivers_inherit_posix_and_do_not_use_legacy_filesystem_syscalls() {
     let controller = include_str!("../../service-manager/src/driver_controller.rs");
     assert!(bootstrap.contains("type DriversProcess = NativeProcess;"));
     assert!(bootstrap.contains("wait_for_hello(process.watch_target())"));
-    assert!(bootstrap.contains("wait_for_complete(process.watch_target())"));
+    assert!(bootstrap.contains(
+        "wait_for_complete(process.watch_target(), handshake, &mut self.deferred_requests)"
+    ));
     assert!(!controller.contains("drivers_process: u64"));
     assert!(controller.contains("ProcessWatch::open(target)"));
     let manifest = include_str!("../../drivers/src/driver_manifest.rs");
