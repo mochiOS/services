@@ -8,6 +8,10 @@ build = "build.rs"
 mochi-user-platform = { git = "https://github.com/mochiOS/syscalls", package = "mochi-user-platform", default-features = false, features = ["std"] }
 mochi-user-syscall = { git = "https://github.com/mochiOS/syscalls", package = "mochi-user-syscall" }
 mochios-viewkit-gpu-protocol = { git = "https://github.com/mochiOS/syscalls", package = "mochios-viewkit-gpu-protocol" }
+bootui = { path = "../../libraries/bootui" }
+
+[build-dependencies]
+png = "0.17.16"
 
 [[bin]]
 name = "compositor"

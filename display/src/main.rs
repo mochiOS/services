@@ -2,6 +2,7 @@ extern crate alloc;
 
 mod backend;
 mod framebuffer_backend;
+mod loading;
 mod present;
 mod protocol;
 mod service;

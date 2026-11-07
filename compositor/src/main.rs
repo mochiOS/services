@@ -2,6 +2,7 @@ mod window_elevation;
 extern crate alloc;
 
 mod backdrop;
+mod boot_scene;
 mod client;
 mod context_menu;
 mod cursor;

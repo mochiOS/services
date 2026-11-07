@@ -249,6 +249,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "bootui"
+version = "0.1.0"
+
+[[package]]
 name = "bumpalo"
 version = "3.20.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -424,9 +428,11 @@ dependencies = [
 name = "compositor"
 version = "0.1.0"
 dependencies = [
+ "bootui",
  "mochi-user-platform",
  "mochi-user-syscall",
  "mochios-viewkit-gpu-protocol",
+ "png 0.17.16",
 ]
 
 [[package]]
@@ -702,11 +708,13 @@ dependencies = [
 name = "display"
 version = "0.1.0"
 dependencies = [
+ "bootui",
  "mochi-user-platform",
  "mochi-user-syscall",
  "mochios-viewkit-gpu-protocol",
  "mochios-virtio-gpu-protocol",
  "plugkit",
+ "png 0.17.16",
 ]
 
 [[package]]
@@ -1277,7 +1285,7 @@ dependencies = [
  "image-webp",
  "moxcms",
  "num-traits",
- "png",
+ "png 0.18.1",
  "zune-core",
  "zune-jpeg",
 ]
@@ -2523,6 +2531,19 @@ dependencies = [
 
 [[package]]
 name = "png"
+version = "0.17.16"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "82151a2fc869e011c153adc57cf2789ccb8d9906ce52c0b39a6b5697749d7526"
+dependencies = [
+ "bitflags 1.3.2",
+ "crc32fast",
+ "fdeflate",
+ "flate2",
+ "miniz_oxide",
+]
+
+[[package]]
+name = "png"
 version = "0.18.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "60769b8b31b2a9f263dae2776c37b1b28ae246943cf719eb6946a1db05128a61"
@@ -3558,7 +3579,7 @@ dependencies = [
  "bytemuck",
  "cfg-if",
  "log",
- "png",
+ "png 0.18.1",
  "tiny-skia-path",
 ]
 

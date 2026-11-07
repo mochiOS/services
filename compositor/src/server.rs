@@ -481,6 +481,15 @@ fn handle_request(
 }
 
 fn present(state: &mut CompositorState, damage: Option<Rect>) -> u32 {
+    let mut damage = damage;
+    if state.boot_scene.is_some() && crate::boot_scene::BootScene::has_client_frame(&state.surfaces) {
+        state.boot_scene = None;
+        damage = None;
+    }
+    let surfaces = match state.boot_scene.as_ref() {
+        Some(scene) => core::slice::from_ref(scene.surface()),
+        None => &state.surfaces,
+    };
     let fps = state.fps_overlay.value();
     // None means a requested full redraw. Preserve it; only widen an actual
     // partial update when the number shown in the overlay has changed.
@@ -489,7 +498,7 @@ fn present(state: &mut CompositorState, damage: Option<Rect>) -> u32 {
         (other, _) => other,
     };
     let status = composite_and_present(
-        &state.surfaces,
+        surfaces,
         &state.windows,
         state.keyboard_focus,
         &mut state.present_frame,
@@ -603,6 +612,11 @@ pub(crate) fn run() -> ! {
         input_sender.is_some(),
         renderer_caps,
     );
+    state.boot_scene = Some(crate::startup::required("loading-scene", || {
+        let now = platform::time::monotonic_milliseconds()
+            .map_err(|error| errno_status(error.errno().unwrap_or(mochi_user_syscall::EIO)))?;
+        crate::boot_scene::BootScene::new(display_width, display_height, now)
+    }));
     crate::startup::required("first-present", || {
         let status = present(&mut state, None);
         if status == 0 { Ok(()) } else { Err(status) }
@@ -612,6 +626,22 @@ pub(crate) fn run() -> ! {
     let mut pending_buf = [0u8; 4128];
     let mut frame = PendingPresent::default();
     loop {
+        if let Some(scene) = state.boot_scene.as_mut() {
+            let updated = platform::time::monotonic_milliseconds()
+                .map_err(|error| errno_status(error.errno().unwrap_or(mochi_user_syscall::EIO)))
+                .and_then(|now| scene.tick(now));
+            match updated {
+                Ok(Some(damage)) => frame.queue(Some(damage), false),
+                Ok(None) => {}
+                Err(status) => {
+                    platform::logln!(
+                        "compositor.service: loading tick failed status={}",
+                        status
+                    );
+                    platform::process::exit(u64::from(status));
+                }
+            }
+        }
         if state.presentation.observe(
             &state.clients,
             &mut state.surfaces,
@@ -644,10 +674,19 @@ pub(crate) fn run() -> ! {
             buf[..len].copy_from_slice(&pending_buf[..len]);
             msg
         } else {
-            match platform::ipc::wait_object_handles(endpoint, buf, &mut handles.0) {
+            let received = if state.boot_scene.is_some() {
+                platform::ipc::try_wait_object_handles(buf, &mut handles.0)
+            } else {
+                platform::ipc::wait_object_handles(endpoint, buf, &mut handles.0)
+            };
+            match received {
                 Ok(msg) => msg,
                 Err(_) => {
-                    platform::thread::yield_now();
+                    if state.boot_scene.is_some() {
+                        let _ = platform::thread::sleep_milliseconds(4);
+                    } else {
+                        platform::thread::yield_now();
+                    }
                     continue;
                 }
             }

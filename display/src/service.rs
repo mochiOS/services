@@ -2,6 +2,7 @@ use mochi_user_platform as platform;
 use mochi_user_syscall::{EACCES, EINVAL, EIO};
 
 use crate::backend::{DisplayBackend, PendingPresent};
+use crate::loading::LoadingFrame;
 use crate::present::{DamageRect, PanelFrame, PresentFrame};
 use crate::protocol::*;
 use crate::shared_buffer::{close_attachments, SharedBuffer};
@@ -19,6 +20,24 @@ pub(crate) fn run() -> ! {
         Ok(backend) => backend,
         Err(errno) => {
             platform::logln!("display.driver: backend initialization failed errno={}", errno_status(errno));
+            let _ = platform::service_ready::notify(ready_target, ready_status(errno));
+            platform::process::exit(1);
+        }
+    };
+    let mut loading = match platform::time::monotonic_milliseconds()
+        .map_err(|error| error.errno().unwrap_or(EIO))
+        .and_then(|now| LoadingFrame::new(backend.geometry(), now))
+        .and_then(|frame| {
+            frame.present(&mut backend)?;
+            Ok(frame)
+        })
+    {
+        Ok(frame) => Some(frame),
+        Err(errno) => {
+            platform::logln!(
+                "display.driver: loading frame failed errno={}",
+                errno_status(errno)
+            );
             let _ = platform::service_ready::notify(ready_target, ready_status(errno));
             platform::process::exit(1);
         }
@@ -44,14 +63,42 @@ pub(crate) fn run() -> ! {
     let mut gpu_panel_logged = false;
     let mut gpu_scene_logged = false;
     loop {
+        if let Some(frame) = loading.as_mut() {
+            let updated = platform::time::monotonic_milliseconds()
+                .map_err(|error| error.errno().unwrap_or(EIO))
+                .and_then(|now| frame.tick(now))
+                .and_then(|changed| {
+                    if changed {
+                        frame.present(&mut backend)
+                    } else {
+                        Ok(())
+                    }
+                });
+            if let Err(errno) = updated {
+                platform::logln!(
+                    "display.driver: loading present failed errno={}",
+                    errno_status(errno)
+                );
+                platform::process::exit(1);
+            }
+        }
         let buffer = unsafe {
             core::slice::from_raw_parts_mut(core::ptr::addr_of_mut!(IPC_BUFFER).cast::<u8>(), 4128)
         };
         let mut handles = platform::ipc::IpcObjectHandles::default();
-        let message = match platform::ipc::wait_object_handles(endpoint, buffer, &mut handles) {
+        let received = if loading.is_some() {
+            platform::ipc::try_wait_object_handles(buffer, &mut handles)
+        } else {
+            platform::ipc::wait_object_handles(endpoint, buffer, &mut handles)
+        };
+        let message = match received {
             Ok(message) => message,
             Err(_) => {
-                platform::thread::yield_now();
+                if loading.is_some() {
+                    let _ = platform::thread::sleep_milliseconds(4);
+                } else {
+                    platform::thread::yield_now();
+                }
                 continue;
             }
         };
@@ -79,6 +126,7 @@ pub(crate) fn run() -> ! {
             OP_GET_INFO => reply_info(sender, backend.geometry()),
             OP_GET_RENDERER_CAPS => reply_caps(sender, backend.renderer_caps()),
             OP_CLAIM_PRESENT_OWNER => {
+                loading = None;
                 present_owner = sender;
                 present_error = None;
                 shared_buffer = None;
@@ -101,6 +149,7 @@ pub(crate) fn run() -> ! {
                     read_u32(request, 0) == Some(OP_PRESENT_RECT),
                 ) {
                     Ok(pending) => {
+                        loading = None;
                         reply_status(sender, 0);
                         if let Some(pending) = pending
                             && let Err(errno) = backend.finish_present(pending)
@@ -126,6 +175,9 @@ pub(crate) fn run() -> ! {
                     sender,
                     shared_buffer.as_ref().map(SharedBuffer::view),
                 );
+                if status == 0 {
+                    loading = None;
+                }
                 if status == 0 && !gpu_panel_logged {
                     platform::logln!("display.driver: virgl panel composition enabled");
                     gpu_panel_logged = true;
@@ -149,6 +201,9 @@ pub(crate) fn run() -> ! {
                     sender,
                     shared_buffer.as_ref().map(SharedBuffer::view),
                 );
+                if status == 0 {
+                    loading = None;
+                }
                 if status == 0 && !gpu_scene_logged {
                     platform::logln!("display.driver: ViewKit GPU rendering enabled");
                     gpu_scene_logged = true;

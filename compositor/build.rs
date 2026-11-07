@@ -1,7 +1,11 @@
 use std::{env, path::PathBuf};
 
+#[path = "../../scripts/mmake/build-boot-logo.rs"]
+mod boot_logo;
+
 fn main() {
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("missing manifest dir"));
+    boot_logo::generate(&manifest_dir.join("../../resources/system/icons/mochimochi-kun.png"));
     if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("mochios") {
         println!(
             "cargo:rustc-link-arg=-T{}/linker.ld",
