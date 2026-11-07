@@ -667,7 +667,23 @@ pub(crate) fn wait_for_published_endpoint(
     target: ProcessWatchTarget,
     deferred: &mut VecDeque<DeferredMessage>,
 ) -> Result<platform::handle::Handle, ReadyError> {
+    wait_for_endpoint(token, target, Some(deferred))
+}
+
+pub(crate) fn wait_for_private_endpoint(
+    token: u64,
+    target: ProcessWatchTarget,
+) -> Result<platform::handle::Handle, ReadyError> {
+    wait_for_endpoint(token, target, None)
+}
+
+fn wait_for_endpoint(
+    token: u64,
+    target: ProcessWatchTarget,
+    mut deferred: Option<&mut VecDeque<DeferredMessage>>,
+) -> Result<platform::handle::Handle, ReadyError> {
     let process = ProcessWatch::open(target).map_err(ReadyError::ProcessStatus)?;
+    let expected = process.process_id().map_err(ReadyError::ProcessStatus)?;
     let started = current_ticks()?;
     loop {
         if let Some(notification) = receive_notification()? {
@@ -676,9 +692,9 @@ pub(crate) fn wait_for_published_endpoint(
                     token: received,
                     status,
                     endpoint,
-                    source_process: _,
+                    source_process,
                 } => {
-                    if received == token && status == 0 {
+                    if received == token && status == 0 && source_process == expected {
                         return Ok(endpoint);
                     }
                     let _ = platform::handle::close(endpoint);
@@ -688,7 +704,10 @@ pub(crate) fn wait_for_published_endpoint(
                         ReadyError::InvalidMessage
                     });
                 }
-                ReceivedNotification::Deferred(message) => deferred.push_back(message),
+                ReceivedNotification::Deferred(message) => match deferred.as_mut() {
+                    Some(deferred) => deferred.push_back(message),
+                    None => return Err(ReadyError::InvalidMessage),
+                },
                 _ => return Err(ReadyError::InvalidMessage),
             }
         }

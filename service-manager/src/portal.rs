@@ -7,27 +7,12 @@ use mochios_linux_portal_protocol::{
 };
 use mochios_permission_prompt_protocol::{MAX_MESSAGE_LEN, PromptRequest, StorageAction};
 
-use crate::service_launcher;
 use crate::session::ActiveSession;
 use crate::spawn_support::errno;
 
 #[derive(Default)]
 pub(crate) struct PermissionPrompts {
-    process: Option<PermissionPromptProcess>,
-    pub(crate) deferred: alloc::collections::VecDeque<crate::readiness::DeferredMessage>,
-}
-
-struct PermissionPromptProcess {
-    process: crate::native_process::NativeProcess,
-    endpoint: platform::handle::Handle,
-    token: u64,
-}
-
-impl Drop for PermissionPromptProcess {
-    fn drop(&mut self) {
-        self.process.terminate();
-        let _ = platform::handle::close(self.endpoint);
-    }
+    presenter: crate::presenter::Slot,
 }
 
 pub(crate) fn handle(
@@ -298,64 +283,11 @@ fn prompt(
     platform::service_ready::generate_token().map_err(errno)
 }
 
-pub(crate) fn prewarm(prompt_process: &mut PermissionPrompts, logger_endpoint: u64) {
-    if prompt_process.process.is_some() {
-        return;
-    }
-    eprintln!("service-manager.service: preparing permission presenter");
-    let token = match platform::service_ready::generate_token() {
-        Ok(token) => token,
-        Err(error) => {
-            platform::logln!(
-                "service-manager.service: permission prompt token failed errno={}",
-                errno(error)
-            );
-            return;
-        }
-    };
-    let result = (|| {
-        let target = platform::service_ready::Target {
-            endpoint: platform::ipc::create()?,
-            token,
-        };
-        let process =
-            service_launcher::spawn_permission_prompt_server(logger_endpoint, token, target)?;
-        eprintln!("service-manager.service: permission presenter process created");
-        let endpoint = match crate::readiness::wait_for_published_endpoint(
-            token,
-            process.watch_target(),
-            &mut prompt_process.deferred,
-        ) {
-            Ok(endpoint) => {
-                eprintln!("service-manager.service: permission presenter ready");
-                endpoint
-            }
-            Err(error) => {
-                process.terminate();
-                platform::logln!(
-                    "service-manager.service: permission prompt readiness failed error={:?}",
-                    error
-                );
-                return Err(mochi_user_syscall::SysError::from_raw(
-                    mochi_user_syscall::EIO as i64,
-                ));
-            }
-        };
-        Ok(PermissionPromptProcess {
-            process,
-            endpoint,
-            token,
-        })
-    })();
-    prompt_process.process = result
-        .map_err(|error| {
-            platform::logln!(
-                "service-manager.service: permission prompt prewarm failed errno={}",
-                errno(error)
-            );
-            error
-        })
-        .ok();
+pub(crate) fn prewarm(prompt_process: &mut PermissionPrompts, logger_endpoint: u64) -> bool {
+    prompt_process
+        .presenter
+        .maintain(crate::presenter::Kind::Permission, logger_endpoint);
+    !prompt_process.presenter.is_preparing()
 }
 
 fn run_prompt(
@@ -363,14 +295,16 @@ fn run_prompt(
     prompt_process: &mut PermissionPrompts,
     request: PromptRequest<'_>,
 ) -> Result<(), u64> {
-    prewarm(prompt_process, logger_endpoint);
     let prompt = prompt_process
-        .process
-        .take()
-        .ok_or(mochi_user_syscall::EIO)?;
+        .presenter
+        .take_ready(crate::presenter::Kind::Permission, logger_endpoint)
+        .map_err(|error| {
+            platform::logln!("service-manager.service: permission presenter unavailable: {error:?}");
+            mochi_user_syscall::EIO
+        })?;
     let request = match request {
         PromptRequest::Network { application, .. } => PromptRequest::Network {
-            token: prompt.token,
+            token: prompt.token(),
             application,
         },
         PromptRequest::Directory {
@@ -379,7 +313,7 @@ fn run_prompt(
             writable,
             ..
         } => PromptRequest::Directory {
-            token: prompt.token,
+            token: prompt.token(),
             application,
             path,
             writable,
@@ -390,7 +324,7 @@ fn run_prompt(
             target,
             ..
         } => PromptRequest::Storage {
-            token: prompt.token,
+            token: prompt.token(),
             application,
             action,
             target,
@@ -403,7 +337,7 @@ fn run_prompt(
     let mut reply = [0u8; 4];
     let mut handles = platform::ipc::IpcObjectHandles::default();
     let result = platform::ipc::call_object_handles(
-        prompt.endpoint,
+        prompt.endpoint(),
         &encoded[..length],
         &mut reply,
         &mut handles,
@@ -411,7 +345,7 @@ fn run_prompt(
     .map_err(|error| {
         platform::logln!(
             "service-manager.service: permission prompt IPC failed endpoint={} errno={}",
-            prompt.endpoint,
+            prompt.endpoint(),
             errno(error)
         );
         errno(error)
@@ -430,7 +364,7 @@ fn run_prompt(
             }
             platform::logln!(
                 "service-manager.service: permission prompt reply invalid endpoint={} bytes={}",
-                prompt.endpoint,
+                prompt.endpoint(),
                 length
             );
             return Err(mochi_user_syscall::EIO);
@@ -438,7 +372,7 @@ fn run_prompt(
         let status = i32::from_le_bytes(reply);
         platform::logln!(
             "service-manager.service: permission prompt reply endpoint={} status={}",
-            prompt.endpoint,
+            prompt.endpoint(),
             status
         );
         if status == 0 {

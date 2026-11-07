@@ -1222,6 +1222,8 @@ fn resident(
         consent_session.native(initial_context.0, initial_context.1)
     })();
     eprintln!("service-manager.service: desktop session publication finished success={}", initial_publication.is_ok());
+    let mut presenter_prewarm_allowed = initial_publication.is_ok() && active_session.is_some();
+    let mut ime_warmup_pending = presenter_prewarm_allowed;
     if let Err(error) = initial_publication {
         platform::logln!("service-manager.service: consent session publication failed: {error:?}");
     } else if active_session.is_some()
@@ -1230,13 +1232,6 @@ fn resident(
         // Presenters depend on this authenticated publication. Starting them
         // beforehand can leave bootstrap waiting on their own session gate.
         crate::portal::prewarm(&mut runtime.permission_prompt, runtime.logger_endpoint);
-        // Finish publishing the authenticated desktop/session authority before
-        // dictionary I/O competes with initial application and chrome setup.
-        if let Some(input) = runtime.raw_input.as_ref() {
-            if let Err(error) = input.warmup_ime() {
-                platform::logln!("service-manager.service: IME warmup failed: {error:?}");
-            }
-        }
     }
     #[cfg(mochios_process_domain_probe_308)]
     if let (Some(runtime), Some(session)) = (runtime.as_ref(), active_session) {
@@ -1261,14 +1256,27 @@ fn resident(
         }
     }
     let mut pending_logout: Option<PendingLogout> = None;
+    eprintln!("service-manager.service: resident requests enabled");
     loop {
         service_launcher::retry_failed_launch_cleanup();
         if let Some(runtime) = runtime.as_mut() {
             runtime.retry_failed_session_cleanup();
-            if active_session.is_some() && pending_logout.is_none() {
-                runtime
-                    .execution_prompt
-                    .maintain(runtime.logger_endpoint, &mut runtime.deferred_requests);
+            if presenter_prewarm_allowed && active_session.is_some() && pending_logout.is_none() {
+                let permission_prepared = crate::portal::prewarm(
+                    &mut runtime.permission_prompt,
+                    runtime.logger_endpoint,
+                );
+                runtime.execution_prompt.maintain(runtime.logger_endpoint);
+                // Preserve the initial I/O ordering without waiting here.
+                // An explicit input-mode request can still warm up sooner.
+                if ime_warmup_pending && permission_prepared {
+                    ime_warmup_pending = false;
+                    if let Some(input) = runtime.raw_input.as_ref() {
+                        if let Err(error) = input.warmup_ime() {
+                            platform::logln!("service-manager.service: IME warmup failed: {error:?}");
+                        }
+                    }
+                }
             }
         }
         if let (Some(logout), Some(runtime)) = (pending_logout.as_mut(), runtime.as_mut()) {
@@ -1297,6 +1305,7 @@ fn resident(
                     if let Some(session) = active_session {
                         let publication = runtime.prepare_consent_session(&mut consent_session, session)
                             .and_then(|_| consent_session.native(session.id, true));
+                        presenter_prewarm_allowed = publication.is_ok();
                         if let Err(error) = publication {
                             platform::logln!("service-manager.service: consent session publication failed: {error:?}");
                         }
@@ -1325,11 +1334,7 @@ fn resident(
             }
         }
         let received = if let Some(deferred) = runtime.as_mut().and_then(|runtime| {
-            runtime
-                .permission_prompt
-                .deferred
-                .pop_front()
-                .or_else(|| runtime.deferred_requests.pop_front())
+            runtime.deferred_requests.pop_front()
         }) {
             let length = deferred.bytes.len().min(request_bytes.len());
             request_bytes[..length].copy_from_slice(&deferred.bytes[..length]);
@@ -1424,6 +1429,7 @@ fn resident(
             );
             continue;
         };
+        presenter_prewarm_allowed = false;
         if let Err(error) = consent_session.native(session.id, false) {
             reply_session_status(sender, request.action, session.id, errno(error) as i32);
             continue;
@@ -1462,6 +1468,7 @@ fn resident(
                 } else {
                     status
                 };
+                presenter_prewarm_allowed = status == 0;
                 reply_session_status(sender, request.action, session.id, status);
             }
             platform::session_control::Action::LogOut => {

@@ -326,7 +326,9 @@ fn permission_server_uses_native_creation_and_an_explicit_send_handle() {
     assert!(server.contains("spawn_native("));
     assert!(!server.contains("spawn("));
     let portal = include_str!("../../service-manager/src/portal.rs");
-    assert!(portal.contains("process.watch_target()"));
+    let preparation = include_str!("../../service-manager/src/presenter.rs");
+    assert!(preparation.contains("process.watch_target()"));
+    assert!(preparation.contains("wait_for_private_endpoint(token, process.watch_target())"));
     assert!(portal.contains("platform::ipc::call_object_handles("));
     assert!(!portal.contains("call_with_wait("));
     let child = include_str!("../../secure-ui/src/permission_server.rs");

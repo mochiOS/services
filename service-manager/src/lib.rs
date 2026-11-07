@@ -16,6 +16,7 @@ mod native_process;
 mod orchestration;
 mod portal;
 mod portal_status;
+mod presenter;
 mod process_watch;
 mod readiness;
 mod service_config;

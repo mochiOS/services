@@ -238,6 +238,42 @@ fn one_shot_publication_preserves_requests_and_fails_closed() {
 }
 
 #[test]
+fn private_publication_rejects_foreign_peers_and_unrelated_messages() {
+    let _serial = TEST_LOCK.lock().unwrap();
+    let target = process_watch::ProcessWatchTarget::RetainedHandle(7);
+    let rights = handle::HANDLE_RIGHT_SEND | handle::HANDLE_RIGHT_TRANSFER;
+    *STATE.lock().unwrap() = Some(State {
+        messages: VecDeque::from([publication(123, rights)]),
+        ..Default::default()
+    });
+    assert_eq!(readiness::wait_for_private_endpoint(123, target), Ok(41));
+    assert!(STATE.lock().unwrap().as_ref().unwrap().closed.is_empty());
+
+    *STATE.lock().unwrap() = Some(State {
+        messages: VecDeque::from([publication(123, rights)]),
+        foreign_sender: true,
+        ..Default::default()
+    });
+    assert_eq!(
+        readiness::wait_for_private_endpoint(123, target),
+        Err(readiness::ReadyError::InvalidMessage)
+    );
+    assert_eq!(STATE.lock().unwrap().as_ref().unwrap().closed, [41]);
+
+    *STATE.lock().unwrap() = Some(State {
+        messages: VecDeque::from([(
+            b"not a private Ready publication".to_vec(),
+            ipc::IpcObjectHandles::default(),
+        )]),
+        ..Default::default()
+    });
+    assert_eq!(
+        readiness::wait_for_private_endpoint(123, target),
+        Err(readiness::ReadyError::InvalidMessage)
+    );
+}
+
+#[test]
 fn network_endpoint_survives_interface_failure_without_turning_failed_health_into_ready() {
     let _serial = TEST_LOCK.lock().unwrap();
     let rights =
