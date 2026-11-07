@@ -223,10 +223,6 @@ pub(crate) fn orchestrate<O: BootstrapOperations>(
     // desktop and Installer from starting.
     let discovery_started = operations.start_discovery();
 
-    children.network = operations.spawn_network();
-    if children.network.is_some() {
-        children.update = operations.spawn_update();
-    }
     let Some(user) = operations.spawn_user() else {
         return outcome(children, StopReason::UserSpawnFailed);
     };
@@ -260,7 +256,6 @@ pub(crate) fn orchestrate<O: BootstrapOperations>(
         return outcome(children, StopReason::WorkspaceSpawnFailed);
     };
     children.workspace = Some(workspace);
-    children.linux = operations.spawn_user_session(FixedService::Linux, identity, session_id);
     let Some(binder) = operations.spawn_user_session(FixedService::Binder, identity, session_id)
     else {
         return outcome(children, StopReason::BinderSpawnFailed);
@@ -269,6 +264,7 @@ pub(crate) fn orchestrate<O: BootstrapOperations>(
     if !operations.wait_binder_ready(binder) {
         return outcome(children, StopReason::BinderReadyFailed);
     }
+    operations.notify_mboot_stage(MbootStage::Desktop);
     if installation_required {
         let Some(installer) =
             operations.spawn_user_session(FixedService::Installer, identity, session_id)
@@ -277,7 +273,14 @@ pub(crate) fn orchestrate<O: BootstrapOperations>(
         };
         children.installer = Some(installer);
     }
-    operations.notify_mboot_stage(MbootStage::Desktop);
+    // Authenticate and present the native desktop before starting optional
+    // compatibility and network work. They retain the same owners, identity
+    // and readiness checks, without competing with the first desktop frame.
+    children.linux = operations.spawn_user_session(FixedService::Linux, identity, session_id);
+    children.network = operations.spawn_network();
+    if children.network.is_some() {
+        children.update = operations.spawn_update();
+    }
     if discovery_started {
         let _ = operations.wait_discovery_complete(children.drivers.as_ref().unwrap());
     }
@@ -550,18 +553,18 @@ mod tests {
             Event::Spawn(FixedService::Compositor),
             Event::NotifyMbootStage(MbootStage::Display),
             Event::StartDiscovery,
-            Event::Spawn(FixedService::Network),
-            Event::Spawn(FixedService::Update),
             Event::Spawn(FixedService::User),
             Event::WaitUser,
             Event::StartKeychain,
             Event::Spawn(FixedService::SecureUi),
             Event::WaitSecureUiLogin,
             Event::SpawnUserSession(FixedService::Workspace, TEST_IDENTITY),
-            Event::SpawnUserSession(FixedService::Linux, TEST_IDENTITY),
             Event::SpawnUserSession(FixedService::Binder, TEST_IDENTITY),
             Event::WaitBinder,
             Event::NotifyMbootStage(MbootStage::Desktop),
+            Event::SpawnUserSession(FixedService::Linux, TEST_IDENTITY),
+            Event::Spawn(FixedService::Network),
+            Event::Spawn(FixedService::Update),
             Event::WaitDiscovery,
             Event::WaitNetwork,
         ]
