@@ -840,6 +840,13 @@ impl BootstrapOperations for Runtime {
             return false;
         };
         let ready=self.wait_ready(ReadyService::Binder, process.watch_target());
+        if ready {
+            if let Some(input) = self.raw_input.as_ref() {
+                if let Err(error) = input.warmup_ime() {
+                    platform::logln!("service-manager.service: IME warmup failed: {error:?}");
+                }
+            }
+        }
         #[cfg(mochios_consent_input_probe_306)]
         if ready {consent_input_probe::run(self.raw_input.as_ref().expect("raw input ready").0);}
         ready

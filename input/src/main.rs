@@ -612,18 +612,11 @@ fn main() {
         platform::process::exit(1)
     });
 
-    eprintln!("input.service: loading IME dictionary");
     let mut keyboard = KeyboardState::default();
-    let mut input_method = ime::InputMethod::open_system_dictionary();
-    if input_method.is_available() {
-        platform::logln!("input.service: Japanese IME dictionary loaded");
-    } else {
-        platform::logln!(
-            "input.service: Japanese IME unavailable path={}",
-            ime::DICTIONARY_PATH
-        );
-    }
-    eprintln!("input.service: IME initialization finished");
+    let mut input_method = ime::InputMethod::start_system_dictionary().unwrap_or_else(|error| {
+        platform::logln!("input.service: IME worker creation failed: {}", error);
+        ime::InputMethod::unavailable()
+    });
     let mut hardware_input = true;
     let mut mouse = MouseState::default();
     let input_preferences = InputPreferences::load();
@@ -718,7 +711,19 @@ fn main() {
             continue;
         }
 
+        if buf[..len] == platform::input::IME_WARMUP_REQUEST {
+            let status = if platform::capability::check_thread(sender, "capabilities.manage") == Ok(1) {
+                input_method.warmup();
+                0u64
+            } else {
+                platform::syscall::NativeError::AccessDenied.into_raw()
+            };
+            let _ = platform::ipc::reply(sender, &status.to_le_bytes());
+            continue;
+        }
+
         if ime::is_convert_request(&buf[..len]) {
+            input_method.warmup();
             let response = input_method.handle(&buf[..len]);
             let _ = platform::ipc::reply(sender, &response);
             continue;

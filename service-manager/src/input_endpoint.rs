@@ -7,6 +7,31 @@ pub(crate) const RIGHTS: u64 = p::handle::HANDLE_RIGHT_SEND
 
 pub(crate) struct Endpoint(pub u32);
 
+impl Endpoint {
+    pub(crate) fn warmup_ime(&self) -> Result<(), p::syscall::SysError> {
+        let mut reply = [0; 8];
+        let mut handles = p::ipc::IpcObjectHandles::default();
+        let received = p::ipc::call_object_handles(
+            self.0,
+            &p::input::IME_WARMUP_REQUEST,
+            &mut reply,
+            &mut handles,
+        );
+        for entry in handles.handles.iter().take(handles.count as usize) {
+            if entry.handle != 0 {
+                let _ = p::handle::close(entry.handle);
+            }
+        }
+        if received? as u32 != 8 || handles.count != 0 || handles.delivery_flags != 0 {
+            return Err(invalid());
+        }
+        match u64::from_le_bytes(reply) {
+            0 => Ok(()),
+            error => Err(p::syscall::SysError::from_raw(error as i64)),
+        }
+    }
+}
+
 impl Drop for Endpoint {
     fn drop(&mut self) {
         let _ = p::handle::close(self.0);
