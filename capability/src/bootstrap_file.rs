@@ -77,19 +77,22 @@ fn error(raw: u64) -> SysError {
     SysError::from_raw(raw as i64)
 }
 
-fn buffer(length: usize) -> SysResult<Vec<u8>> {
-    let mut result = Vec::new();
-    result
-        .try_reserve_exact(length)
-        .map_err(|_| error(syscall::ENOMEM))?;
+fn resize_buffer(result: &mut Vec<u8>, length: usize) -> SysResult<()> {
+    if length > result.len() {
+        result
+            .try_reserve_exact(length - result.len())
+            .map_err(|_| error(syscall::ENOMEM))?;
+    }
     result.resize(length, 0);
-    Ok(result)
+    Ok(())
 }
 
 pub(crate) struct Client<F> {
     endpoint: u32,
     next_request: u64,
     transport: F,
+    request: Vec<u8>,
+    reply: Vec<u8>,
 }
 
 impl<F: FnMut(u32, &[u8], &mut [u8]) -> SysResult<usize>> Client<F> {
@@ -98,6 +101,8 @@ impl<F: FnMut(u32, &[u8], &mut [u8]) -> SysResult<usize>> Client<F> {
             endpoint,
             next_request: 1,
             transport,
+            request: Vec::new(),
+            reply: Vec::new(),
         }
     }
 
@@ -107,7 +112,7 @@ impl<F: FnMut(u32, &[u8], &mut [u8]) -> SysResult<usize>> Client<F> {
         path: &str,
         offset: u64,
         budget: usize,
-    ) -> SysResult<(wire::Header, Vec<u8>)> {
+    ) -> SysResult<(wire::Header, &[u8])> {
         if !path.starts_with('/') || path.contains('\0') || path.len() > wire::MAX_PATH_LEN {
             return Err(error(syscall::EINVAL));
         }
@@ -115,7 +120,7 @@ impl<F: FnMut(u32, &[u8], &mut [u8]) -> SysResult<usize>> Client<F> {
         self.next_request = id
             .checked_add(1)
             .ok_or_else(|| error(syscall::NativeError::LimitExceeded.into_raw()))?;
-        let mut request = buffer(wire::HEADER_LEN + path.len())?;
+        resize_buffer(&mut self.request, wire::HEADER_LEN + path.len())?;
         wire::encode(
             wire::Header {
                 opcode,
@@ -126,12 +131,12 @@ impl<F: FnMut(u32, &[u8], &mut [u8]) -> SysResult<usize>> Client<F> {
                 ..wire::Header::default()
             },
             path.as_bytes(),
-            &mut request,
+            &mut self.request,
         )
         .map_err(|_| error(syscall::EINVAL))?;
-        let mut reply = buffer(wire::HEADER_LEN + budget)?;
-        let length = (self.transport)(self.endpoint, &request, &mut reply)?;
-        let received = reply.get(..length).ok_or_else(|| error(syscall::EIO))?;
+        resize_buffer(&mut self.reply, wire::HEADER_LEN + budget)?;
+        let length = (self.transport)(self.endpoint, &self.request, &mut self.reply)?;
+        let received = self.reply.get(..length).ok_or_else(|| error(syscall::EIO))?;
         let (header, payload) = wire::decode(received).map_err(|_| error(syscall::EIO))?;
         if length != wire::HEADER_LEN + payload.len()
             || header.opcode != wire::OP_STATUS
@@ -155,9 +160,9 @@ impl<F: FnMut(u32, &[u8], &mut [u8]) -> SysResult<usize>> Client<F> {
             }
             return Err(SysError::from_raw(header.status as i64));
         }
-        reply.drain(..wire::HEADER_LEN);
-        reply.truncate(header.length as usize);
-        Ok((header, reply))
+        // Only this validated prefix is visible. Reuse private transport
+        // buffers across chunks instead of allocating and shifting each reply.
+        Ok((header, payload))
     }
 
     pub(crate) fn read_file(&mut self, path: &str, maximum: usize) -> SysResult<Vec<u8>> {
@@ -178,7 +183,7 @@ impl<F: FnMut(u32, &[u8], &mut [u8]) -> SysResult<usize>> Client<F> {
             output
                 .try_reserve(bytes.len())
                 .map_err(|_| error(syscall::ENOMEM))?;
-            output.extend_from_slice(&bytes);
+            output.extend_from_slice(bytes);
             if header.flags == wire::BOOTSTRAP_EOF {
                 return Ok(output);
             }
@@ -201,7 +206,7 @@ impl<F: FnMut(u32, &[u8], &mut [u8]) -> SysResult<usize>> Client<F> {
                 .checked_add(bytes.len())
                 .filter(|total| *total <= maximum)
                 .ok_or_else(|| error(syscall::NativeError::LimitExceeded.into_raw()))?;
-            let mut payload = bytes.as_slice();
+            let mut payload = bytes;
             while !payload.is_empty() {
                 let (entry, name, consumed) =
                     wire::decode_dir_entry(payload).map_err(|_| error(syscall::EIO))?;
