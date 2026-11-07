@@ -13,6 +13,7 @@ use crate::{
 
 pub(crate) struct Selection {
     verified: VerifiedManifest,
+    path: String,
     requested: Vec<String>,
     digest: [u8; 32],
 }
@@ -85,6 +86,7 @@ fn select_kind(
             return Err(SysError::from_raw(EACCES as i64));
         }
         selected = Some(Selection {
+            path: path.clone(),
             verified,
             requested,
             digest: *digest,
@@ -124,5 +126,32 @@ impl Selection {
             &self.digest,
             mnu_abi::exec::EXEC_AUTHORIZATION_KIND_IMAGE_REPLACE,
         )
+    }
+}
+
+impl Selection {
+    /// Reuse existing consent only within the same authenticated application.
+    /// Native replacement separately enforces that every resulting grant was held.
+    pub(crate) fn for_preparation(
+        self,
+        policy: &AppPromptPolicy,
+        peer: &p::syscall::ThreadSecurityContext,
+    ) -> Result<(VerifiedManifest, String, Vec<String>), SysError> {
+        let id = &self.verified.identity;
+        let same = peer.package_id.get(..peer.package_id_len as usize)
+            == Some(id.package_id.as_bytes())
+            && peer.developer_id.get(..peer.developer_id_len as usize)
+                == Some(id.developer_id.as_bytes())
+            && peer.subject_key_id == id.subject_key_id
+            && peer.provenance == id.provenance as u8;
+        if !same
+            && self
+                .requested
+                .iter()
+                .any(|name| crate::policy::needs_app_prompt(policy, name))
+        {
+            return Err(SysError::from(NativeError::Unsupported.into_raw()));
+        }
+        Ok((self.verified, self.path, self.requested))
     }
 }

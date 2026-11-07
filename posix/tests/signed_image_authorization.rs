@@ -2185,3 +2185,62 @@ mod approvals {
         assert_ne!(commitments[0], commitments[2]);
     }
 }
+
+#[test]
+fn prepared_exec_reuses_consent_only_for_the_complete_authenticated_identity() {
+    let code = fixture::unsigned();
+    let _ = setup(code.clone());
+    let mut state = empty_state();
+    install_code(
+        &mut state,
+        "org.mochios.fixture",
+        "/system/bin/fixture",
+        &code,
+        "application",
+        &["window.overlay"],
+    );
+    state
+        .app_prompt_policy
+        .interactive
+        .insert("window.overlay".into());
+    let select = || {
+        installed_image::select(
+            &state.package_index,
+            &Sha256::digest(&code).into(),
+            code.len() as u64,
+            persistent_grant::read_file,
+        )
+        .unwrap()
+        .unwrap()
+    };
+    let selection = select();
+    let (identity, _, _) = selection.authority();
+    let mut peer = mnu_abi::ThreadSecurityContext::default();
+    peer.package_id_len = identity.package_id.len() as _;
+    peer.package_id[..identity.package_id.len()].copy_from_slice(identity.package_id.as_bytes());
+    peer.developer_id_len = identity.developer_id.len() as _;
+    peer.developer_id[..identity.developer_id.len()]
+        .copy_from_slice(identity.developer_id.as_bytes());
+    peer.subject_key_id = identity.subject_key_id;
+    peer.provenance = identity.provenance as u8;
+    let (_, path, caps) = select()
+        .for_preparation(&state.app_prompt_policy, &peer)
+        .unwrap();
+    assert_eq!(path, "/system/bin/fixture");
+    assert_eq!(caps, ["window.overlay"]);
+    for field in 0..4 {
+        let mut different = peer;
+        match field {
+            0 => different.package_id[0] ^= 1,
+            1 => different.developer_id[0] ^= 1,
+            2 => different.subject_key_id[0] ^= 1,
+            3 => different.provenance ^= 1,
+            _ => unreachable!(),
+        }
+        assert!(
+            matches!(select().for_preparation(&state.app_prompt_policy, &different),
+            Err(error) if error == SysError::from(NativeError::Unsupported.into_raw()))
+        );
+    }
+    no_issue();
+}

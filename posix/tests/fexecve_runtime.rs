@@ -45,6 +45,7 @@ struct State {
     bytes: Vec<u8>,
     prepared: Vec<u8>,
     metadata: Vec<u8>,
+    transcript: Vec<u8>,
     images_created: usize,
     startup: Vec<u8>,
     libraries: Vec<(Vec<u8>, Vec<u8>)>,
@@ -265,17 +266,29 @@ mod syscall {
                         s.prepared = vec![0; p as usize];
                         Ok(28)
                     } else {
-                        assert_eq!(s.images_created, 2);
-                        s.metadata = vec![0; p as usize];
-                        Ok(30)
+                        assert!(s.images_created <= 3);
+                        if s.images_created == 2 {
+                            s.metadata = vec![0; p as usize];
+                            Ok(30)
+                        } else {
+                            s.transcript = vec![0; p as usize];
+                            Ok(32)
+                        }
                     }
                 })
             }
             SyscallNumber::HandleDuplicate => {
                 assert!(super::DEFER.get() > 0);
                 if p == 30 {
-                    assert_eq!(len, mochios_posix_client::startup_metadata::READER_RIGHTS);
+                    assert!(
+                        len == mochios_posix_client::startup_metadata::READER_RIGHTS
+                            || len == super::posix_protocol::CHECK_EXECUTABLE_RIGHTS
+                    );
                     return Ok(31);
+                }
+                if p == 32 {
+                    assert_eq!(len, super::posix_protocol::CHECK_EXECUTABLE_RIGHTS);
+                    return Ok(33);
                 }
                 assert_eq!(
                     (p, len),
@@ -307,7 +320,7 @@ mod syscall {
         offset: u64,
     ) -> Result<u64, i32> {
         if n == SyscallNumber::HandleWriteAt {
-            assert!(h == 28 || h == 30);
+            assert!(h == 28 || h == 30 || h == 32);
             assert_eq!(super::DEFER.get(), 0);
             return super::STATE.with_borrow_mut(|s| {
                 if s.failure == 10 {
@@ -317,8 +330,10 @@ mod syscall {
                 let start = offset as usize;
                 let output = if h == 28 {
                     &mut s.prepared
-                } else {
+                } else if h == 30 {
                     &mut s.metadata
+                } else {
+                    &mut s.transcript
                 };
                 assert!(start + count <= output.len());
                 output[start..start + count]
@@ -355,7 +370,8 @@ mod syscall {
                 &s.libraries[(h - 200) as usize].1
             };
             let start = (offset as usize).min(bytes.len());
-            let count = (bytes.len() - start).min(len as usize)
+            let count = (bytes.len() - start)
+                .min(len as usize)
                 .min(if s.bulk_reads { usize::MAX } else { 17 });
             unsafe {
                 std::ptr::copy_nonoverlapping(bytes[start..].as_ptr(), p as *mut u8, count);
@@ -377,8 +393,27 @@ mod syscall {
         assert_eq!(capacity, 8);
         assert!(super::DEFER.get() > 0);
         let request = unsafe { std::slice::from_raw_parts(request as *const u8, len as usize) };
-        let (digest, key) =
-            mochios_capability_protocol::decode_authorize_exec_object_request(request).unwrap();
+        let replayed =
+            request[..4] == mochios_capability_protocol::prepared_exec::OPCODE.to_le_bytes();
+        let (digest, key) = if replayed {
+            let (key, length, digest) =
+                mochios_capability_protocol::prepared_exec::decode(request).unwrap();
+            super::STATE.with_borrow(|s| {
+                let record = if s.images_created == 3 {
+                    &s.transcript
+                } else {
+                    &s.metadata
+                };
+                assert_eq!(length, record.len() as u64);
+                assert_eq!(
+                    mochios_posix_client::image_preparation::replay::original(record).unwrap(),
+                    s.bytes
+                );
+            });
+            (*digest, key)
+        } else {
+            mochios_capability_protocol::decode_authorize_exec_object_request(request).unwrap()
+        };
         super::STATE.with_borrow(|s| {
             assert_eq!(
                 key,
@@ -394,7 +429,13 @@ mod syscall {
         super::STATE.with_borrow(|s| {
             assert_eq!(
                 objects.handles[0].handle,
-                if s.prepared.is_empty() { 19 } else { 29 }
+                if replayed {
+                    if s.images_created == 3 { 33 } else { 31 }
+                } else if s.prepared.is_empty() {
+                    19
+                } else {
+                    29
+                }
             )
         });
         assert_eq!(objects.handles[0].rights, HANDLE_RIGHT_READ);
@@ -517,11 +558,14 @@ fn actual_fd_path_preserves_original_references_and_cleans_every_failed_stage() 
             assert_eq!(s.checked, 1);
             assert_eq!(s.drops, drops);
             assert_eq!(s.entered, entered);
-            assert_eq!(s.closed, match failure {
-                1..=3 => vec![],
-                6 => vec![28, 404, 29],
-                _ => vec![28, 29],
-            });
+            assert_eq!(
+                s.closed,
+                match failure {
+                    1..=3 => vec![],
+                    6 => vec![28, 404, 29],
+                    _ => vec![28, 29],
+                }
+            );
         });
         assert_eq!(fds.get(0).unwrap().handle.lower_handle, 19);
         assert_eq!(DEFER.get(), 0);
@@ -1283,7 +1327,7 @@ fn large_resolver_plans_are_mapped_readonly_after_explicit_runtime_support() {
     );
     STATE.with_borrow(|s| {
         assert_eq!(s.entered, 1);
-        assert_eq!(s.images_created, 2);
+        assert_eq!(s.images_created, 3);
         assert!(s.metadata.len() > 4096);
         let image = mnu_abi::process_image::decode(&s.startup).unwrap();
         let mapping = image.mappings().next().unwrap();
@@ -2145,7 +2189,11 @@ fn static_fixed_image_preserves_exact_bytes_in_a_private_readonly_snapshot() {
         // nonloaded suffix. Static images must use the bulk capture path too.
         assert_eq!(s.bytes, large);
         assert_eq!(s.source_max_request, mnu_abi::provider::MAX_SHARED_READ_LEN);
-        assert!(s.source_reads < large.len().div_ceil(64 * 1024), "source reads={}", s.source_reads);
+        assert!(
+            s.source_reads < large.len().div_ceil(64 * 1024),
+            "source reads={}",
+            s.source_reads
+        );
         assert!(!s.closed.contains(&19));
     });
     for stride in [56usize, 64] {

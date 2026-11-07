@@ -1,0 +1,69 @@
+{
+  "format": 1,
+  "verified_at_utc": "2026-11-07T09:28:53.149093+00:00",
+  "platform": "mochiOS native, QEMU TCG",
+  "configuration": {
+    "secure_boot": true,
+    "development_system_signatures": true,
+    "existing_account_configuration_unchanged": true
+  },
+  "sdk": {
+    "status": "unpublished development exec-replay candidate",
+    "published_base_sha256": "f35b429915e5e703eddff984e9775428aea9d6f5d564fe3cf0cd0e56c67e4e5b",
+    "runtime_archive_sha256": "cec95d31f502a5eaeced1d08015fc52e07d1efd5e139f4897d87180bb242b8c4"
+  },
+  "native": {
+    "complete": true,
+    "passed": true,
+    "cases": {
+      "0": true,
+      "1": true,
+      "2": true,
+      "3": true,
+      "4": true,
+      "5": true,
+      "6": true,
+      "spawn": true
+    },
+    "elapsed_host_seconds": 51.566
+  },
+  "host_tests": {
+    "capability_protocol": 15,
+    "runtime_exec": 34,
+    "object_authorization": 4,
+    "loader_replay": 3,
+    "signed_authorization": 71
+  },
+  "image": {
+    "source_image_sha256": "8193e61678ca4b49e19a645cdc13b364d5de6fa9988fe2f932242b5498dc45e5",
+    "system_sha256": "3a2f74773712ca0f83ef624e8fabeea8f28d06e8e2947d9e8230c623b7937aae",
+    "kernel_sha256": "c152d9bb7f2a03db89c87b7268662f60012649bfafde9bddf1920ecd007b28e2"
+  },
+  "fixture_sources": {
+    "native_replayed_exec.c": "24c804d235c7cf5b63247a9a679a547f6eeccaf60d46a1657fa578bc6299390a",
+    "native_replayed_child.c": "95a83ffc2ecedc7cbdf595a36956806d6197dac885e8fd99d84424a7b82815a9",
+    "native_replayed_exec.py": "122eec13c4834793b510d441db520a5755b0983015452a6bbd91649b18b84a50"
+  },
+  "staged_inputs": {
+    "format": 1,
+    "files": {
+      "system/applications/ExecTest.app/entry.elf": "9ec3ac598605b07bd1f42603d0b0b94b941039ade12a4fa07dcc769e2bb5bec8",
+      "system/applications/ExecTest.app/manifest.toml": "ef1feaafa486d8c06fad3f1fd68af5c24333fca098b6a88efc53106489c5f923",
+      "system/applications/ExecTest.app/setup.json": "4e1dd6a418093e2bcdbc23cb0c27eb80aecc1eff769e9ed5c9119c5d78c94612",
+      "system/bin/exec-child": "08a28414d4e833e0a50dd2e1364bf1fe2dd2128e17c0e773695aad6d6ec93bf4",
+      "system/bin/exec-extra": "15965d86be89e687cb074697effdd83c4dc7724a903d63b05a379a3709cbad46",
+      "system/libraries/exec-test/libexecprobe.so": "b9d579acc0018f15c1b6feee4c49d57f3790ac6151c4288a5fd952a5d3ae5406",
+      "system/packages/capability/manifest.toml": "100f9f1ea036e231db232cf859e42a345d158076c8739f4c7cdbc70ca14e6f0c",
+      "system/packages/capability/verification.bin": "942482b52cba042bd24d9c3b0f674629899d600a47a82dc9cc0a1c61877d83bc",
+      "system/packages/exec-test/manifest.toml": "aad6b7df9c11fb5b8e11e4ecbd4a1b6c5cbc682821bd349110c1fb46b0ac1096",
+      "system/packages/exec-test/verification.bin": "16956d81f32bdbc5de65a4ca329fbcfcb707cd441a6a6d6893e627fc4382acfb",
+      "system/services/capability.service": "696822dbeb29e27a5741192e2b8be382856c2956bab771c1dd1ec453aceda6a4",
+      "system/setup/session-startup.json": "219416a3e8d9a7d9e67b3f6bd86f61735d32e4c139d0482d52fb761312018ed4"
+    },
+    "data_files": {
+      "tmp/exec-test/exec-pinned": "08a28414d4e833e0a50dd2e1364bf1fe2dd2128e17c0e773695aad6d6ec93bf4",
+      "tmp/exec-test/exec-tampered": "5ba68cf7a321add2df91bbbf345454603b8490b74ad1d0ab55eaa9e3a828201f",
+      "tmp/exec-test/libexecprobe.so": "b9d579acc0018f15c1b6feee4c49d57f3790ac6151c4288a5fd952a5d3ae5406"
+    }
+  }
+}

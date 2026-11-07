@@ -799,6 +799,19 @@ pub(crate) fn serve_capability_requests(mut state: CapabilityServiceState) -> ! 
             let _ = platform::ipc::reply(sender, &reply);
             continue;
         }
+        if opcode == platform::capability::prepared_exec::OPCODE {
+            let result = (|| {
+                let length = crate::replayed_exec::length(slice)?;
+                let _reservation = execution_requests.reserve_image(sender, length)?;
+                crate::replayed_exec::authorize(&state, sender, slice, &attached)
+            })();
+            close_received_handles(&attached);
+            capability_reply(
+                sender,
+                result.map(|_| REPLY_OK).unwrap_or_else(error_status),
+            );
+            continue;
+        }
         if opcode == platform::capability::AUTHORIZE_EXEC_OBJECT_OPCODE {
             let result =
                 crate::object_image::prepare(sender, slice, &attached).and_then(|source| {

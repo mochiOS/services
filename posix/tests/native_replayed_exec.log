@@ -1,0 +1,21 @@
+EXEC-TEST START
+EXEC-TEST launching case=0
+EXEC-TEST PASS case=0 status=10752 expected=42
+EXEC-TEST launching case=1
+EXEC-TEST PASS case=1 status=10752 expected=42
+EXEC-TEST launching case=2
+EXEC-TEST unlinked pinned image
+EXEC-TEST PASS case=2 status=10752 expected=42
+EXEC-TEST launching case=3
+EXEC-TEST rejected case=3 errno=13
+EXEC-TEST PASS case=3 status=0 expected=0
+EXEC-TEST launching case=4
+EXEC-TEST rejected case=4 errno=13
+EXEC-TEST PASS case=4 status=0 expected=0
+EXEC-TEST launching case=5
+EXEC-TEST rejected case=5 errno=13
+EXEC-TEST PASS case=5 status=0 expected=0
+EXEC-TEST launching case=6
+EXEC-TEST PASS case=6 status=10752 expected=42
+EXEC-TEST PASS case=spawn error=0 status=10752
+EXEC-TEST COMPLETE failures=0

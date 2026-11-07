@@ -10,6 +10,7 @@ mod image_catalog;
 mod native_bootstrap;
 mod prepared_image;
 mod object_image;
+mod replayed_exec;
 mod signed_image;
 mod library_image;
 mod installed_image;
