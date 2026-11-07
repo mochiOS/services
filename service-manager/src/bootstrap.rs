@@ -1039,11 +1039,11 @@ impl BootstrapOperations for Runtime {
             .wait_for_complete(process.watch_target(), handshake, &mut self.deferred_requests)
         {
             Ok(()) => {
-                platform::logln!("service-manager.service: driver discovery complete");
+                eprintln!("service-manager.service: driver discovery complete");
                 true
             }
             Err(error) => {
-                platform::logln!(
+                eprintln!(
                     "service-manager.service: driver discovery failed error={:?}",
                     error
                 );
