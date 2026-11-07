@@ -802,6 +802,52 @@ mod tests {
     use crate::window::{Window, WindowId};
 
     #[test]
+    fn native_window_drag_reaches_status_area_and_screen_edges() {
+        let mut content = Surface::empty();
+        content.live = true;
+        content.visible = true;
+        content.handle = SurfaceHandle(1);
+        content.token = content.handle.0;
+        content.window = WindowId(7);
+        content.x = 100;
+        content.y = 140;
+        content.width = 640;
+        content.height = 400;
+
+        let mut decoration = Surface::empty();
+        decoration.live = true;
+        decoration.visible = true;
+        decoration.handle = SurfaceHandle(2);
+        decoration.token = decoration.handle.0;
+        decoration.window = WindowId(7);
+        decoration.is_decoration = true;
+
+        let mut window = Window::empty();
+        window.live = true;
+        window.id = WindowId(7);
+        window.content = content.handle;
+        window.decoration = Some(decoration.handle);
+        window.insets.top = 40;
+        let windows = [window];
+        let mut surfaces = [content, decoration];
+        let grab = Some(super::PointerGrab {
+            window: WindowId(7),
+            pointer_x: 120,
+            pointer_y: 120,
+            content_x: 100,
+            content_y: 140,
+        });
+
+        for (x, y, frame_x, frame_y) in [(120, 20, 100, 0), (0, 0, -20, -20)] {
+            let damage = super::apply_pointer_grab(&mut surfaces, &windows, &grab, x, y);
+            assert!(damage.is_some());
+            let frame = crate::window::window_frame_rect(&surfaces[0], &windows[0]);
+            assert_eq!((frame.x, frame.y), (frame_x, frame_y));
+            assert_eq!((surfaces[1].x, surfaces[1].y), (frame_x, frame_y));
+        }
+    }
+
+    #[test]
     fn key_event_detail_preserves_flags_and_modifiers() {
         assert_eq!(encode_key_event_detail(0x0003, 0x000b), 0x000b_0003);
     }
@@ -1109,8 +1155,6 @@ fn apply_pointer_grab(
     pointer_x: i32,
     pointer_y: i32,
 ) -> Option<Rect> {
-    const WORK_AREA_TOP: i32 = 40;
-
     let Some(grab) = *pointer_grab else {
         return None;
     };
@@ -1127,8 +1171,7 @@ fn apply_pointer_grab(
         .saturating_add(pointer_x.saturating_sub(grab.pointer_x));
     let next_y = grab
         .content_y
-        .saturating_add(pointer_y.saturating_sub(grab.pointer_y))
-        .max(WORK_AREA_TOP.saturating_add(window.insets.top as i32));
+        .saturating_add(pointer_y.saturating_sub(grab.pointer_y));
     if surfaces[content_index].x == next_x && surfaces[content_index].y == next_y {
         return None;
     }
