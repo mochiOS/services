@@ -22,8 +22,6 @@ requires = [
     "input.pointer",
     "ipc.client",
     "ipc.server",
-    "net.connect",
-    "usb.access",
 ]
 
 [prompt]
