@@ -77,18 +77,35 @@ fn broker(sender: u64) -> Result<MeasuredPeer, Error> {
     }
     Ok(peer)
 }
+fn trusted_directory(path: &str, private: bool) -> Result<(), Error> {
+    let stat =
+        posix_io::with_client(|c| c.stat_at(StatAtBase::ProcessRoot, posix::STAT_NOFOLLOW, path))?;
+    let forbidden = if private { 0o077 } else { 0o022 };
+    if stat.mode & 0o170000 != 0o040000 || stat.uid != 0 || stat.mode & forbidden != 0 {
+        return Err(denied());
+    }
+    Ok(())
+}
+fn trusted_record(path: &str) -> Result<(), Error> {
+    let stat =
+        posix_io::with_client(|c| c.stat_at(StatAtBase::ProcessRoot, posix::STAT_NOFOLLOW, path))?;
+    if stat.mode & 0o170000 != 0o100000 || stat.uid != 0 || stat.mode & 0o022 != 0 {
+        return Err(denied());
+    }
+    Ok(())
+}
 fn directory() -> Result<(), Error> {
+    // Protect every component, not only the leaf. A writable ancestor would
+    // let a caller replace the supposedly private snapshot between reads.
+    for path in ["/", "/var", "/var/lib"] {
+        trusted_directory(path, false)?;
+    }
     match posix_io::create_dir(ROOT, 0o700) {
         Ok(()) => {}
         Err(error) if error.raw() == -17 => {}
         Err(error) => return Err(error),
     }
-    let stat =
-        posix_io::with_client(|c| c.stat_at(StatAtBase::ProcessRoot, posix::STAT_NOFOLLOW, ROOT))?;
-    if stat.mode & 0o170000 != 0o040000 || stat.uid != 0 || stat.mode & 0o077 != 0 {
-        return Err(denied());
-    }
-    Ok(())
+    trusted_directory(ROOT, true)
 }
 fn capture(input: u32, id: u64) -> Result<Snapshot, Error> {
     let stat = posix_io::with_client(|c| c.fstat(reference(input)))?;
@@ -157,6 +174,23 @@ fn hash_file(path: &str) -> Result<[u8; 32], Error> {
 }
 fn base(id: &str) -> Result<Option<([u8; 32], platform::package::PackageManifest, String)>, Error> {
     let root = alloc::format!("/var/lib/packages/{id}");
+    for path in ["/var/lib/packages", root.as_str()] {
+        match trusted_directory(path, false) {
+            Ok(()) => {}
+            Err(error) if error.raw() == -2 => return Ok(None),
+            Err(error) => return Err(error),
+        }
+    }
+    let manifest_path = alloc::format!("{root}/manifest.toml");
+    match trusted_record(&manifest_path) {
+        Ok(()) => {}
+        Err(error) if error.raw() == -2 => {
+            require_path_absent(&alloc::format!("{root}/verification.bin"))?;
+            return Ok(None);
+        }
+        Err(error) => return Err(error),
+    }
+    trusted_record(&alloc::format!("{root}/verification.bin"))?;
     let bytes = match posix_io::read_to_end_path(&alloc::format!("{root}/manifest.toml")) {
         Ok(bytes) => bytes,
         Err(error) if error.raw() == -2 => {
