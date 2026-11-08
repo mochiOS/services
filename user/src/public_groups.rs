@@ -5,11 +5,17 @@ use std::{io, path::Path};
 
 pub fn load(path: &Path, users: &UserDatabase) -> io::Result<GroupDatabase> {
     if let Some(bytes) = crate::storage::load_bytes(path)? {
-        return GroupDatabase::parse(&bytes)
-            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error));
+        let mut groups = GroupDatabase::parse(&bytes)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+        let changed = groups.prune_members(users);
+        let provisioned = groups.provision_administrators(users)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+        if changed || provisioned { save(path, &groups).map_err(io::Error::other)?; }
+        return Ok(groups);
     }
-    let groups = GroupDatabase::provision(users)
+    let mut groups = GroupDatabase::provision(users)
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+    groups.provision_administrators(users).map_err(io::Error::other)?;
     save(path, &groups).map_err(io::Error::other)?;
     Ok(groups)
 }

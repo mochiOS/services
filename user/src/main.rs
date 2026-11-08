@@ -11,6 +11,7 @@ use mochios_user_protocol::{
 use user_service::{password, storage};
 mod administrator;
 mod public_endpoint;
+mod administrator_authentication;
 
 const READ_CAPABILITY: &str = "account.other.read";
 const MODIFY_CAPABILITY: &str = "account.other.modify";
@@ -28,6 +29,7 @@ struct UserService {
     healthy: bool,
     groups: mochios_user_database::groups::GroupDatabase,
     groups_healthy: bool,
+    administrator_authentication: administrator_authentication::Limiter,
 }
 
 impl UserService {
@@ -43,6 +45,7 @@ impl UserService {
             groups_healthy: true,
             generation: 1,
             healthy: true,
+            administrator_authentication: administrator_authentication::Limiter::default(),
         })
     }
 
@@ -151,13 +154,22 @@ impl UserService {
             return;
         }
         let mut groups = self.groups.clone();
-        let group_changed = match groups.ensure_private(&user) {
+        groups.prune_members(&self.database);
+        let mut group_changed = match groups.ensure_private(&user) {
             Ok(changed) => changed,
             Err(_) => {
                 self.reply_status(sender, request.request_id, mochi_user_syscall::EINVAL);
                 return;
             }
         };
+        if user.uid >= mochios_user_database::FIRST_REGULAR_UID
+            && !self.database.users().iter().any(|user| user.uid >= mochios_user_database::FIRST_REGULAR_UID) {
+            if groups.add_administrator(&user.name).is_err() {
+                self.reply_status(sender, request.request_id, mochi_user_syscall::EIO);
+                return;
+            }
+            group_changed = true;
+        }
         let mut candidate = self.database.clone();
         if candidate.add(user).is_err() {
             self.reply_status(sender, request.request_id, mochi_user_syscall::EINVAL);
@@ -192,6 +204,15 @@ impl UserService {
         if candidate.remove(request.name).is_err() {
             self.reply_status(sender, request.request_id, mochi_user_syscall::EINVAL);
             return;
+        }
+        let mut groups = self.groups.clone();
+        if groups.remove_member(request.name) {
+            if user_service::public_groups::save(Path::new(mochios_user_database::groups::DATABASE_PATH), &groups).is_err() {
+                self.groups_healthy = false;
+                self.reply_status(sender, request.request_id, mochi_user_syscall::EIO);
+                return;
+            }
+            self.groups = groups;
         }
         let status = self
             .save_candidate("remove-user", candidate)
@@ -447,7 +468,7 @@ fn main() {
         let required_capability = match opcode {
             Ok(Opcode::SnapshotBegin | Opcode::SnapshotChunk) => READ_CAPABILITY,
             Ok(Opcode::AddUser | Opcode::RemoveUser | Opcode::SetPassword) => MODIFY_CAPABILITY,
-            Ok(Opcode::Authenticate) => AUTHENTICATE_CAPABILITY,
+            Ok(Opcode::Authenticate | Opcode::VerifyAdministrator) => AUTHENTICATE_CAPABILITY,
             _ => {
                 service.reply_status(sender, 0, mochi_user_syscall::EINVAL);
                 continue;
@@ -479,6 +500,13 @@ fn main() {
             Ok(Opcode::RemoveUser) => service.handle_remove(sender, request),
             Ok(Opcode::SetPassword) => service.handle_set_password(sender, request),
             Ok(Opcode::Authenticate) => service.handle_authenticate(sender, request),
+            Ok(Opcode::VerifyAdministrator) => {
+                let id = mochios_user_protocol::VerifyAdministrator::decode(request).map(|request| request.request_id).unwrap_or(0);
+                let status = if service.healthy && service.groups_healthy {
+                    service.administrator_authentication.verify(sender, request, &service.database, &service.groups).err().unwrap_or(0)
+                } else { -5 };
+                service.reply_status(sender, id, i64::from(status) as u64);
+            }
             _ => service.reply_status(sender, 0, mochi_user_syscall::EINVAL),
         }
         let used_length = length.min(buffer.len());
