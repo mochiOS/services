@@ -242,12 +242,12 @@ impl WorkspaceService {
             protocol::OP_CONTROL_CENTER_CARD_SNAPSHOT => "control-center.read",
             protocol::OP_NOTIFICATION_POST => "notification.send",
             protocol::OP_NOTIFICATION_SNAPSHOT
-            | protocol::OP_NOTIFICATION_MARK_ALL_READ
+            | protocol::OP_NOTIFICATION_SETTINGS_SNAPSHOT => "control-center.read",
+            protocol::OP_NOTIFICATION_MARK_ALL_READ
             | protocol::OP_NOTIFICATION_REMOVE
             | protocol::OP_NOTIFICATION_CLEAR
-            | protocol::OP_NOTIFICATION_SETTINGS_SNAPSHOT
             | protocol::OP_NOTIFICATION_FOCUS_SET
-            | protocol::OP_NOTIFICATION_APPLICATION_SET => "control-center.read",
+            | protocol::OP_NOTIFICATION_APPLICATION_SET => "notification.manage",
             protocol::OP_ASSOCIATION_SET | protocol::OP_ASSOCIATION_REMOVE => ASSOCIATIONS_WRITE,
             _ => {
                 self.reply_status(
