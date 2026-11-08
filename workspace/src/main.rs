@@ -240,7 +240,7 @@ impl WorkspaceService {
             | protocol::OP_APPLICATION_ACTIVATE => "ipc.client",
             protocol::OP_CONTROL_CENTER_CARD_REGISTER => "control-center.register",
             protocol::OP_CONTROL_CENTER_CARD_SNAPSHOT => "control-center.read",
-            protocol::OP_NOTIFICATION_POST => "ipc.client",
+            protocol::OP_NOTIFICATION_POST => "notification.send",
             protocol::OP_NOTIFICATION_SNAPSHOT
             | protocol::OP_NOTIFICATION_MARK_ALL_READ
             | protocol::OP_NOTIFICATION_REMOVE
