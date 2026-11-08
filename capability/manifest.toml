@@ -16,6 +16,7 @@ requires = [
     "system.random.read",
     "service.register",
     "capabilities.manage",
+    "io.port@0xcf8:8",
     "device.input",
     "display.read",
     "input.keyboard",

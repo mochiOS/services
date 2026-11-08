@@ -38,6 +38,7 @@ mod package_index;
 mod package_walk;
 mod persistent_grant;
 mod policy;
+mod pci_resources;
 mod resolver;
 mod requester_context;
 mod runtime_manifest;
@@ -76,6 +77,10 @@ fn main() {
             platform::process::exit(1);
         }
     };
+    if let Err(error) = pci_resources::initialize() {
+        platform::logln!("capability.service: PCI resource initialization failed raw={}", error.raw());
+        platform::process::exit(1);
+    }
     start_required_services(&state.package_index);
     serve_capability_requests(state);
 }

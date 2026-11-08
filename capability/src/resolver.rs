@@ -522,6 +522,11 @@ fn authorize_image(
             mnu_abi::exec::EXEC_AUTHORIZATION_IMAGE_REVISION_PREFIX
         ));
     }
+    let scoped;
+    let capabilities = if kind == mnu_abi::exec::EXEC_AUTHORIZATION_KIND_SPAWN {
+        scoped = crate::pci_resources::grants(capabilities)?;
+        scoped.as_slice()
+    } else { capabilities };
     let identity_nul = encode_authorization_args(&authorization)?;
     platform::service::authorize_exec_for_requester(
         requester,

@@ -309,6 +309,18 @@ pub(crate) fn serve_capability_requests(mut state: CapabilityServiceState) -> ! 
         } else {
             0
         };
+        if opcode == platform::pci::MAGIC {
+            let result = if attached.count == 0 && attached.is_user_delivery() {
+                crate::pci_resources::request(sender, slice)
+            } else { Err(mochi_user_syscall::SysError::from_raw(-22)) };
+            close_received_handles(&attached);
+            let mut reply = [0; 16];
+            let (status, value) = match result { Ok(value) => (0i64, u64::from(value)), Err(error) => (error.raw(), 0) };
+            reply[..8].copy_from_slice(&status.to_le_bytes());
+            reply[8..].copy_from_slice(&value.to_le_bytes());
+            let _ = platform::ipc::reply(sender, &reply);
+            continue;
+        }
         #[cfg(mochios_presentation_probe_307)]
         if matches!(
             opcode,
