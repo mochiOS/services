@@ -1560,7 +1560,7 @@ fn main() {
                 if header.opcode == protocol::read_scope::OP_REGISTER_CHILD
                     && header.flags == 0
                     && header.status == 0
-                    && payload.is_empty()
+                    && (payload.is_empty() || payload.len() == protocol::SESSION_INFO_LEN)
                     && attachments.len() == 3 =>
             {
                 let status = (|| {
@@ -1587,7 +1587,17 @@ fn main() {
                     {
                         return Err(protocol::STATUS_ESRCH);
                     }
-                    read_scopes.register_child(
+                    let credentials = if payload.is_empty() {
+                        None
+                    } else {
+                        let credentials = protocol::decode_session_info(payload)
+                            .map_err(|_| posix_service::STATUS_EINVAL)?;
+                        if credentials.umask & !0o777 != 0 {
+                            return Err(posix_service::STATUS_EINVAL);
+                        }
+                        Some(credentials)
+                    };
+                    read_scopes.register_child_credentials(
                         id,
                         &mut service,
                         peer,
@@ -1601,6 +1611,7 @@ fn main() {
                         },
                         &mut filesystem,
                         &mut processes,
+                        credentials,
                     )
                 })();
                 if status.is_ok() {

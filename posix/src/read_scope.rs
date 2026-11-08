@@ -194,6 +194,24 @@ impl<H: Copy> Registry<H> {
         filesystem: &mut impl FilesystemBackend<H>,
         processes: &mut impl ProcessBackend<H>,
     ) -> Result<(), i32> {
+        self.register_child_credentials(
+            id, service, broker, requester, child, filesystem, processes, None,
+        )
+    }
+
+    /// Credential assignment is userspace policy of an already privileged
+    /// launcher. Retain the same immutable scope and native Process checks.
+    pub fn register_child_credentials(
+        &self,
+        id: u64,
+        service: &mut PosixService<H>,
+        broker: PeerIdentity,
+        requester: AuthenticatedProcess<H>,
+        child: AuthenticatedProcess<H>,
+        filesystem: &mut impl FilesystemBackend<H>,
+        processes: &mut impl ProcessBackend<H>,
+        credentials: Option<protocol::SessionInfo>,
+    ) -> Result<(), i32> {
         if service
             .sessions
             .get(&broker.process_id)
@@ -240,7 +258,24 @@ impl<H: Copy> Registry<H> {
         {
             return Err(protocol::STATUS_EAGAIN);
         }
-        service.adopt_launched_child(broker, requester, child, filesystem)
+        service.adopt_launched_child(broker, requester, child, filesystem)?;
+        if let Some(credentials) = credentials {
+            let session = service
+                .sessions
+                .get_mut(&child.process_id)
+                .ok_or(protocol::STATUS_ESRCH)?;
+            session.real_uid = credentials.real_uid;
+            session.effective_uid = credentials.effective_uid;
+            session.saved_uid = credentials.effective_uid;
+            session.real_gid = credentials.real_gid;
+            session.effective_gid = credentials.effective_gid;
+            session.saved_gid = credentials.effective_gid;
+            session.umask = credentials.umask;
+            service
+                .supplementary_groups
+                .insert(child.process_id, Vec::new());
+        }
+        Ok(())
     }
 
     pub fn release_native(

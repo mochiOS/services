@@ -328,7 +328,10 @@ dependencies = [
  "mochios-posix-client",
  "mochios-posix-protocol",
  "mochios-signature-protocol",
+ "mochios-user-database",
+ "mochios-user-protocol",
  "sha2",
+ "zeroize",
 ]
 
 [[package]]
@@ -1641,6 +1644,7 @@ dependencies = [
  "mochios-capability-protocol",
  "mochios-package-manifest",
  "mochios-workspace-protocol",
+ "zeroize",
 ]
 
 [[package]]
@@ -2659,6 +2663,7 @@ dependencies = [
  "tiny-skia",
  "toml 1.1.6+spec-1.1.0",
  "vt100",
+ "zeroize",
 ]
 
 [[package]]
