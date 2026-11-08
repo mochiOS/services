@@ -609,6 +609,9 @@ fn install_package(
     }
     if verification.verified_package_id != manifest.package_id
         || verification.package_digest != verification.manifest_digest
+        // The verifier reopens the path. Bind its result to the exact owned
+        // manifest used below, before trusting any target, mode or payload hash.
+        || Sha256::digest(&index.manifest).as_slice() != verification.manifest_digest
     {
         return Err(mochi_user_syscall::SysError::from_raw(
             mochi_user_syscall::EACCES as i64,
