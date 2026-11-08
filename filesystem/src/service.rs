@@ -38,6 +38,8 @@ mod rename_timestamps;
 mod creation_policy;
 #[path = "fifo_namespace.rs"]
 mod fifo_namespace;
+#[path = "whole_file_lock_state.rs"]
+mod whole_file_lock_state;
 
 #[path = "storage_inventory.rs"]
 pub mod storage_inventory;
@@ -115,6 +117,7 @@ pub(crate) struct OpenFile {
     offset: u64,
     status_flags: u32,
     cursor_records: bool,
+    whole_file_lock: u32,
 }
 
 #[derive(Clone)]
@@ -410,6 +413,7 @@ impl FilesystemService {
                 file: Some(file),
                 offset: 0,
                 status_flags: 0,
+                whole_file_lock: 0,
                 cursor_records: false,
             },
         );
@@ -614,6 +618,7 @@ impl FilesystemService {
                 inode,
                 file,
                 offset: 0,
+                whole_file_lock: 0,
                 cursor_records: request.flags & protocol::OPEN_AT_CURSOR_RECORDS != 0,
                 status_flags: (if request.flags & protocol::OPEN_AT_APPEND != 0 {
                     protocol::OPEN_STATUS_APPEND
@@ -796,6 +801,7 @@ impl FilesystemService {
                 file: None,
                 offset: 0,
                 status_flags: 0,
+                whole_file_lock: 0,
                 cursor_records: false,
             },
         );
@@ -2082,6 +2088,11 @@ impl FilesystemService {
     }
 
     pub fn provider_close(&mut self, open_id: u64) -> Result<(), i32> {
+        // Native OP_RELEASE means the final Handle alias is gone. Filesystem
+        // orphan cleanup may still fail, but cannot retain a dead owner's lock.
+        if let Some(open) = self.opens.get_mut(&open_id) {
+            open.whole_file_lock = 0;
+        }
         if let Some(mut region) = self.storage_regions.remove(&open_id) {
             if let Err(error) = region.close() {
                 self.storage_regions.insert(open_id, region);

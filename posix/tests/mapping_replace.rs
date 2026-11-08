@@ -62,6 +62,7 @@ mod mem {
     pub mod vm_object {
         #[derive(Debug)] pub struct VmObject {pub busy:bool}
         impl VmObject {
+            pub fn page_is_resident(&self,_:u64)->Result<bool,crate::status::Error>{Ok(false)}
             pub fn check_mapping_removal(&self)->Result<(),mnu_abi::status::Error> {if self.busy {Err(mnu_abi::status::Error::NotReady)} else {Ok(())}}
             pub fn memory_generation(&self)->Option<u64>{Some(1)}
             pub fn with_memory_generation_native<T>(&self,_:Option<u64>,f:impl FnOnce()->Result<T,mnu_abi::status::Error>)->Result<T,mnu_abi::status::Error>{self.check_mapping_removal()?;f()}

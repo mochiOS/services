@@ -133,6 +133,28 @@ fn aux(stack: &[u8]) -> Vec<(u64, u64, usize)> {
     }
     result
 }
+
+#[test]
+fn loaded_object_inspection_metadata_survives_inline_and_readonly_overflow_transport() {
+    for length in [37, 10000] {
+        reset(0);
+        let bytes = vec![7; length];
+        let mut owner = Owner::<Fake>::default();
+        let mut output = vec![0; mnu_abi::process_image::MAX_IMAGE_BYTES];
+        let count = encode(&mut owner, Process { loaded_objects: &bytes, ..Default::default() }, &mut output).unwrap();
+        let image = mnu_abi::process_image::decode(&output[..count]).unwrap();
+        let entries = aux(image.stack());
+        let (_, address, _) = entries.iter().find(|entry| entry.0 == process_image::AT_LOADED_OBJECTS).unwrap();
+        if let Some(mapping) = owner.mapping() {
+            assert_eq!(mapping.access, mnu_abi::MEMORY_ACCESS_READ);
+            assert_eq!(*address, mapping.address);
+            STATE.with_borrow(|state| assert_eq!(&state.bytes[..length], &bytes));
+        } else {
+            assert_eq!(&image.stack()[*address as usize..*address as usize + length], &bytes);
+        }
+        drop(owner);
+    }
+}
 #[test]
 fn large_payloads_share_one_readonly_mapping_and_preserve_small_entry_vectors() {
     reset(0);

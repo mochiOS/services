@@ -1212,6 +1212,9 @@ fn handle_provider_request(
         provider::OP_QUERY if header.basis == mochios_filesystem_protocol::storage_inventory::GET => {
             service.storage_inventory_request(header, payload, attached.count)
         }
+        provider::OP_CONTROL if header.basis == mochios_filesystem_protocol::whole_file_lock::UPDATE => {
+            filesystem_service::whole_file_lock::handle(service, header, payload, attached.count)
+        }
         provider::OP_QUERY | provider::OP_CONTROL if header.basis == volume_status::GET => {
             filesystem_service::volume_status::handle(service, header, payload, attached.count)
         }

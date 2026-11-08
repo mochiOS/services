@@ -11,6 +11,20 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 #[test]
+fn residency_observation_never_populates_or_extends_sparse_storage() {
+    let mut pages = SharedPages::new_resizable(8192, 4096, 2).unwrap();
+    assert!(!pages.is_resident(0));
+    assert!(!pages.is_resident(1));
+    assert!(!pages.is_resident(u64::MAX));
+    assert_eq!(pages.page_or_try_insert(0, || Err::<u32, _>(7)), Err(PageError::Allocation(7)));
+    assert!(!pages.is_resident(0));
+    pages.page_or_try_insert(1, || Ok::<u32, u8>(17)).unwrap();
+    assert!(!pages.is_resident(0));
+    assert!(pages.is_resident(1));
+    assert_eq!(pages.length(), 8192);
+}
+
+#[test]
 fn byte_resize_prepares_then_revokes_then_zeros_without_replacing_prefix() {
     let mut pages = SharedPages::new_resizable(8192, 4096, 2).unwrap();
     let low = pages

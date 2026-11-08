@@ -29,7 +29,7 @@ fn production_region_preserves_authority_offsets_and_access_when_sliced() {
         .unwrap();
     let mut probe = format!(
         "extern crate alloc; use alloc::sync::Arc;\n\
-         mod mem {{ pub mod vm_object {{ #[derive(Debug)] pub struct VmObject; }} }}\n\
+         mod mem {{ pub mod vm_object {{ #[derive(Debug)] pub struct VmObject; impl VmObject {{pub fn page_is_resident(&self,_:u64)->Result<bool,crate::mnu_abi::status::Error>{{Ok(false)}}}} }} }}\n\
          mod mnu_abi {{ pub const MEMORY_ACCESS_READ:u64={};\n\
          pub const MEMORY_ACCESS_WRITE:u64={}; pub const MEMORY_ACCESS_EXECUTE:u64={};\n\
          pub const MEMORY_ACCESS_ALL:u64={}; pub const MEMORY_MAP_SHARED:u64={}; pub mod status {{\n{status}\n}} }}\n",

@@ -338,6 +338,7 @@ pub(crate) fn launch_captured(
                 .unwrap_or(&[]),
             tls: prepared.as_ref().map(|image| image.tls).unwrap_or(&[]),
             indirect: prepared.as_ref().map(|image| image.indirect).unwrap_or(&[]),
+            loaded_objects: prepared.as_ref().map(|image| image.loaded_objects).unwrap_or(&[]),
         },
         Some((&mut metadata_owner, &mechanisms)),
         stdio,

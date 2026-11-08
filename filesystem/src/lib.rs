@@ -27,3 +27,5 @@ pub mod bootstrap_read;
 pub mod bootstrap_ipc;
 
 pub mod storage_region;
+
+pub mod whole_file_lock;

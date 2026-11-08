@@ -2,6 +2,20 @@ extern crate alloc;
 use mnu_abi::status::Error as NativeError;
 
 #[test]
+fn observing_sparse_backing_residency_does_not_materialize_a_page() {
+    let memory = shared_memory::SharedMemory::new_resizable(8192, 2).unwrap();
+    assert!(!memory.page_is_resident(0));
+    assert!(!memory.page_is_resident(1));
+    assert!(!memory.page_is_resident(u64::MAX));
+    memory.write_at(4096, &[17]).unwrap();
+    assert!(!memory.page_is_resident(0));
+    assert!(memory.page_is_resident(1));
+    memory.resize_with(4096, |_, _| Ok(())).unwrap();
+    assert!(!memory.page_is_resident(1));
+    assert_eq!(memory.length(), 4096);
+}
+
+#[test]
 fn large_sparse_objects_keep_the_creators_extent_ceiling() {
     let maximum_pages = 65536;
     let ceiling = maximum_pages * 4096;
