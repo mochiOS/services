@@ -57,7 +57,6 @@ fn parse_endpoint_arg() -> Option<u64> {
     None
 }
 
-
 fn find_input_service() -> Option<u64> {
     if let Ok(tid) = platform::process::find_by_name(INPUT_SERVICE_NAME) {
         if tid != 0 {
@@ -78,12 +77,11 @@ fn subscribe_input_events(tty_endpoint: u64) -> bool {
     };
     let subscribe_reply = input_subscribe_reply_buf();
     subscribe_reply.fill(0);
-    platform::ipc::call(
+    matches!(platform::ipc::call(
         input_tid,
         platform::input::bytes_of(&subscribe),
         subscribe_reply,
-    )
-    .is_ok()
+    ), Ok(message) if message as u32 == 1 && subscribe_reply[0] == 0)
 }
 
 fn main() {

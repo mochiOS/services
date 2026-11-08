@@ -13,6 +13,7 @@ requires = [
     "process.spawn",
     "ipc.client",
     "ipc.server",
+    "input.keyboard.global",
     "net.connect",
     "net.tls.connect",
     "net.http.request",

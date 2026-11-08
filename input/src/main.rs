@@ -1,9 +1,9 @@
 use std::fs;
 
 use input::ime;
-mod raw_input;
-mod physical_input;
 mod consent_input;
+mod physical_input;
+mod raw_input;
 use mochi_user_platform as platform;
 
 const SETTINGS_PATH: &str = "/var/config/input/settings.conf";
@@ -254,7 +254,7 @@ fn send_event(subscribers: &[u64; MAX_SUBSCRIBERS], bytes: &[u8]) {
     for subscriber in subscribers
         .iter()
         .copied()
-        .filter(|subscriber| *subscriber != 0)
+        .filter(|subscriber| subscriber_permits(*subscriber, bytes))
     {
         let _ = platform::ipc::send(subscriber, bytes);
     }
@@ -264,7 +264,7 @@ fn send_event_reliably(subscribers: &[u64; MAX_SUBSCRIBERS], bytes: &[u8]) {
     for subscriber in subscribers
         .iter()
         .copied()
-        .filter(|subscriber| *subscriber != 0)
+        .filter(|subscriber| subscriber_permits(*subscriber, bytes))
     {
         for _ in 0..RELIABLE_SEND_RETRIES {
             match platform::ipc::send(subscriber, bytes) {
@@ -565,22 +565,57 @@ fn process_keyboard_byte(
     send_event_reliably(subscribers, &event);
 }
 
-fn handle_subscribe_message(subscribers: &mut [u64; MAX_SUBSCRIBERS], buf: &[u8]) {
-    if buf.len() < 16 {
-        return;
+fn has_global_input(endpoint: u64) -> bool {
+    endpoint != 0
+        && (platform::capability::check_thread(endpoint, "input.keyboard.global") == Ok(1)
+            || platform::capability::check_thread(endpoint, "input.pointer.global") == Ok(1))
+}
+
+fn subscriber_permits(endpoint: u64, bytes: &[u8]) -> bool {
+    let Some(kind) = bytes.get(..2) else {
+        return false;
+    };
+    let capability = if u16::from_le_bytes([kind[0], kind[1]]) == platform::input::EVENT_KIND_KEY {
+        "input.keyboard.global"
+    } else {
+        "input.pointer.global"
+    };
+    endpoint != 0 && platform::capability::check_thread(endpoint, capability) == Ok(1)
+}
+
+fn handle_subscribe_message(
+    subscribers: &mut [u64; MAX_SUBSCRIBERS],
+    sender: u64,
+    buf: &[u8],
+) -> u8 {
+    if buf.len() != 16 || buf[4..8] != [0; 4] {
+        return 22;
     }
     let opcode = u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]);
     if opcode != platform::input::SUBSCRIBE_OPCODE {
-        return;
+        return 22;
     }
     let subscriber = u64::from_le_bytes([
         buf[8], buf[9], buf[10], buf[11], buf[12], buf[13], buf[14], buf[15],
     ]);
-    if subscriber == 0 || subscribers.iter().any(|current| *current == subscriber) {
-        return;
+    let owner = platform::ipc::endpoint_owner_process(sender)
+        .ok()
+        .filter(|id| *id != 0);
+    if owner.is_none()
+        || owner != platform::ipc::endpoint_owner_process(subscriber).ok()
+        || !has_global_input(sender)
+        || !has_global_input(subscriber)
+    {
+        return 13;
+    }
+    if subscribers.contains(&subscriber) {
+        return 0;
     }
     if let Some(slot) = subscribers.iter_mut().find(|current| **current == 0) {
         *slot = subscriber;
+        0
+    } else {
+        28
     }
 }
 
@@ -630,6 +665,15 @@ fn main() {
     eprintln!("input.service: READY sent");
 
     loop {
+        // Endpoint generations retire on exit/exec. Recheck authority again at
+        // delivery so dropping a global grant cannot retain a subscription.
+        for subscriber in &mut subscribers {
+            if *subscriber != 0
+                && (!platform::ipc::endpoint_alive(*subscriber) || !has_global_input(*subscriber))
+            {
+                *subscriber = 0;
+            }
+        }
         let mut pointer_received = false;
         if hardware_input {
             match poll_pointer() {
@@ -703,7 +747,9 @@ fn main() {
             continue;
         }
 
-        if len >= 4 && buf[..4] == platform::capability::input_authority::CONTROL_OPCODE.to_le_bytes() {
+        if len >= 4
+            && buf[..4] == platform::capability::input_authority::CONTROL_OPCODE.to_le_bytes()
+        {
             let reply = consent_input.control(sender, &buf[..len]);
             if platform::ipc::reply(sender, &reply).is_err() {
                 consent_input.reply_failed(sender);
@@ -712,12 +758,13 @@ fn main() {
         }
 
         if buf[..len] == platform::input::IME_WARMUP_REQUEST {
-            let status = if platform::capability::check_thread(sender, "capabilities.manage") == Ok(1) {
-                input_method.warmup();
-                0u64
-            } else {
-                platform::syscall::NativeError::AccessDenied.into_raw()
-            };
+            let status =
+                if platform::capability::check_thread(sender, "capabilities.manage") == Ok(1) {
+                    input_method.warmup();
+                    0u64
+                } else {
+                    platform::syscall::NativeError::AccessDenied.into_raw()
+                };
             let _ = platform::ipc::reply(sender, &status.to_le_bytes());
             continue;
         }
@@ -735,8 +782,14 @@ fn main() {
         }
 
         if ime::is_toggle_request(&buf[..len]) {
-            input_method.toggle();
-            let _ = platform::ipc::reply(sender, &input_method.state_response());
+            if has_global_input(sender)
+                || platform::capability::check_thread(sender, "settings.write") == Ok(1)
+            {
+                input_method.toggle();
+                let _ = platform::ipc::reply(sender, &input_method.state_response());
+            } else {
+                let _ = platform::ipc::reply(sender, &13u64.to_le_bytes());
+            }
             continue;
         }
 
@@ -744,8 +797,8 @@ fn main() {
             && u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]])
                 == platform::input::SUBSCRIBE_OPCODE
         {
-            handle_subscribe_message(&mut subscribers, &buf[..len]);
-            let _ = platform::ipc::reply(sender, &[0]);
+            let status = handle_subscribe_message(&mut subscribers, sender, &buf[..len]);
+            let _ = platform::ipc::reply(sender, &[status]);
             continue;
         }
 
@@ -757,7 +810,11 @@ fn main() {
             raw_input::Packet::Keyboard { byte, synthetic } => {
                 consent_input.keyboard(byte, synthetic);
                 process_keyboard_byte(
-                    byte, synthetic, &mut keyboard, &subscribers, &mut input_method,
+                    byte,
+                    synthetic,
+                    &mut keyboard,
+                    &subscribers,
+                    &mut input_method,
                 );
             }
             raw_input::Packet::Mouse(packet) => {
