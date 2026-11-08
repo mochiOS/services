@@ -15,6 +15,7 @@ use mochios_signature_protocol::{
 use sha2::{Digest, Sha256};
 
 mod posix_io;
+mod transactions;
 
 const SIG_SERVICE_NAME: &str = "signature.service";
 const LINUX_SERVICE_NAME: &str = "linux.service";
@@ -150,6 +151,19 @@ fn verify_with_signature_service(
             mochi_user_syscall::ENOENT as i64,
         ));
     }
+    let peer = platform::execution_peer::capture(service_tid)?;
+    let context = &peer.context;
+    if context.provenance != 1
+        || context.subject_key_id != [0; 32]
+        || context.package_id.get(..context.package_id_len as usize)
+            != Some(b"org.mochios.signature")
+        || context
+            .developer_id
+            .get(..context.developer_id_len as usize)
+            != Some(b"org.mochios.system")
+    {
+        return Err(mochi_user_syscall::SysError::from_raw(-13));
+    }
     let request_id = platform::time::ticks().unwrap_or(1);
     let request = VerifyFile {
         request_id,
@@ -163,6 +177,13 @@ fn verify_with_signature_service(
         .encode(&mut request_bytes)
         .map_err(|_| mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64))?;
     let message = platform::ipc::call(service_tid, &request_bytes[..request_len], &mut reply)?;
+    let current = platform::execution_peer::capture(service_tid)?;
+    if message >> 32 != service_tid
+        || current.image != peer.image
+        || !platform::handle::same_object(current.process.0, peer.process.0)?
+    {
+        return Err(mochi_user_syscall::SysError::from_raw(-13));
+    }
     let reply_len = (message & 0xffff_ffff) as usize;
     let response = reply
         .get(..reply_len)
@@ -1132,6 +1153,7 @@ fn remove_package(package_id: &str) -> Result<(), mochi_user_syscall::SysError> 
         .map_err(|_| mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EACCES as i64))?;
     if install_record.provenance == InstallProvenance::BuiltIn
         || install_record.verification.verified_package_id != package_id
+        || install_record.verification.manifest_digest != Sha256::digest(&manifest_bytes).as_slice()
     {
         return Err(mochi_user_syscall::SysError::from_raw(
             mochi_user_syscall::EACCES as i64,
@@ -1184,7 +1206,7 @@ fn remove_package(package_id: &str) -> Result<(), mochi_user_syscall::SysError> 
 
 fn run_server() -> ! {
     platform::logln!("package.service: ready");
-    let endpoint = match platform::ipc::create() {
+    let endpoint = match platform::ipc::create().and_then(|_| platform::ipc::create_handle()) {
         Ok(endpoint) => endpoint,
         Err(err) => {
             platform::logln!(
@@ -1194,14 +1216,27 @@ fn run_server() -> ! {
             platform::process::exit(1);
         }
     };
+    let mut transactions = transactions::Registry::default();
     let mut buf = [0u8; 8192];
     loop {
+        transactions.maintain(platform::time::monotonic_nanoseconds().unwrap_or(u64::MAX));
         let mut attached = platform::ipc::IpcObjectHandles::default();
-        let msg = match platform::ipc::wait_object_handles(endpoint, &mut buf, &mut attached) {
+        let msg = match platform::ipc::try_wait_object_handles(&mut buf, &mut attached) {
             Ok(msg) => msg,
-            Err(_) => {
-                platform::thread::yield_now();
+            Err(error)
+                if error.native_error() == Some(mochi_user_syscall::NativeError::NotReady) =>
+            {
+                if let Err(error) = transactions.wait(endpoint) {
+                    if error.native_error() != Some(mochi_user_syscall::NativeError::NotReady) {
+                        diagnostic("package.service: transaction wait failed");
+                        platform::process::exit(1);
+                    }
+                }
                 continue;
+            }
+            Err(_) => {
+                diagnostic("package.service: receive failed");
+                platform::process::exit(1);
             }
         };
         let sender = msg >> 32;
@@ -1232,6 +1267,23 @@ fn run_server() -> ! {
                 }
             }
             let _ = platform::ipc::reply(sender, &status.to_le_bytes());
+            continue;
+        }
+        if transactions.handle(
+            endpoint,
+            sender,
+            &buf[..len.min(buf.len())],
+            &attached,
+        ) {
+            for handle in attached
+                .handles
+                .iter()
+                .take((attached.count as usize).min(attached.handles.len()))
+            {
+                if handle.handle != 0 {
+                    let _ = platform::handle::close(handle.handle);
+                }
+            }
             continue;
         }
         if attached.count != 0 || !attached.is_user_delivery() {
@@ -1278,19 +1330,15 @@ fn run_server() -> ! {
             }
             continue;
         }
-        let request = (|| match request {
-            PackageRequest::Install(path) => install_package(&path, PackageMutation::Install),
-            PackageRequest::Update(path) => install_package(&path, PackageMutation::Update),
-            PackageRequest::Remove(package_id) => remove_package(&package_id),
-            PackageRequest::List => unreachable!(),
-        })();
-        if let Err(error) = request {
-            diagnostic(&alloc::format!(
-                "package.service: install request failed errno={}",
-                error.errno().unwrap_or(0)
-            ));
-        }
-        reply_status(sender, request_id, legacy, request);
+        // Legacy/versioned path-only mutation RPCs carry no human approval.
+        // Even UID zero and a declared package capability cannot bypass the
+        // prepared object + common broker's single-use approval above.
+        reply_status(
+            sender,
+            request_id,
+            legacy,
+            Err(mochi_user_syscall::SysError::from_raw(-13)),
+        );
     }
 }
 

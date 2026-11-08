@@ -36,6 +36,10 @@ pub(crate) struct Request {
     action: Operation,
 }
 enum Operation {
+    Package {
+        prepared: crate::package_approval::Prepared,
+        approvals: crate::package_approval::Shared,
+    },
     Account {
         payload: Zeroizing<Vec<u8>>,
     },
@@ -69,6 +73,34 @@ impl Request {
             },
             source,
         ))
+    }
+    pub(crate) fn package(
+        peer: &Peer,
+        bytes: &[u8],
+        objects: &mut p::ipc::IpcObjectHandles,
+        approvals: crate::package_approval::Shared,
+    ) -> Result<(Self, Vec<u8>), SysError> {
+        let prepared = crate::package_approval::Prepared::capture(peer, bytes, objects)?;
+        let source = prepared.bytes.clone();
+        let request = Self {
+            identity: caller_identity(peer)?,
+            capabilities: vec![prepared.capability().into()],
+            digest: Sha256::digest(&source).into(),
+            username: username(peer),
+            description: prepared.description(),
+            action: Operation::Package {
+                prepared,
+                approvals,
+            },
+        };
+        Ok((request, source))
+    }
+    fn required(&self) -> &'static str {
+        match &self.action {
+            Operation::Package { prepared, .. } => prepared.capability(),
+            Operation::Run { .. } => "process.spawn",
+            Operation::Account { .. } => "account.other.modify",
+        }
     }
     pub(crate) fn run(
         index: &crate::package_index::PackageIndex,
@@ -248,6 +280,7 @@ impl Request {
         match &self.action {
             Operation::Run { packet, .. } => hash.update(&packet[..]),
             Operation::Account { payload } => hash.update(&payload[..]),
+            Operation::Package { prepared, .. } => hash.update(&prepared.bytes),
         }
         for capability in &self.capabilities {
             hash.update((capability.len() as u32).to_le_bytes());
@@ -267,6 +300,7 @@ impl Request {
         peer: &Peer,
         credentials: wire::Credentials<'_>,
         deadline: u64,
+        binding: crate::consent::Binding,
     ) -> Result<u64, SysError> {
         // Credentials are accepted only after consuming a fresh physical input
         // approval in execution_frontend. No plaintext-input RPC can get here.
@@ -285,18 +319,18 @@ impl Request {
             || !p::handle::same_object(current.process.0, peer.process.0)?
             || crate::execution_grant::requester_uid(&current)? != uid
             || p::time::monotonic_nanoseconds()? >= deadline
-            || p::capability::check_thread(
-                peer.instance.endpoint,
-                if self.is_run() {
-                    "process.spawn"
-                } else {
-                    "account.other.modify"
-                },
-            ) != Ok(1)
+            || p::capability::check_thread(peer.instance.endpoint, self.required()) != Ok(1)
         {
             return Err(denied());
         }
         match self.action {
+            Operation::Package {
+                prepared,
+                approvals,
+            } => {
+                prepared.approve(&approvals, peer, binding, deadline)?;
+                Ok(0)
+            }
             Operation::Account { payload } => {
                 perform_account(&payload)?;
                 Ok(0)
@@ -628,7 +662,8 @@ impl crate::execution_approval::Administration for Request {
         peer: &Peer,
         credentials: wire::Credentials<'_>,
         deadline: u64,
+        binding: crate::consent::Binding,
     ) -> Result<u64, SysError> {
-        (*self).complete(source, peer, credentials, deadline)
+        (*self).complete(source, peer, credentials, deadline, binding)
     }
 }

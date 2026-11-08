@@ -233,6 +233,9 @@ pub(crate) fn serve_capability_requests(mut state: CapabilityServiceState) -> ! 
     let mut display_authority: Option<crate::consent_presentation::Channel> = None;
     let mut desktop_sessions = crate::consent_presentation::Sessions::default();
     let mut frontends = crate::execution_frontend::Frontends::new();
+    let package_approvals = alloc::rc::Rc::new(core::cell::RefCell::new(
+        crate::package_approval::Registry::default(),
+    ));
     #[cfg(mochios_presentation_probe_307)]
     let mut presentation_probe: Option<crate::presentation_probe::Probe> = None;
     #[cfg(mochios_consent_input_probe_306)]
@@ -240,6 +243,10 @@ pub(crate) fn serve_capability_requests(mut state: CapabilityServiceState) -> ! 
     loop {
         use zeroize::Zeroize;
         buf.zeroize();
+        package_approvals.borrow_mut().maintain(
+            platform::time::monotonic_nanoseconds().unwrap_or(u64::MAX),
+            state.authorization_generation,
+        );
         // Check deadlines before every receive, including under message load.
         if execution_requests.len() != 0 {
             execution_requests.invalidate_policy(
@@ -301,9 +308,19 @@ pub(crate) fn serve_capability_requests(mut state: CapabilityServiceState) -> ! 
                     };
                     count += 1;
                 });
+                package_approvals.borrow().processes(|handle| {
+                    assert!(count < wait_items.len());
+                    wait_items[count] = mochi_user_syscall::HandleWaitItem {
+                        handle,
+                        interests: mnu_abi::HANDLE_SIGNAL_TERMINATED,
+                        ..Default::default()
+                    };
+                    count += 1;
+                });
                 let deadline = execution_requests
                     .next_deadline()
-                    .unwrap_or(mnu_abi::HANDLE_WAIT_INFINITE);
+                    .unwrap_or(mnu_abi::HANDLE_WAIT_INFINITE)
+                    .min(package_approvals.borrow().deadline());
                 if let Err(error) = platform::process::wait_many(&mut wait_items[..count], deadline)
                 {
                     if error.raw() != mochi_user_syscall::NativeError::NotReady.into_raw() as i64 {
@@ -762,8 +779,53 @@ pub(crate) fn serve_capability_requests(mut state: CapabilityServiceState) -> ! 
             capability_reply(sender, status);
             continue;
         }
+        if opcode == platform::capability::administrator::PACKAGE_CONNECT_OPCODE {
+            let result = if slice.len() == 4 && attached.count == 0 && attached.is_user_delivery() {
+                crate::package_approval::connect()
+            } else {
+                Err(mochi_user_syscall::SysError::from_raw(-22))
+            };
+            close_received_handles(&attached);
+            match result {
+                Ok((endpoint, canonical)) => {
+                    let mut response = [0; 16];
+                    response[8..16].copy_from_slice(&canonical.to_le_bytes());
+                    let mut objects = platform::ipc::IpcObjectHandles::default();
+                    objects.count = 1;
+                    objects.handles[0] = platform::ipc::IpcObjectHandle {
+                        handle: endpoint.0,
+                        reserved: 0,
+                        rights: platform::handle::HANDLE_RIGHT_SEND
+                            | platform::handle::HANDLE_RIGHT_TRANSFER,
+                    };
+                    let _ = platform::ipc::reply_object_handles(sender, &response, &objects);
+                }
+                Err(reason) => capability_reply(sender, error_status(reason)),
+            }
+            continue;
+        }
+        if opcode == platform::capability::administrator::PACKAGE_CONSUME_OPCODE {
+            let authority = crate::execution_frontend::native::Native {
+                trusted: &state.trusted_images,
+                sessions: &desktop_sessions,
+                display: display_authority.as_ref(),
+                input: None,
+            };
+            let result = package_approvals.borrow_mut().consume(
+                sender,
+                slice,
+                &attached,
+                state.authorization_generation,
+                platform::time::monotonic_nanoseconds().unwrap_or(u64::MAX),
+                |peer| crate::execution_frontend::Authority::session(&authority, peer),
+            );
+            close_received_handles(&attached);
+            capability_reply(sender, result.err().map(error_status).unwrap_or(REPLY_OK));
+            continue;
+        }
         if opcode == platform::capability::administrator::OPERATION_OPCODE
             || opcode == platform::capability::administrator::RUN_OPCODE
+            || opcode == platform::capability::administrator::PACKAGE_OPCODE
         {
             let spawn = opcode == platform::capability::administrator::RUN_OPCODE;
             let result = (|| {
@@ -781,6 +843,13 @@ pub(crate) fn serve_capability_requests(mut state: CapabilityServiceState) -> ! 
                         &requester,
                         slice,
                         &mut attached,
+                    )?
+                } else if opcode == platform::capability::administrator::PACKAGE_OPCODE {
+                    crate::administrator::Request::package(
+                        &requester,
+                        slice,
+                        &mut attached,
+                        alloc::rc::Rc::clone(&package_approvals),
                     )?
                 } else {
                     if attached.count != 0 || !attached.is_user_delivery() {

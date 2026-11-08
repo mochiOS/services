@@ -4,6 +4,7 @@ use mochi_user_platform as platform;
 
 mod app_spawn;
 mod administrator;
+mod package_approval;
 mod app_stdio;
 mod app_image;
 mod native_app;

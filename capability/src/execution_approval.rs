@@ -26,6 +26,7 @@ pub(crate) trait Administration {
         peer: &Peer,
         credentials: p::capability::administrator::Credentials<'_>,
         deadline: u64,
+        binding: Binding,
     ) -> Result<u64, SysError>;
 }
 
@@ -342,7 +343,7 @@ impl Pending {
                 return Err(error(NativeError::AccessDenied));
             }
             let credentials = credentials.ok_or_else(|| error(NativeError::AccessDenied))?;
-            return request.complete(&self.source, current, credentials, deadline);
+            return request.complete(&self.source, current, credentials, deadline, self.binding);
         }
         if credentials.is_some() {
             return Err(error(NativeError::AccessDenied));

@@ -538,6 +538,7 @@ impl Frontends {
                 }
             };
         let active = self.active.take().unwrap();
+        let authentication = credentials.is_some();
         let reply = registry.finish_credentials(
             controller,
             correlation,
@@ -562,6 +563,8 @@ impl Frontends {
         };
         let result = reply.result.map(|_| ());
         emit(reply);
-        result
+        // Completion errors belong to the requester. This question has been
+        // retired; do not let an EAGAIN backend status keep its renderer open.
+        if authentication { Ok(()) } else { result }
     }
 }
