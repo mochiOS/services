@@ -292,26 +292,9 @@ fn selected_reader_failures_are_not_retried_through_another_backend() {
             resolver::decide_binary_capabilities(&manifest, MANIFEST, BINARY, read_file).err(),
             Some(error)
         );
-        let identity = resolver::ApplicationIdentity {
-            package_id: manifest.package_id.clone(),
-            developer_id: "org.mochios.system".into(),
-            subject_key_id: [0; 32],
-            provenance: InstallProvenance::BuiltIn,
-        };
-        assert_eq!(
-            resolver::authorize_spawn(
-                0,
-                BINARY,
-                &identity,
-                &[],
-                mochi_user_platform::service::ExecutionClass::Unprivileged,
-                read_file
-            ),
-            Err(error)
-        );
         assert_eq!(
             FILES.with_borrow(|files| files.reads.clone()),
-            [RECORD, RECORD, BINARY]
+            [RECORD, RECORD]
         );
     }
 }
@@ -395,4 +378,91 @@ fn authenticated_unknown_capabilities_cannot_be_published_to_native_authorizatio
         syscall::EINVAL as i64
     );
     FILES.with_borrow(|files| assert_eq!(files.reads, [RECORD, MANIFEST]));
+}
+
+#[test]
+fn authenticated_path_images_require_exact_code_and_preserve_reader_errors() {
+    let image = b"authenticated code bytes";
+    let text = format!(
+        "[package]\nid='org.mochios.capability'\nname='Capability'\nversion='1'\nprovenance='built-in'\n[[binary]]\npath='{BINARY}'\nkind='service'\nfile='code'\nrequires=[]\n[[file]]\nid='code'\npath='{BINARY}'\ndigest='sha256:{:x}'\nsize={}\nmode='0755'\n",
+        Sha256::digest(image),
+        image.len()
+    );
+    fixture_text(&text);
+    let verified = resolver::verified_manifest(MANIFEST, read_file).unwrap();
+    for changed in [
+        image.to_vec(),
+        {
+            let mut bytes = image.to_vec();
+            bytes[0] ^= 1;
+            bytes
+        },
+        image[..image.len() - 1].to_vec(),
+        {
+            let mut bytes = image.to_vec();
+            bytes.push(0);
+            bytes
+        },
+    ] {
+        FILES.with_borrow_mut(|files| {
+            files.reads.clear();
+            files.bytes.insert(BINARY.into(), changed.clone());
+        });
+        let result = verified.read_image(BINARY, read_file);
+        if changed == image {
+            assert_eq!(result.unwrap(), image);
+        } else {
+            assert_eq!(result.unwrap_err().raw(), syscall::EACCES as i64);
+        }
+        FILES.with_borrow(|files| assert_eq!(files.reads, [BINARY]));
+    }
+    for status in [syscall::EAGAIN, syscall::EIO, syscall::EACCES] {
+        FILES.with_borrow_mut(|files| {
+            files.reads.clear();
+            files.error = Some(syscall::SysError::from_raw(status as i64));
+        });
+        assert_eq!(
+            verified.read_image(BINARY, read_file).unwrap_err().raw(),
+            status as i64
+        );
+        FILES.with_borrow(|files| assert_eq!(files.reads, [BINARY]));
+    }
+}
+
+#[test]
+fn path_replacement_dispatch_uses_the_same_verified_manifest_and_image_gate() {
+    let source = include_str!("../../capability/src/server.rs");
+    let branch = source
+        .split("if opcode == platform::capability::AUTHORIZE_EXEC_OPCODE {")
+        .nth(1)
+        .unwrap()
+        .split("if opcode == platform::capability::PACKAGE_INDEX_CHANGED_OPCODE {")
+        .next()
+        .unwrap();
+    assert!(branch.contains("crate::resolver::verified_manifest("));
+    assert!(branch.contains("verified.decide_capabilities(path)?"));
+    assert!(branch.contains("verified.read_image(path, crate::persistent_grant::read_file)?"));
+    assert!(!branch.contains("&record.manifest,"));
+    assert!(!branch.contains("crate::persistent_grant::read_file(path)?"));
+}
+
+#[test]
+fn unbound_and_out_of_range_image_declarations_fail_before_file_io() {
+    for size in [
+        None,
+        Some(0),
+        Some(mnu_abi::exec::MAX_CAPTURED_IMAGE_BYTES as u64 + 1),
+    ] {
+        let mut text = format!(
+            "[package]\nid='org.mochios.capability'\nname='Capability'\nversion='1'\nprovenance='built-in'\n[[binary]]\npath='{BINARY}'\nkind='service'\nrequires=[]\n"
+        );
+        if let Some(size) = size {
+            text.push_str(&format!("file='code'\n[[file]]\nid='code'\npath='{BINARY}'\ndigest='sha256:{}'\nsize={size}\nmode='0755'\n", "00".repeat(32)));
+        }
+        fixture_text(&text);
+        let verified = resolver::verified_manifest(MANIFEST, read_file).unwrap();
+        FILES.with_borrow_mut(|files| files.reads.clear());
+        assert!(verified.read_image(BINARY, read_file).is_err());
+        FILES.with_borrow(|files| assert!(files.reads.is_empty()));
+    }
 }

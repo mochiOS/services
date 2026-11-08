@@ -104,6 +104,24 @@ pub(crate) fn verified_manifest(
 }
 
 impl VerifiedManifest {
+    /// Return one owned image only when it matches this authenticated manifest.
+    /// Callers authorize these same bytes; an index or pathname is only a hint.
+    pub(crate) fn read_image(
+        &self,
+        path: &str,
+        read: FileReader,
+    ) -> Result<Vec<u8>, mochi_user_syscall::SysError> {
+        let binding = crate::image_catalog::declared_root_binding(&self.manifest, path)?;
+        if binding.size == 0 || binding.size > mnu_abi::exec::MAX_CAPTURED_IMAGE_BYTES as u64 {
+            return Err(mochi_user_syscall::SysError::from(
+                mochi_user_syscall::NativeError::LimitExceeded.into_raw(),
+            ));
+        }
+        let bytes = read(path)?;
+        crate::image_catalog::validate_declared_root(&self.manifest, path, &bytes)?;
+        Ok(bytes)
+    }
+
     /// Capability policy and code integrity use this same authenticated
     /// snapshot, even if a package update occurs while a prompt is displayed.
     pub(crate) fn decide_capabilities(
@@ -400,25 +418,6 @@ fn encode_authorization_args(items: &[String]) -> Result<Vec<u8>, mochi_user_sys
         cursor += bytes.len() + 1;
     }
     Ok(output)
-}
-
-pub(crate) fn authorize_spawn(
-    requester: u64,
-    path: &str,
-    identity: &ApplicationIdentity,
-    capabilities: &[String],
-    execution_class: platform::service::ExecutionClass,
-    read_file: FileReader,
-) -> Result<(), mochi_user_syscall::SysError> {
-    let executable = read_file(path)?;
-    authorize_spawn_image(
-        requester,
-        path,
-        identity,
-        capabilities,
-        execution_class,
-        &executable,
-    )
 }
 
 /// Authorize the exact owned bytes to be supplied to native creation. The

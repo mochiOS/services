@@ -44,7 +44,8 @@ pub(crate) fn resolve(
         .by_binary
         .get(path)
         .ok_or_else(|| SysError::from_raw(ENOENT as i64))?;
-    let kind = record
+    let verified = resolver::verified_manifest(&record.manifest_path, read)?;
+    let kind = verified
         .manifest
         .binary(path)
         .and_then(|binary| binary.kind.as_deref());
@@ -60,11 +61,11 @@ pub(crate) fn resolve(
     ) {
         return Err(denied());
     }
-    let caps = resolver::binary_caps(&record.manifest, &record.manifest_path, path, read)?.to_vec();
-    let identity = resolver::application_identity(&record.manifest, &record.manifest_path, read)?;
+    let caps = verified.decide_capabilities(path)?.into_allowed()?;
+    let identity = &verified.identity;
     let mut fields = Vec::new();
-    resolver::encode_identity_args(&identity, &mut fields);
-    let image = read(path)?;
+    resolver::encode_identity_args(identity, &mut fields);
+    let image = verified.read_image(path, read)?;
     // Retain the Process reference while I/O runs, then reject an image or
     // authority change before publishing a one-shot permit for this sender.
     let current = consent_peer::capture(sender)?;
@@ -76,6 +77,6 @@ pub(crate) fn resolve(
         return Err(denied());
     }
     require_capabilities(sender)?;
-    resolver::authorize_spawn_image(sender, path, &identity, &caps, class, &image)?;
+    resolver::authorize_spawn_image(sender, path, identity, &caps, class, &image)?;
     Ok((fields, caps))
 }

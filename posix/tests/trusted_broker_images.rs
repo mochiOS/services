@@ -892,6 +892,7 @@ mod launch_authorization {
         for (role, kind, class, allowed) in [
             (Role::SessionOwner, "service", 2, true),
             (Role::SessionOwner, "service", 3, true),
+            (Role::SessionOwner, "driver", 2, false),
             (Role::SessionOwner, "application", 3, true),
             (Role::SessionOwner, "application", 2, false),
             (Role::SessionOwner, "library", 3, false),
@@ -949,6 +950,60 @@ mod launch_authorization {
             broker_launch::resolve(&index, &trusted, 700, 2, TARGET, change_during_read).is_err()
         );
         no_permit();
+    }
+    #[test]
+    fn changed_truncated_extended_and_unreadable_code_never_get_a_spawn_permit() {
+        for corruption in 0..4 {
+            let mut index = fixture(false);
+            let trusted = bootstrap(&index);
+            target(&mut index, "service");
+            select_launcher(Role::SessionOwner);
+            STATE.with_borrow_mut(|s| match corruption {
+                0 => s.files.get_mut(TARGET).unwrap()[100] ^= 1,
+                1 => {
+                    s.files.get_mut(TARGET).unwrap().pop();
+                }
+                2 => s.files.get_mut(TARGET).unwrap().push(0),
+                _ => {
+                    s.files.remove(TARGET);
+                }
+            });
+            assert!(resolve(&index, &trusted, 2).is_err());
+            no_permit();
+        }
+    }
+    #[test]
+    fn cached_kind_and_capabilities_cannot_override_the_authenticated_manifest() {
+        let mut index = fixture(false);
+        let trusted = bootstrap(&index);
+        target(&mut index, "application");
+        select_launcher(Role::SessionOwner);
+        let cached = &mut index.by_binary.get_mut(TARGET).unwrap().manifest.binaries[0];
+        cached.kind = Some("service".into());
+        cached.requires.clear();
+        assert!(resolve(&index, &trusted, 2).is_err());
+        no_permit();
+        let (_, caps) = resolve(&index, &trusted, 3).unwrap();
+        assert_eq!(caps, ["window.overlay"]);
+        STATE.with_borrow(|s| assert_eq!(s.launch_permits[0].2, b"window.overlay\0"));
+    }
+    #[test]
+    fn missing_code_binding_fails_before_reading_an_executable() {
+        let mut index = fixture(false);
+        let trusted = bootstrap(&index);
+        target(&mut index, "service");
+        select_launcher(Role::SessionOwner);
+        STATE.with_borrow_mut(|s| {
+            let text =
+                String::from_utf8(s.files["/system/packages/launch-fixture/manifest.toml"].clone())
+                    .unwrap()
+                    .replace("file='root'\n", "");
+            install(&mut s.files, "launch-fixture", &text);
+            s.reads.clear();
+        });
+        assert!(resolve(&index, &trusted, 2).is_err());
+        no_permit();
+        STATE.with_borrow(|s| assert!(!s.reads.iter().any(|path| path == TARGET)));
     }
     #[test]
     fn the_wire_dispatches_only_through_the_measured_launcher_gate() {

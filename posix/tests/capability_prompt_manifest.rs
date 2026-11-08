@@ -11,6 +11,9 @@ mod policy;
 #[allow(dead_code)]
 #[path = "../../capability/src/resolver.rs"]
 mod resolver;
+#[allow(dead_code)]
+#[path = "../../capability/src/image_catalog.rs"]
+mod image_catalog;
 mod package_index {
     use super::*;
     #[derive(Clone)]

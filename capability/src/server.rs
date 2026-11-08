@@ -10,8 +10,7 @@ use crate::persistent_grant::{
 };
 use crate::policy::needs_app_prompt;
 use crate::resolver::{
-    CapabilityDenyReason, application_identity, decide_binary_capabilities,
-    encode_exec_authorization_args, encode_identity_args, encode_nul_list,
+    CapabilityDenyReason, encode_exec_authorization_args, encode_identity_args, encode_nul_list,
     resolve_capabilities_for_path,
 };
 use crate::state::CapabilityServiceState;
@@ -973,20 +972,20 @@ pub(crate) fn serve_capability_requests(mut state: CapabilityServiceState) -> ! 
                     mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64)
                 })
                 .and_then(|path| {
+                    if state.package_index.duplicate {
+                        return Err(mochi_user_syscall::SysError::from_raw(
+                            mochi_user_syscall::EACCES as i64,
+                        ));
+                    }
                     let record = state.package_index.by_binary.get(path).ok_or_else(|| {
                         mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EACCES as i64)
                     })?;
-                    let mut capability_decision = decide_binary_capabilities(
-                        &record.manifest,
-                        &record.manifest_path,
-                        path,
-                        crate::persistent_grant::read_file,
-                    )?;
-                    let identity = application_identity(
-                        &record.manifest,
+                    let verified = crate::resolver::verified_manifest(
                         &record.manifest_path,
                         crate::persistent_grant::read_file,
                     )?;
+                    let mut capability_decision = verified.decide_capabilities(path)?;
+                    let identity = &verified.identity;
                     let requester_context = crate::persistent_grant::requester_context(sender)?;
                     let package_id = identity.package_id.as_bytes();
                     let developer_id = identity.developer_id.as_bytes();
@@ -1057,8 +1056,8 @@ pub(crate) fn serve_capability_requests(mut state: CapabilityServiceState) -> ! 
                     }
                     let caps = capability_decision.effective;
                     let mut identity_items = Vec::new();
-                    encode_identity_args(&identity, &mut identity_items);
-                    let executable = crate::persistent_grant::read_file(path)?;
+                    encode_identity_args(identity, &mut identity_items);
+                    let executable = verified.read_image(path, crate::persistent_grant::read_file)?;
                     let digest = Sha256::digest(&executable);
                     let mut digest_hex = String::with_capacity(64);
                     for byte in digest {

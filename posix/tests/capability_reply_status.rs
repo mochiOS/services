@@ -39,7 +39,7 @@ fn capability_replies_translate_errors_and_preserve_success_payloads() {
          }}\n",
     );
     program.push_str(
-        &probe::between(source, "const REPLY_OK:", "fn close_received_handles(")
+        &probe::between(source, "const REPLY_OK:", "fn retained_reply(")
             .replace("mochios_posix_protocol::status::", "wire_status::"),
     );
     program.push_str(probe::between(
