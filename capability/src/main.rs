@@ -9,6 +9,7 @@ mod native_app;
 mod image_catalog;
 mod native_bootstrap;
 mod prepared_image;
+mod broker_launch;
 mod object_image;
 mod replayed_exec;
 mod signed_image;

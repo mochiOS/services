@@ -16,8 +16,14 @@ pub mod syscall {
 pub mod execution_peer;
 pub mod capability {
     pub use mochios_capability_protocol::*;
+    pub fn check_thread(sender: u64, name: &str) -> Result<u64, crate::SysError> {
+        assert_eq!(sender, 700);
+        Ok(crate::STATE.with_borrow(|s| u64::from(s.denied_capability != Some(name))))
+    }
 }
 use syscall::{ExecutionIdentity, NativeError, ProcessImageInfo, SysError, ThreadSecurityContext};
+#[path = "../../capability/src/broker_launch.rs"]
+mod broker_launch;
 #[allow(dead_code)]
 #[path = "../../capability/src/consent.rs"]
 mod consent;
@@ -66,6 +72,13 @@ pub mod service {
         fields: &[u8],
         capabilities: &[u8],
     ) -> Result<u64, SysError> {
+        if sender == 700 {
+            STATE.with_borrow_mut(|s| {
+                s.launch_permits
+                    .push((path.into(), fields.to_vec(), capabilities.to_vec()));
+            });
+            return Ok(0);
+        }
         assert_eq!(sender, 0);
         assert!(capabilities.is_empty());
         STATE.with_borrow(|s| {
@@ -159,6 +172,8 @@ struct State {
     failure: Option<usize>,
     next_handle: u32,
     service_image: Vec<u8>,
+    denied_capability: Option<&'static str>,
+    launch_permits: Vec<(String, Vec<u8>, Vec<u8>)>,
 }
 thread_local! {static STATE:RefCell<State>=RefCell::new(State::default());}
 fn error() -> SysError {
@@ -283,6 +298,12 @@ const PROFILES: &[(trusted_images::Role, &str, &str, &str)] = &[
         "application",
         "/system/applications/Terminal.app/entry.elf",
     ),
+    (
+        trusted_images::Role::DriverLauncher,
+        "org.mochios.drivers",
+        "service",
+        "/system/services/drivers.service",
+    ),
 ];
 fn elf(kind: u16, tag: u8) -> Vec<u8> {
     let mut b = vec![0; 4096];
@@ -306,6 +327,11 @@ fn elf(kind: u16, tag: u8) -> Vec<u8> {
 }
 fn install(files: &mut BTreeMap<String, Vec<u8>>, package: &str, text: &str) {
     let manifest = package::parse_manifest(text).unwrap();
+    let allowed: Vec<&str> = manifest
+        .binaries
+        .iter()
+        .flat_map(|binary| binary.requires.iter().map(String::as_str))
+        .collect();
     let digest = Sha256::digest(text.as_bytes()).into();
     let record = InstallRecord {
         provenance: InstallProvenance::BuiltIn,
@@ -318,7 +344,7 @@ fn install(files: &mut BTreeMap<String, Vec<u8>>, package: &str, text: &str) {
             package_digest: digest,
             developer_id: "org.mochios.system",
             verified_package_id: &manifest.package_id,
-            allowed_capabilities: &[],
+            allowed_capabilities: &allowed,
         },
     };
     let mut bytes = vec![0; record.encoded_len()];
@@ -343,7 +369,8 @@ fn fixture(dynamic: bool) -> package_index::PackageIndex {
         let bytes = elf(if dynamic && i == 0 { 3 } else { 2 }, i as u8);
         let text = format!(
             "[package]\nprovenance=\"built-in\"\nid=\"{package}\"\nname=\"{name}\"\nversion=\"1\"\n\n[[binary]]\npath=\"{path}\"\nkind=\"{kind}\"\nfile=\"root\"\nrequires=[]\n\n[[file]]\nid=\"root\"\npath=\"{path}\"\ndigest=\"sha256:{:x}\"\nsize={}\nmode=\"0755\"\n",
-            Sha256::digest(&bytes),bytes.len()
+            Sha256::digest(&bytes),
+            bytes.len()
         );
         install(&mut s.files, name, &text);
         s.files.insert(path.into(), bytes);
@@ -790,4 +817,150 @@ fn derived_reference_budget_is_bounded_and_ended_instances_are_reclaimed() {
     assert_eq!(STATE.with_borrow(|s| s.closed.len()), 128);
     drop(trusted);
     assert_eq!(STATE.with_borrow(|s| s.closed.len()), 129);
+}
+
+mod launch_authorization {
+    use super::*;
+    use trusted_images::Role;
+    const TARGET: &str = "/system/bin/launch-fixture";
+
+    fn select_launcher(role: Role) {
+        let (_, package, _, path) = PROFILES.iter().find(|p| p.0 == role).unwrap();
+        STATE.with_borrow_mut(|s| {
+            s.context.package_id.fill(0);
+            s.context.package_id[..package.len()].copy_from_slice(package.as_bytes());
+            s.context.package_id_len = package.len() as u16;
+            s.infos.get_mut(&31).unwrap().digest = Sha256::digest(&s.files[*path]).into();
+        });
+    }
+    fn target(index: &mut package_index::PackageIndex, kind: &str) {
+        let bytes = elf(2, 90);
+        let text = format!(
+            "[package]\nprovenance='built-in'\nid='org.mochios.launch-fixture'\nname='launch-fixture'\nversion='1'\n[[binary]]\npath='{TARGET}'\nkind='{kind}'\nfile='root'\nrequires=['window.overlay']\n[[file]]\nid='root'\npath='{TARGET}'\ndigest='sha256:{:x}'\nsize={}\nmode='0755'\n",
+            Sha256::digest(&bytes),
+            bytes.len()
+        );
+        STATE.with_borrow_mut(|s| {
+            install(&mut s.files, "launch-fixture", &text);
+            s.files.insert(TARGET.into(), bytes);
+        });
+        index.by_binary.insert(
+            TARGET.into(),
+            package_index::PackageRecord {
+                manifest_path: "/system/packages/launch-fixture/manifest.toml".into(),
+                manifest: package::parse_manifest(&text).unwrap(),
+            },
+        );
+    }
+    fn resolve(
+        index: &package_index::PackageIndex,
+        trusted: &trusted_images::TrustedImages,
+        class: u64,
+    ) -> Result<(Vec<String>, Vec<String>), SysError> {
+        broker_launch::resolve(index, trusted, 700, class, TARGET, read)
+    }
+    fn no_permit() {
+        STATE.with_borrow(|s| assert!(s.launch_permits.is_empty()));
+    }
+    #[test]
+    fn application_and_non_launcher_roles_cannot_use_the_system_spawn_interface() {
+        for role in [
+            Role::TextPrompt,
+            Role::Workspace,
+            Role::GraphicalPrompt,
+            Role::Input,
+            Role::Compositor,
+            Role::TextDisplay,
+        ] {
+            for class in [2, 3] {
+                let mut index = fixture(false);
+                let trusted = bootstrap(&index);
+                target(&mut index, "application");
+                select_launcher(role);
+                let reads = STATE.with_borrow(|s| s.reads.len());
+                assert_eq!(
+                    resolve(&index, &trusted, class).err(),
+                    Some(SysError::from_raw(syscall::EACCES as i64))
+                );
+                STATE.with_borrow(|s| assert_eq!(s.reads.len(), reads));
+                no_permit();
+            }
+        }
+    }
+    #[test]
+    fn measured_launchers_are_restricted_to_their_target_kind_and_execution_class() {
+        for (role, kind, class, allowed) in [
+            (Role::SessionOwner, "service", 2, true),
+            (Role::SessionOwner, "service", 3, true),
+            (Role::SessionOwner, "application", 3, true),
+            (Role::SessionOwner, "application", 2, false),
+            (Role::SessionOwner, "library", 3, false),
+            (Role::DriverLauncher, "driver", 3, true),
+            (Role::DriverLauncher, "driver", 2, false),
+            (Role::DriverLauncher, "service", 3, false),
+            (Role::DriverLauncher, "application", 3, false),
+        ] {
+            let mut index = fixture(false);
+            let trusted = bootstrap(&index);
+            target(&mut index, kind);
+            select_launcher(role);
+            assert_eq!(
+                resolve(&index, &trusted, class).is_ok(),
+                allowed,
+                "{role:?} {kind} {class}"
+            );
+            STATE.with_borrow(|s| assert_eq!(s.launch_permits.len(), usize::from(allowed)));
+        }
+    }
+    #[test]
+    fn a_launcher_identity_without_matching_code_or_capabilities_cannot_authorize() {
+        for stage in 0..4 {
+            let mut index = fixture(false);
+            let trusted = bootstrap(&index);
+            target(&mut index, "service");
+            select_launcher(Role::SessionOwner);
+            STATE.with_borrow_mut(|s| match stage {
+                0 => s.infos.get_mut(&31).unwrap().digest[0] ^= 1,
+                1 => s.denied_capability = Some("process.spawn"),
+                2 => s.denied_capability = Some("fs.read.all"),
+                _ => {}
+            });
+            if stage == 3 {
+                index.duplicate = true;
+            }
+            assert!(resolve(&index, &trusted, 2).is_err());
+            no_permit();
+        }
+    }
+    fn change_during_read(path: &str) -> Result<Vec<u8>, SysError> {
+        let bytes = read(path)?;
+        if path == TARGET {
+            STATE.with_borrow_mut(|s| s.infos.get_mut(&31).unwrap().image_revision += 1);
+        }
+        Ok(bytes)
+    }
+    #[test]
+    fn replacing_the_launcher_during_image_io_prevents_permit_publication() {
+        let mut index = fixture(false);
+        let trusted = bootstrap(&index);
+        target(&mut index, "service");
+        select_launcher(Role::SessionOwner);
+        assert!(
+            broker_launch::resolve(&index, &trusted, 700, 2, TARGET, change_during_read).is_err()
+        );
+        no_permit();
+    }
+    #[test]
+    fn the_wire_dispatches_only_through_the_measured_launcher_gate() {
+        let source = include_str!("../../capability/src/server.rs");
+        let branch = source
+            .split("if opcode == platform::capability::RESOLVE_EXECUTION_SECURITY_OPCODE {")
+            .nth(1)
+            .unwrap()
+            .split("if opcode == platform::capability::AUTHORIZE_EXEC_OPCODE {")
+            .next()
+            .unwrap();
+        assert!(branch.contains("crate::broker_launch::resolve("));
+        assert!(!branch.contains("authorize_spawn("));
+    }
 }

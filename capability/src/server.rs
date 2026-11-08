@@ -10,9 +10,9 @@ use crate::persistent_grant::{
 };
 use crate::policy::needs_app_prompt;
 use crate::resolver::{
-    CapabilityDenyReason, application_identity, authorize_spawn, binary_caps,
-    decide_binary_capabilities, encode_exec_authorization_args, encode_identity_args,
-    encode_nul_list, resolve_capabilities_for_path,
+    CapabilityDenyReason, application_identity, decide_binary_capabilities,
+    encode_exec_authorization_args, encode_identity_args, encode_nul_list,
+    resolve_capabilities_for_path,
 };
 use crate::state::CapabilityServiceState;
 
@@ -955,39 +955,14 @@ pub(crate) fn serve_capability_requests(mut state: CapabilityServiceState) -> ! 
                     mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64)
                 })
                 .and_then(|(execution_class_raw, path)| {
-                    let execution_class =
-                        platform::service::ExecutionClass::from_raw(execution_class_raw)
-                            .ok_or_else(|| {
-                                mochi_user_syscall::SysError::from_raw(
-                                    mochi_user_syscall::EINVAL as i64,
-                                )
-                            })?;
-                    let record = state.package_index.by_binary.get(path).ok_or_else(|| {
-                        mochi_user_syscall::SysError::from_raw(mochi_user_syscall::ENOENT as i64)
-                    })?;
-                    let caps = binary_caps(
-                        &record.manifest,
-                        &record.manifest_path,
-                        path,
-                        authorization_reader,
-                    )?
-                    .to_vec();
-                    let identity = application_identity(
-                        &record.manifest,
-                        &record.manifest_path,
-                        authorization_reader,
-                    )?;
-                    let mut identity_items = Vec::new();
-                    encode_identity_args(&identity, &mut identity_items);
-                    authorize_spawn(
+                    crate::broker_launch::resolve(
+                        &state.package_index,
+                        &state.trusted_images,
                         sender,
+                        execution_class_raw,
                         path,
-                        &identity,
-                        &caps,
-                        execution_class,
                         authorization_reader,
-                    )?;
-                    Ok((identity_items, caps))
+                    )
                 });
             reply_execution_security(sender, result);
             continue;

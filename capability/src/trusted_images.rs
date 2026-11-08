@@ -19,6 +19,7 @@ pub(crate) enum Role {
     Input,
     Compositor,
     SessionOwner,
+    DriverLauncher,
     TextDisplay,
 }
 
@@ -29,6 +30,7 @@ const POLICIES: &[(Role, &str, &str)] = &[
     (Role::Input, "org.mochios.input", "service"),
     (Role::Compositor, "org.mochios.compositor", "service"),
     (Role::SessionOwner, "org.mochios.service-manager", "service"),
+    (Role::DriverLauncher, "org.mochios.drivers", "service"),
     (Role::TextDisplay, "org.mochios.terminal", "application"),
 ];
 const MAX_DERIVED: usize = 128;
