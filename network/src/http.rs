@@ -12,6 +12,8 @@ use crate::stack::NetworkStack;
 use crate::tls::TlsManager;
 
 const MAX_HTTP_RESPONSES: usize = 8;
+const MAX_OWNER_RESPONSES: usize = 2;
+const RESPONSE_IDLE_MS: u64 = 30_000;
 const RECEIVE_CHUNK: usize = 4_096;
 const MAX_RECEIVE_STEPS: usize = 1_032;
 
@@ -32,6 +34,8 @@ pub(crate) struct HttpOperationError {
 struct StoredResponse {
     handle: u64,
     owner: u64,
+    owner_process: u64,
+    last_used: u64,
     headers: Vec<u8>,
     body: Vec<u8>,
     headers_offset: usize,
@@ -44,6 +48,14 @@ pub(crate) struct HttpManager {
 }
 
 impl HttpManager {
+    pub(crate) fn reap(&mut self, now: u64) {
+        self.responses.retain(|response| {
+            now.saturating_sub(response.last_used) < RESPONSE_IDLE_MS
+                && platform::ipc::endpoint_alive(response.owner)
+                && platform::capability::check_thread(response.owner, "net.http.request") == Ok(1)
+        });
+    }
+
     pub(crate) fn new() -> Self {
         Self {
             responses: Vec::new(),
@@ -66,6 +78,7 @@ impl HttpManager {
         started: u64,
         timeout: u64,
     ) -> Result<HttpRequestSuccess, HttpOperationError> {
+        self.reap(started);
         self.statistics.http_requests = self.statistics.http_requests.saturating_add(1);
         let result = self.request_inner(
             stack,
@@ -125,7 +138,12 @@ impl HttpManager {
         started: u64,
         timeout: u64,
     ) -> Result<HttpRequestSuccess, HttpOperationError> {
-        if self.responses.len() >= MAX_HTTP_RESPONSES {
+        let owner_process = platform::ipc::endpoint_owner_process(owner)
+            .map_err(|_| error(mochi_user_syscall::EACCES, HttpFailure::InvalidState))?;
+        if self.responses.len() >= MAX_HTTP_RESPONSES
+            || self.responses.iter().filter(|response| response.owner_process == owner_process).count()
+                >= MAX_OWNER_RESPONSES
+        {
             return Err(error(
                 mochios_net_device_protocol::STATUS_CONNECTION_LIMIT as i64 as u64,
                 HttpFailure::ConnectionLimit,
@@ -202,6 +220,8 @@ impl HttpManager {
         self.responses.push(StoredResponse {
             handle,
             owner,
+            owner_process,
+            last_used: platform::time::ticks().unwrap_or(started),
             headers,
             body: response.body,
             headers_offset: 0,
@@ -223,8 +243,10 @@ impl HttpManager {
         stream: HttpStream,
         maximum: usize,
         out: &'a mut [u8],
+        now: u64,
     ) -> Result<(usize, bool), HttpOperationError> {
         let response = self.response_mut(owner, handle)?;
+        response.last_used = now;
         let (source, offset) = match stream {
             HttpStream::Headers => (&response.headers, &mut response.headers_offset),
             HttpStream::Body => (&response.body, &mut response.body_offset),

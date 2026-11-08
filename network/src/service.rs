@@ -86,6 +86,7 @@ pub(crate) fn run() -> ! {
     let mut response = [0u8; IPC_BUFFER_LEN];
     loop {
         let now = platform::time::ticks().unwrap_or(0);
+        http.reap(now);
         stack.tick(now);
         for _ in 0..32 {
             match stack.poll_receive(now) {
@@ -417,7 +418,7 @@ fn handle(
             let (request_id, handle, maximum, stream) = decode_http_read(request).ok()?;
             let mut data = [0u8; MAX_HTTP_IPC_DATA_LEN];
             let (status, failure, length, complete) =
-                match http.read(sender, handle, stream, maximum as usize, &mut data) {
+                match http.read(sender, handle, stream, maximum as usize, &mut data, now) {
                     Ok((length, complete)) => (0, HttpFailure::None, length, complete),
                     Err(error) => (
                         crate::status::failure_status(error.errno),
