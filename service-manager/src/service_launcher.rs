@@ -333,6 +333,16 @@ pub(crate) fn spawn_user_session(
     });
     let mut arguments = fixed_service_arguments(service, logger_endpoint, ready_target);
     append_posix_handle(&mut arguments, posix_endpoint);
+    if service == FixedService::Workspace {
+        // Share the existing domain for membership queries, not authority to
+        // adopt roots: POSIX still reserves that operation for its creator.
+        arguments.push(alloc::format!(
+            "{INHERITED_HANDLE_PREFIX}{}:{}:{}",
+            mochios_posix_protocol::process_domain::LAUNCH_CONTEXT_KEY,
+            domain.handle,
+            mochios_posix_protocol::process_domain::TOKEN_RIGHTS,
+        ));
+    }
     let path = core::str::from_utf8(
         mochios_posix_client::configuration::DEFAULT_EXECUTABLE_PATH,
     )

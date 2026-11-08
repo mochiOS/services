@@ -11,6 +11,7 @@ use mochios_posix_client::{
 use mochios_workspace_protocol as protocol;
 
 mod error;
+mod session;
 use error::{io_errno as errno, posix_errno as posix_client_errno};
 
 const CLIPBOARD_READ: &str = "clipboard.read";
@@ -117,6 +118,7 @@ struct NotificationRecord {
 struct WorkspaceService {
     endpoint: u64,
     posix: PosixClient<SyscallEndpointTransport>,
+    session: session::Session,
     clipboard_generation: u64,
     clipboard_content_type: String,
     clipboard: Vec<u8>,
@@ -138,7 +140,11 @@ struct WorkspaceService {
 }
 
 impl WorkspaceService {
-    fn load(endpoint: u64, posix: PosixClient<SyscallEndpointTransport>) -> Self {
+    fn load(
+        endpoint: u64,
+        posix: PosixClient<SyscallEndpointTransport>,
+        session: session::Session,
+    ) -> Self {
         let association_path = association_path();
         let associations = fs::read(&association_path)
             .ok()
@@ -175,6 +181,7 @@ impl WorkspaceService {
         Self {
             endpoint,
             posix,
+            session,
             clipboard_generation: 0,
             clipboard_content_type: String::new(),
             clipboard: Vec::new(),
@@ -202,6 +209,21 @@ impl WorkspaceService {
         request: protocol::Message<'_>,
         handles: &mut platform::ipc::IpcObjectHandles,
     ) {
+        if !self.session.permits(&self.posix, sender) {
+            // Foreign sessions receive no clipboard generation or other
+            // session state, including through denied/unknown operations.
+            let mut reply = [0u8; protocol::HEADER_LEN + 24];
+            if let Ok(length) = protocol::encode_status(
+                request.request_id,
+                mochi_user_syscall::EACCES as i32,
+                0,
+                0,
+                &mut reply,
+            ) {
+                let _ = platform::ipc::reply(sender, &reply[..length]);
+            }
+            return;
+        }
         let capability = match request.opcode {
             protocol::OP_CLIPBOARD_SNAPSHOT | protocol::OP_CLIPBOARD_READ => CLIPBOARD_READ,
             protocol::OP_CLIPBOARD_SET_BEGIN
@@ -2519,7 +2541,15 @@ fn main() {
             platform::process::exit(1)
         }
     };
-    let mut service = WorkspaceService::load(endpoint, posix);
+    let session = match session::Session::capture(&posix, endpoint) {
+        Ok(session) => session,
+        Err(status) => {
+            platform::logln!("workspace.service: session authority rejected errno={status}");
+            let _ = platform::service_ready::notify(ready_target, -(status as i32));
+            platform::process::exit(1);
+        }
+    };
+    let mut service = WorkspaceService::load(endpoint, posix, session);
     if platform::service_ready::notify(ready_target, 0).is_err() {
         platform::logln!("workspace.service: ready notification failed");
         platform::process::exit(1);
@@ -2551,7 +2581,7 @@ fn main() {
                 if let Ok(length) = protocol::encode_status(
                     0,
                     mochi_user_syscall::EINVAL as i32,
-                    service.clipboard_generation,
+                    0,
                     0,
                     &mut reply,
                 ) {
