@@ -8,7 +8,7 @@ build = "build.rs"
 posix-native-probes = ["dep:libc"]
 
 [dependencies]
-libc = { path = "../../libraries/libc", optional = true }
+libc = { git = "https://github.com/mochiOS/libc", rev = "a3c482e222b53700a09d21377633836e2fee07be", optional = true }
 mochios-keychain-protocol = { path = "../../user/crates/keychain-protocol" }
 mnu-abi = { git = "https://github.com/mochiOS/mnu", package = "mnu-abi" }
 mochi-user-platform = { git = "https://github.com/mochiOS/syscalls", package = "mochi-user-platform", default-features = false, features = ["std"] }

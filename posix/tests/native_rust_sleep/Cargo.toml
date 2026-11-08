@@ -6,7 +6,7 @@ edition = "2024"
 [workspace]
 
 [dependencies]
-libc = { path = "../../../../libraries/libc" }
+libc = { git = "https://github.com/mochiOS/libc", rev = "a3c482e222b53700a09d21377633836e2fee07be" }
 mochi-user-platform = { path = "../../../../user/crates/platform", default-features = false, features = ["std"] }
 
 [[bin]]

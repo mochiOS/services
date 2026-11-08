@@ -35,7 +35,7 @@ mochi-user-syscall = { path = "../../user/crates/syscall" }
 mochios-network-stack = { path = "../../user/crates/network-stack" }
 mochios-linux-gui-protocol = { path = "../../user/crates/linux-gui-protocol" }
 tiny-skia = "0.12.0"
-libc = { path = "../../libraries/libc" }
+libc = { git = "https://github.com/mochiOS/libc", rev = "a3c482e222b53700a09d21377633836e2fee07be" }
 async-trait = "0.1"
 mochios-capability-protocol = { path = "../../user/crates/capability-protocol" }
 mochios-viewkit-gpu-protocol = { path = "../../user/crates/viewkit-gpu-protocol" }
