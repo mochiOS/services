@@ -20,6 +20,8 @@ mod device_operations;
 mod removed_directories;
 #[path = "canonical_path.rs"]
 mod canonical_path;
+#[path = "namespace_policy.rs"]
+mod namespace_policy;
 #[path = "path_limits.rs"]
 mod path_limits;
 #[path = "inode_time.rs"]
@@ -477,6 +479,16 @@ impl FilesystemService {
         } else {
             lookup_symlinks(payload, request.flags & protocol::OPEN_AT_NOFOLLOW != 0)
         };
+        self.authorize_path(
+            payload,
+            anchors,
+            follow,
+            credentials,
+            u8::from(access & protocol::OPEN_AT_READ != 0)
+                | (u8::from(request.flags & (protocol::OPEN_AT_WRITE | protocol::OPEN_AT_CREATE) != 0)
+                    << 1),
+            1,
+        )?;
         if let Some(resolution) =
             self.resolve_namespace_path(payload, anchors, follow, uid, gid, groups)?
         {
@@ -716,6 +728,8 @@ impl FilesystemService {
         anchors: PathAnchors,
         credentials: protocol::Credentials,
     ) -> Result<Response, i32> {
+        self.authorize_path(payload, anchors, FollowSymlinks::All, credentials, 1, 1)?;
+
         if request.flags & !protocol::SOCKET_AT_FLAGS_ALL != 0
             || (request.flags & protocol::SOCKET_AT_ROOT_ATTACHED != 0)
                 != anchors.root_open_id.is_some()
@@ -799,6 +813,15 @@ impl FilesystemService {
         kind: FileType,
         retain: bool,
     ) -> Result<Response, i32> {
+        self.authorize_path(
+            payload,
+            anchors,
+            FollowSymlinks::ExcludeFinalComponent,
+            credentials,
+            2,
+            1,
+        )?;
+
         let type_mode = match kind {
             FileType::Socket => InodeMode::S_IFSOCK,
             FileType::Fifo => InodeMode::S_IFIFO,
@@ -884,6 +907,15 @@ impl FilesystemService {
         anchors: PathAnchors,
         credentials: protocol::Credentials,
     ) -> Result<Response, i32> {
+        self.authorize_path(
+            payload,
+            anchors,
+            FollowSymlinks::ExcludeFinalComponent,
+            credentials,
+            2,
+            1,
+        )?;
+
         if request.flags & !protocol::MKDIR_AT_FLAGS_ALL != 0 {
             return Err(EINVAL);
         }
@@ -965,6 +997,15 @@ impl FilesystemService {
         anchors: PathAnchors,
         credentials: protocol::Credentials,
     ) -> Result<Response, i32> {
+        self.authorize_path(
+            payload,
+            anchors,
+            FollowSymlinks::ExcludeFinalComponent,
+            credentials,
+            2,
+            1,
+        )?;
+
         if request.flags & !protocol::UNLINK_AT_FLAGS_ALL != 0 {
             return Err(EINVAL);
         }
@@ -1034,6 +1075,8 @@ impl FilesystemService {
         anchors: PathAnchors,
         credentials: protocol::Credentials,
     ) -> Result<Response, i32> {
+        self.authorize_path(payload, anchors, FollowSymlinks::All, credentials, 2, 1)?;
+
         if request.flags & !protocol::TRUNCATE_AT_FLAGS_ALL != 0 {
             return Err(EINVAL);
         }
@@ -1111,6 +1154,14 @@ impl FilesystemService {
         if target.len() > protocol::MAX_PATH_LEN || link_path.len() > protocol::MAX_PATH_LEN {
             return Err(ENAMETOOLONG);
         }
+        self.authorize_path(
+            link_path,
+            anchors,
+            FollowSymlinks::ExcludeFinalComponent,
+            credentials,
+            2,
+            1,
+        )?;
         let uid = credentials.effective_uid;
         let gid = credentials.effective_gid;
         let groups = credentials.supplementary_groups();
@@ -1165,6 +1216,15 @@ impl FilesystemService {
         anchors: PathAnchors,
         credentials: protocol::Credentials,
     ) -> Result<Response, i32> {
+        self.authorize_path(
+            payload,
+            anchors,
+            lookup_symlinks(payload, true),
+            credentials,
+            1,
+            1,
+        )?;
+
         if request.flags & !protocol::READLINK_AT_FLAGS_ALL != 0 {
             return Err(EINVAL);
         }
@@ -1205,6 +1265,8 @@ impl FilesystemService {
         anchors: PathAnchors,
         credentials: protocol::Credentials,
     ) -> Result<Response, i32> {
+        self.authorize_path(payload, anchors, FollowSymlinks::All, credentials, 2, 1)?;
+
         if request.flags & !protocol::CHMOD_AT_FLAGS_ALL != 0 || request.mode & !0o7777 != 0 {
             return Err(EINVAL);
         }
@@ -1254,6 +1316,15 @@ impl FilesystemService {
         anchors: PathAnchors,
         credentials: protocol::Credentials,
     ) -> Result<Response, i32> {
+        self.authorize_path(
+            payload,
+            anchors,
+            lookup_symlinks(payload, request.flags & protocol::CHOWN_AT_NOFOLLOW != 0),
+            credentials,
+            2,
+            1,
+        )?;
+
         if request.flags & !protocol::CHOWN_AT_FLAGS_ALL != 0 {
             return Err(EINVAL);
         }
@@ -1323,6 +1394,15 @@ impl FilesystemService {
         anchors: PathAnchors,
         credentials: protocol::Credentials,
     ) -> Result<Response, i32> {
+        self.authorize_path(
+            payload,
+            anchors,
+            lookup_symlinks(payload, request.flags & protocol::STAT_AT_NOFOLLOW != 0),
+            credentials,
+            0,
+            1,
+        )?;
+
         if request.flags & !protocol::STAT_AT_FLAGS_ALL != 0 {
             return Err(EINVAL);
         }
@@ -1450,6 +1530,15 @@ impl FilesystemService {
         anchors: PathAnchors,
         credentials: protocol::Credentials,
     ) -> Result<Response, i32> {
+        self.authorize_path(
+            payload,
+            anchors,
+            lookup_symlinks(payload, request.flags & protocol::ACCESS_AT_NOFOLLOW != 0),
+            credentials,
+            u8::from(request.flags & protocol::ACCESS_AT_WRITE != 0) * 2,
+            1,
+        )?;
+
         if request.flags & !protocol::ACCESS_AT_FLAGS_ALL != 0 {
             return Err(EINVAL);
         }
@@ -2778,6 +2867,28 @@ impl FilesystemService {
         {
             return Err(EINVAL);
         }
+        self.authorize_path(
+            old_path,
+            PathAnchors {
+                root_open_id: anchors.root_open_id,
+                base_open_id: anchors.old_base_open_id,
+            },
+            FollowSymlinks::ExcludeFinalComponent,
+            credentials,
+            2,
+            1,
+        )?;
+        self.authorize_path(
+            new_path,
+            PathAnchors {
+                root_open_id: anchors.root_open_id,
+                base_open_id: anchors.new_base_open_id,
+            },
+            FollowSymlinks::ExcludeFinalComponent,
+            credentials,
+            2,
+            2,
+        )?;
         let uid = credentials.effective_uid;
         let gid = credentials.effective_gid;
         let groups = credentials.supplementary_groups();
@@ -3048,6 +3159,31 @@ impl FilesystemService {
         if old_path.len() > protocol::MAX_PATH_LEN || new_path.len() > protocol::MAX_PATH_LEN {
             return Err(ENAMETOOLONG);
         }
+        self.authorize_path(
+            old_path,
+            PathAnchors {
+                root_open_id: anchors.root_open_id,
+                base_open_id: anchors.old_base_open_id,
+            },
+            lookup_symlinks(
+                old_path,
+                request.flags & protocol::LINK_AT_FOLLOW_SOURCE == 0,
+            ),
+            credentials,
+            1,
+            1,
+        )?;
+        self.authorize_path(
+            new_path,
+            PathAnchors {
+                root_open_id: anchors.root_open_id,
+                base_open_id: anchors.new_base_open_id,
+            },
+            FollowSymlinks::ExcludeFinalComponent,
+            credentials,
+            2,
+            2,
+        )?;
         let uid = credentials.effective_uid;
         let gid = credentials.effective_gid;
         let groups = credentials.supplementary_groups();

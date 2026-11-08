@@ -24,7 +24,7 @@ pub(super) fn prepare(filesystem: &super::RuntimeFilesystem) -> Result<Directory
             path: &[u8],
             parent: Option<OpenedObject<u32>>,
         ) -> Result<OpenedObject<u32>, i32> {
-            let payload = super::RuntimeFilesystem::credential_payload(0, 0, &[], path)?;
+            let payload = self.0.credential_payload(0, 0, &[], 0, path)?;
             let mut handles = platform::ipc::IpcObjectHandles::default();
             if let Some(parent) = parent {
                 handles.count = 1;

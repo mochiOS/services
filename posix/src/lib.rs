@@ -361,6 +361,17 @@ pub struct AuthenticatedProcess<H> {
 }
 
 pub trait FilesystemBackend<H: Copy> {
+    /// Policy captured at native request admission. Delegated read scopes keep
+    /// this snapshot rather than using a broker's broader filesystem grants.
+    fn namespace_policy(&self) -> mochios_filesystem_protocol::namespace_policy::NamespacePolicy {
+        mochios_filesystem_protocol::namespace_policy::NamespacePolicy::denied()
+    }
+    fn replace_namespace_policy(
+        &mut self,
+        _policy: mochios_filesystem_protocol::namespace_policy::NamespacePolicy,
+    ) -> mochios_filesystem_protocol::namespace_policy::NamespacePolicy {
+        self.namespace_policy()
+    }
     /// Compare locally retained native references without provider RPC. This
     /// checks object identity, not pathname equality or client-supplied IDs.
     fn same_object(&mut self, _left: H, _right: H) -> Result<bool, i32> {

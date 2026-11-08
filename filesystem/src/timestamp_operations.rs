@@ -103,6 +103,7 @@ impl FilesystemService {
             return Err(EINVAL);
         }
         let follow = lookup_symlinks(path, request.flags & protocol::SET_TIMES_AT_NOFOLLOW != 0);
+        self.authorize_path(path, anchors, follow, credentials, 2, 1)?;
         let (inode, filesystem, volume) =
             match self.resolve_operation_target(path, anchors, follow, credentials)? {
                 OperationTarget::Device(node) => {

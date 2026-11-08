@@ -16,6 +16,7 @@ pub const MAGIC: &[u8; 4] = b"SOCO";
 pub fn connect(
     endpoint: u32,
     process_id: u64,
+    namespace: mochios_filesystem_protocol::namespace_policy::NamespacePolicy,
     socket: AttachedObject<u32>,
     address: wire::Address<'_>,
 ) -> Result<(Vec<OpenedObject<u32>>, Vec<u8>), i32> {
@@ -23,10 +24,11 @@ pub fn connect(
     if socket.handle == 0 || socket.rights & rights != rights {
         return Err(-13);
     }
-    let mut request = [0; 12 + wire::MAX_ADDRESS_LEN];
+    let mut request = [0; 24 + wire::MAX_ADDRESS_LEN];
     request[..4].copy_from_slice(MAGIC);
     request[4..12].copy_from_slice(&process_id.to_le_bytes());
-    let length = address.encode(&mut request[12..]).map_err(|_| -22)?;
+    request[12..24].copy_from_slice(&namespace.encode());
+    let length = address.encode(&mut request[24..]).map_err(|_| -22)?;
     let mut handles = platform::ipc::IpcObjectHandles::default();
     handles.count = 1;
     handles.handles[0] = platform::ipc::IpcObjectHandle {
@@ -43,7 +45,7 @@ pub fn connect(
         .try_reserve(wire::CONNECT_REPLY_LEN)
         .map_err(|_| -12)?;
     let received = posix_service::filesystem_transport::call_native(&mut handles, |native| {
-        platform::ipc::call_object_handles(endpoint, &request[..12 + length], &mut response, native)
+        platform::ipc::call_object_handles(endpoint, &request[..24 + length], &mut response, native)
     })
     .map_err(|error| error.raw() as i32);
     let result = (|| {
@@ -118,7 +120,7 @@ pub fn dispatch(
         {
             return Err(-13);
         }
-        if bytes.len() < 12 || attachments.count != 1 {
+        if bytes.len() < 24 || attachments.count != 1 {
             return Err(-22);
         }
         let source = attachments.handles[0];
@@ -128,8 +130,9 @@ pub fn dispatch(
         {
             return Err(-13);
         }
-        let address = wire::Address::decode(&bytes[12..]).map_err(|_| -22)?;
+        let address = wire::Address::decode(&bytes[24..]).map_err(|_| -22)?;
         let process_id = u64::from_le_bytes(bytes[4..12].try_into().map_err(|_| -22)?);
+        let namespace = mochios_filesystem_protocol::namespace_policy::NamespacePolicy::decode(&bytes[12..24]).map_err(|_| -22)?;
         let client = platform::handle::identify_provider_object(source.handle)
             .map_err(|e| e.raw() as i32)?;
         if posix_service::inet_stream_socket::is_stream(client) {
@@ -170,13 +173,13 @@ pub fn dispatch(
             wire::ConnectReply::Connected
                 .encode(&mut response[4..])
                 .map_err(|_| -5)?;
-            let mut backend = super::socket_path_native::snapshot_process(state, process_id, path)?;
+            let mut backend = super::socket_path_native::snapshot_process(state, process_id, path, namespace)?;
             let target = bindings.connect_datagram_path(streams, client, path, &mut backend)?;
             let _ = platform::ipc::reply(sender, &response);
             return Ok(Some([client, target, old_peer]));
         }
         let nonblocking = streams.options(client)? & wire::NONBLOCKING != 0;
-        let mut backend = super::socket_path_native::snapshot_process(state, process_id, path)?;
+        let mut backend = super::socket_path_native::snapshot_process(state, process_id, path, namespace)?;
         let started = jobs.start(streams, bindings, client, path, nonblocking, &mut backend)?;
         let mut response = [0; 4 + wire::CONNECT_REPLY_LEN];
         match started {

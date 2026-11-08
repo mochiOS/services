@@ -21,6 +21,7 @@ impl FilesystemService {
         if path.is_empty() {
             return Err(ENOENT);
         }
+        self.authorize_path(path, anchors, FollowSymlinks::All, credentials, 0, 1)?;
         let resolution = self.resolve_namespace_path(
             path,
             anchors,

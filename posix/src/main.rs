@@ -33,6 +33,8 @@ mod fifo_native;
 
 #[cfg(target_os = "mochios")]
 mod socket_path_native;
+#[cfg(target_os = "mochios")]
+mod path_policy_native;
 
 #[cfg(target_os = "mochios")]
 mod socket_accept_native;
@@ -183,6 +185,7 @@ fn main() {
             }
         };
     let mut filesystem = RuntimeFilesystem {
+        namespace_policy: mochios_filesystem_protocol::namespace_policy::NamespacePolicy::unrestricted(),
         endpoint: filesystem_endpoint,
         device_endpoint: Some(provider_endpoint_handle),
         fifo_endpoint: None,
@@ -518,6 +521,14 @@ fn main() {
         let decoded = request_bytes
             .get(..length)
             .and_then(|bytes| protocol::decode(bytes).ok());
+        filesystem.namespace_policy = if decoded.is_some_and(|(header, _)| {
+            posix_service::path_query::supports(header.opcode)
+                || posix_service::path_mutation::supports(header.opcode)
+                || posix_service::path_pair::supports(header.opcode)
+                || posix_service::directory_request::supports(header.opcode)
+                || matches!(header.opcode, protocol::OP_OPEN_AT | protocol::OP_SOCKET_CONNECT | protocol::read_scope::OP_CREATE)
+        }) { path_policy_native::capture(sender) }
+        else { mochios_filesystem_protocol::namespace_policy::NamespacePolicy::denied() };
         // Reconcile successful native image changes before any request can
         // apply credentials or open resources. Do not interpret a client
         // startup notification as proof that replacement committed.
@@ -829,6 +840,7 @@ fn main() {
                                 socket_connect_native::connect(
                                     socket_endpoint,
                                     peer.process_id,
+                                    filesystem.namespace_policy,
                                     attachments[0],
                                     address,
                                 )
@@ -3373,6 +3385,7 @@ fn wait_response(
 
 #[cfg(target_os = "mochios")]
 struct RuntimeFilesystem {
+    namespace_policy: mochios_filesystem_protocol::namespace_policy::NamespacePolicy,
     endpoint: mochi_user_platform::handle::Handle,
     device_endpoint: Option<mochi_user_platform::handle::Handle>,
     fifo_endpoint: Option<mochi_user_platform::handle::Handle>,
@@ -3541,10 +3554,11 @@ impl RuntimeFilesystem {
             mode: request.mode,
             ..filesystem::Header::default()
         };
-        let payload = Self::credential_payload(
+        let payload = self.credential_payload(
             request.effective_uid,
             request.effective_gid,
             &request.supplementary_groups,
+            u32::from(request.base == mochios_posix_protocol::OpenBase::AttachedDirectory),
             &request.path,
         )?;
         let header = filesystem::Header {
@@ -3588,10 +3602,11 @@ impl RuntimeFilesystem {
         if paths.base.is_some() {
             flags |= filesystem::TRUNCATE_AT_BASE_ATTACHED;
         }
-        let payload = Self::credential_payload(
+        let payload = self.credential_payload(
             request.effective_uid,
             request.effective_gid,
             &request.supplementary_groups,
+            u32::from(request.base == mochios_posix_protocol::OpenBase::AttachedDirectory),
             &request.path,
         )?;
         Ok((
@@ -3758,18 +3773,21 @@ impl RuntimeFilesystem {
     }
 
     fn credential_payload(
+        &self,
         effective_uid: u32,
         effective_gid: u32,
         supplementary_groups: &[u32],
+        explicit_read_bases: u32,
         payload: &[u8],
     ) -> Result<Vec<u8>, i32> {
         use mochios_filesystem_protocol as filesystem;
 
         let mut encoded = vec![0u8; filesystem::CREDENTIALS_MAX_LEN + payload.len()];
-        let length = filesystem::encode_credentials_payload(
+        let length = filesystem::encode_scoped_credentials_payload(
             effective_uid,
             effective_gid,
             supplementary_groups,
+            filesystem::namespace_policy::NamespacePolicy { explicit_read_bases, ..self.namespace_policy },
             payload,
             &mut encoded,
         )
@@ -3790,10 +3808,11 @@ impl RuntimeFilesystem {
         if paths.base.is_some() {
             flags |= filesystem::MKDIR_AT_BASE_ATTACHED;
         }
-        let payload = Self::credential_payload(
+        let payload = self.credential_payload(
             request.effective_uid,
             request.effective_gid,
             &request.supplementary_groups,
+            u32::from(request.base == mochios_posix_protocol::OpenBase::AttachedDirectory),
             &request.path,
         )?;
         self.empty_call(
@@ -4057,6 +4076,11 @@ fn controlled_file_handle(
 
 #[cfg(target_os = "mochios")]
 impl posix_service::FilesystemBackend<mochi_user_platform::handle::Handle> for RuntimeFilesystem {
+    fn namespace_policy(&self) -> mochios_filesystem_protocol::namespace_policy::NamespacePolicy { self.namespace_policy }
+    fn replace_namespace_policy(&mut self, policy: mochios_filesystem_protocol::namespace_policy::NamespacePolicy) -> mochios_filesystem_protocol::namespace_policy::NamespacePolicy {
+        core::mem::replace(&mut self.namespace_policy, policy)
+    }
+
     fn same_object(&mut self, left: u32, right: u32) -> Result<bool, i32> {
         mochi_user_platform::handle::same_object(left, right)
             .map_err(|error| mochios_posix_protocol::status::normalize_failure(error.raw()))
@@ -4079,7 +4103,7 @@ impl posix_service::FilesystemBackend<mochi_user_platform::handle::Handle> for R
         use mochios_filesystem_protocol as filesystem;
 
         let payload =
-            Self::credential_payload(effective_uid, effective_gid, supplementary_groups, b"/")?;
+            self.credential_payload(effective_uid, effective_gid, supplementary_groups, 0, b"/")?;
         let open_root = || {
             self.open_call(
                 filesystem::Header {
@@ -4146,10 +4170,11 @@ impl posix_service::FilesystemBackend<mochi_user_platform::handle::Handle> for R
         if paths.base.is_some() {
             flags |= filesystem::OPEN_AT_BASE_ATTACHED;
         }
-        let payload = Self::credential_payload(
+        let payload = self.credential_payload(
             request.effective_uid,
             request.effective_gid,
             &request.supplementary_groups,
+            u32::from(request.base == mochios_posix_protocol::OpenBase::AttachedDirectory),
             &request.path,
         )?;
         self.open_call(
@@ -4178,10 +4203,11 @@ impl posix_service::FilesystemBackend<mochi_user_platform::handle::Handle> for R
                 0
             };
         let handles = Self::path_handles(paths)?;
-        let payload = Self::credential_payload(
+        let payload = self.credential_payload(
             request.effective_uid,
             request.effective_gid,
             &request.supplementary_groups,
+            u32::from(request.base == mochios_posix_protocol::OpenBase::AttachedDirectory),
             &request.path,
         )?;
         let bytes = self.payload_call(
@@ -4211,10 +4237,11 @@ impl posix_service::FilesystemBackend<mochi_user_platform::handle::Handle> for R
                 0
             };
         let handles = Self::path_handles(paths)?;
-        let payload = Self::credential_payload(
+        let payload = self.credential_payload(
             request.effective_uid,
             request.effective_gid,
             &request.supplementary_groups,
+            u32::from(request.base == mochios_posix_protocol::OpenBase::AttachedDirectory),
             &request.path,
         )?;
         let bytes = self.payload_call(
@@ -4251,10 +4278,11 @@ impl posix_service::FilesystemBackend<mochi_user_platform::handle::Handle> for R
         .encode()
         .to_vec();
         body.extend_from_slice(&request.path);
-        let payload = Self::credential_payload(
+        let payload = self.credential_payload(
             request.effective_uid,
             request.effective_gid,
             &request.supplementary_groups,
+            u32::from(request.base == mochios_posix_protocol::OpenBase::AttachedDirectory),
             &body,
         )?;
         let bytes = self.payload_call(
@@ -4285,10 +4313,11 @@ impl posix_service::FilesystemBackend<mochi_user_platform::handle::Handle> for R
                 0
             };
         let handles = Self::path_handles(paths)?;
-        let payload = Self::credential_payload(
+        let payload = self.credential_payload(
             request.effective_uid,
             request.effective_gid,
             &request.supplementary_groups,
+            u32::from(request.base == mochios_posix_protocol::OpenBase::AttachedDirectory),
             &request.path,
         )?;
         self.payload_call(
@@ -4319,10 +4348,11 @@ impl posix_service::FilesystemBackend<mochi_user_platform::handle::Handle> for R
             flags |= filesystem::STAT_AT_NOFOLLOW;
         }
         let handles = Self::path_handles(paths)?;
-        let payload = Self::credential_payload(
+        let payload = self.credential_payload(
             request.effective_uid,
             request.effective_gid,
             &request.supplementary_groups,
+            u32::from(request.base == mochios_posix_protocol::OpenBase::AttachedDirectory),
             &request.path,
         )?;
         let status = self.status_call(
@@ -4436,7 +4466,7 @@ impl posix_service::FilesystemBackend<mochi_user_platform::handle::Handle> for R
         filesystem::encode_time_update(posix_service::filesystem_times::translate(times), &mut body)
             .map_err(|_| -22)?;
         let payload =
-            Self::credential_payload(effective_uid, effective_gid, supplementary_groups, &body)?;
+            self.credential_payload(effective_uid, effective_gid, supplementary_groups, 0, &body)?;
         self.metadata_call(
             file,
             filesystem::Header {
@@ -4460,7 +4490,7 @@ impl posix_service::FilesystemBackend<mochi_user_platform::handle::Handle> for R
         use mochios_filesystem_protocol as filesystem;
 
         let payload =
-            Self::credential_payload(effective_uid, effective_gid, supplementary_groups, &[])?;
+            self.credential_payload(effective_uid, effective_gid, supplementary_groups, 0, &[])?;
         self.metadata_call(
             file,
             filesystem::Header {
@@ -4486,7 +4516,7 @@ impl posix_service::FilesystemBackend<mochi_user_platform::handle::Handle> for R
         use mochios_filesystem_protocol as filesystem;
 
         let payload =
-            Self::credential_payload(effective_uid, effective_gid, supplementary_groups, &[])?;
+            self.credential_payload(effective_uid, effective_gid, supplementary_groups, 0, &[])?;
         self.metadata_call(
             file,
             filesystem::Header {
@@ -4548,10 +4578,11 @@ impl posix_service::FilesystemBackend<mochi_user_platform::handle::Handle> for R
         if request.flags & posix::UNLINK_REMOVE_DIRECTORY != 0 {
             flags |= filesystem::UNLINK_AT_REMOVE_DIRECTORY;
         }
-        let payload = Self::credential_payload(
+        let payload = self.credential_payload(
             request.effective_uid,
             request.effective_gid,
             &request.supplementary_groups,
+            u32::from(request.base == mochios_posix_protocol::OpenBase::AttachedDirectory),
             &request.path,
         )?;
         self.empty_call(
@@ -4585,10 +4616,11 @@ impl posix_service::FilesystemBackend<mochi_user_platform::handle::Handle> for R
         let mut operation = Vec::with_capacity(request.old_path.len() + request.new_path.len());
         operation.extend_from_slice(&request.old_path);
         operation.extend_from_slice(&request.new_path);
-        let payload = Self::credential_payload(
+        let payload = self.credential_payload(
             request.effective_uid,
             request.effective_gid,
             &request.supplementary_groups,
+            u32::from(request.old_base == mochios_posix_protocol::OpenBase::AttachedDirectory) | (u32::from(request.new_base == mochios_posix_protocol::OpenBase::AttachedDirectory) << 1),
             &operation,
         )?;
         self.empty_call(
@@ -4627,10 +4659,11 @@ impl posix_service::FilesystemBackend<mochi_user_platform::handle::Handle> for R
         let mut operation = Vec::with_capacity(request.old_path.len() + request.new_path.len());
         operation.extend_from_slice(&request.old_path);
         operation.extend_from_slice(&request.new_path);
-        let payload = Self::credential_payload(
+        let payload = self.credential_payload(
             request.effective_uid,
             request.effective_gid,
             &request.supplementary_groups,
+            u32::from(request.old_base == mochios_posix_protocol::OpenBase::AttachedDirectory) | (u32::from(request.new_base == mochios_posix_protocol::OpenBase::AttachedDirectory) << 1),
             &operation,
         )?;
         self.empty_call(
@@ -4683,10 +4716,11 @@ impl posix_service::FilesystemBackend<mochi_user_platform::handle::Handle> for R
         let mut operation = Vec::with_capacity(request.target.len() + request.link_path.len());
         operation.extend_from_slice(&request.target);
         operation.extend_from_slice(&request.link_path);
-        let payload = Self::credential_payload(
+        let payload = self.credential_payload(
             request.effective_uid,
             request.effective_gid,
             &request.supplementary_groups,
+            u32::from(request.base == mochios_posix_protocol::OpenBase::AttachedDirectory),
             &operation,
         )?;
         self.empty_call(
@@ -4714,10 +4748,11 @@ impl posix_service::FilesystemBackend<mochi_user_platform::handle::Handle> for R
         if paths.base.is_some() {
             flags |= filesystem::READLINK_AT_BASE_ATTACHED;
         }
-        let payload = Self::credential_payload(
+        let payload = self.credential_payload(
             request.effective_uid,
             request.effective_gid,
             &request.supplementary_groups,
+            u32::from(request.base == mochios_posix_protocol::OpenBase::AttachedDirectory),
             &request.path,
         )?;
         self.payload_call(
@@ -4753,10 +4788,11 @@ impl posix_service::FilesystemBackend<mochi_user_platform::handle::Handle> for R
         )
         .map_err(|_| -22)?;
         body.extend_from_slice(&target.path);
-        let payload = Self::credential_payload(
+        let payload = self.credential_payload(
             target.effective_uid,
             target.effective_gid,
             &target.supplementary_groups,
+            u32::from(target.base == mochios_posix_protocol::OpenBase::AttachedDirectory),
             &body,
         )?;
         self.empty_call(
@@ -4783,10 +4819,11 @@ impl posix_service::FilesystemBackend<mochi_user_platform::handle::Handle> for R
         if paths.base.is_some() {
             flags |= filesystem::CHMOD_AT_BASE_ATTACHED;
         }
-        let payload = Self::credential_payload(
+        let payload = self.credential_payload(
             request.effective_uid,
             request.effective_gid,
             &request.supplementary_groups,
+            u32::from(request.base == mochios_posix_protocol::OpenBase::AttachedDirectory),
             &request.path,
         )?;
         self.empty_call(
@@ -4818,10 +4855,11 @@ impl posix_service::FilesystemBackend<mochi_user_platform::handle::Handle> for R
         if request.flags & posix::CHOWN_NOFOLLOW != 0 {
             flags |= filesystem::CHOWN_AT_NOFOLLOW;
         }
-        let payload = Self::credential_payload(
+        let payload = self.credential_payload(
             request.effective_uid,
             request.effective_gid,
             &request.supplementary_groups,
+            u32::from(request.base == mochios_posix_protocol::OpenBase::AttachedDirectory),
             &request.path,
         )?;
         self.empty_call(
@@ -4862,10 +4900,11 @@ impl posix_service::FilesystemBackend<mochi_user_platform::handle::Handle> for R
             flags |= filesystem::ACCESS_AT_NOFOLLOW;
         }
         let handles = Self::path_handles(paths)?;
-        let payload = Self::credential_payload(
+        let payload = self.credential_payload(
             request.uid,
             request.gid,
             &request.supplementary_groups,
+            u32::from(request.base == mochios_posix_protocol::OpenBase::AttachedDirectory),
             &request.path,
         )?;
         self.empty_call(

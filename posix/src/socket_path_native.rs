@@ -12,6 +12,7 @@ use posix_service::{
 use std::sync::{Arc, Mutex};
 
 pub(super) struct Snapshot {
+    namespace: fs::namespace_policy::NamespacePolicy,
     endpoint: u32,
     root: u32,
     cwd: Option<u32>,
@@ -36,7 +37,7 @@ pub(super) fn snapshot(
 ) -> Result<Snapshot, i32> {
     let identity =
         platform::ipc::endpoint_execution_identity(sender).map_err(|e| e.raw() as i32)?;
-    snapshot_process(state, identity.process_id, path)
+    snapshot_process(state, identity.process_id, path, super::path_policy_native::capture(sender))
 }
 
 /// Process identity here must come only from the authenticated dispatcher.
@@ -44,6 +45,7 @@ pub(super) fn snapshot_process(
     state: &Arc<Mutex<PosixService<u32>>>,
     process_id: u64,
     path: &[u8],
+    namespace: fs::namespace_policy::NamespacePolicy,
 ) -> Result<Snapshot, i32> {
     let endpoint =
         platform::handle::inherited(fs::CONTROL_HANDLE_KEY).map_err(|e| e.raw() as i32)?;
@@ -57,6 +59,7 @@ pub(super) fn snapshot_process(
     };
     if let Some(peer) = initialize {
         let mut filesystem = super::RuntimeFilesystem {
+            namespace_policy: namespace,
             endpoint,
             device_endpoint: None,
             fifo_endpoint: None,
@@ -81,6 +84,7 @@ pub(super) fn snapshot_process(
     }
     let root = platform::handle::duplicate(dirs.root.handle, rights).map_err(|e| e.raw() as i32)?;
     let mut snapshot = Snapshot {
+        namespace,
         endpoint,
         root,
         cwd: None,
@@ -120,10 +124,11 @@ impl Snapshot {
     ) -> Result<(OpenedObject<u32>, fs::NodeStatus), i32> {
         let mut request = [0; fs::HEADER_LEN + fs::CREDENTIALS_MAX_LEN + wire::MAX_UNIX_NAME_BYTES];
         let mut payload = [0; fs::CREDENTIALS_MAX_LEN + wire::MAX_UNIX_NAME_BYTES];
-        let payload_len = fs::encode_credentials_payload(
+        let payload_len = fs::encode_scoped_credentials_payload(
             self.uid,
             self.gid,
             &self.groups[..self.group_count],
+            self.namespace,
             path,
             &mut payload,
         )

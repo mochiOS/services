@@ -11,6 +11,7 @@ struct Credentials {
     session: Session,
     groups: Vec<u32>,
     image_revision: u64,
+    namespace: mochios_filesystem_protocol::namespace_policy::NamespacePolicy,
 }
 
 pub struct Scope<H> {
@@ -50,6 +51,7 @@ impl<H: Copy> Scope<H> {
             effective_gid: self.credentials.session.effective_gid,
             supplementary_groups: self.credentials.groups.clone(),
         };
+        let previous = filesystem.replace_namespace_policy(self.credentials.namespace);
         let opened = filesystem.open_at(
             &prepared,
             PathObjects {
@@ -57,7 +59,9 @@ impl<H: Copy> Scope<H> {
                 base: (request.base == protocol::OpenBase::ProcessCwd)
                     .then_some(self.directories.cwd),
             },
-        )?;
+        );
+        filesystem.replace_namespace_policy(previous);
+        let opened = opened?;
         let source = AttachedObject {
             handle: opened.handle,
             rights: opened.rights,
@@ -88,6 +92,7 @@ fn capture<H: Copy>(
     peer: PeerIdentity,
     filesystem: &mut impl FilesystemBackend<H>,
 ) -> Result<Scope<H>, i32> {
+    let namespace = filesystem.namespace_policy();
     path_request::with_paths(
         state,
         peer,
@@ -111,6 +116,7 @@ fn capture<H: Copy>(
                         .get(&peer.process_id)
                         .ok_or(protocol::STATUS_ESRCH)?
                         .observed_image_revision,
+                    namespace,
                 },
                 protocol::OpenBase::ProcessCwd,
             ))
@@ -141,6 +147,7 @@ fn capture<H: Copy>(
                     session: credentials.session,
                     groups: credentials.groups.clone(),
                     image_revision: credentials.image_revision,
+                    namespace: credentials.namespace,
                 },
                 directories: SessionDirectories { root, cwd },
             })

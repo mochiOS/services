@@ -43,6 +43,18 @@ impl FilesystemService {
         {
             return Err(EINVAL);
         }
+        self.authorize_path(
+            path,
+            anchors,
+            lookup_symlinks(path, request.flags & protocol::OPEN_AT_NOFOLLOW != 0),
+            credentials,
+            if access == protocol::OPEN_AT_READ {
+                1
+            } else {
+                2
+            },
+            1,
+        )?;
         let (resolution, filesystem, volume) = self.resolve_open_path(
             path,
             anchors,

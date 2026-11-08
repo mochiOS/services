@@ -33,6 +33,7 @@ impl FilesystemService {
         if path.is_empty() {
             return Err(ENOENT);
         }
+        self.authorize_path(path, anchors, FollowSymlinks::All, credentials, 0, 1)?;
         let node =
             match self.resolve_operation_target(path, anchors, FollowSymlinks::All, credentials)? {
                 OperationTarget::Device(node) => node,
@@ -68,6 +69,7 @@ impl FilesystemService {
         if path.is_empty() {
             return Err(ENOENT);
         }
+        self.authorize_path(path, anchors, FollowSymlinks::All, credentials, 0, 1)?;
         let (_, filesystem, _) = self.resolve_disk_operation_inode(
             path,
             anchors,
@@ -107,6 +109,7 @@ impl FilesystemService {
         if path.is_empty() {
             return Err(ENOENT);
         }
+        self.authorize_path(path, anchors, FollowSymlinks::All, credentials, 0, 1)?;
         let status =
             match self.resolve_operation_target(path, anchors, FollowSymlinks::All, credentials)? {
                 OperationTarget::Disk(_, filesystem, volume) => {
