@@ -1,7 +1,7 @@
 //! Reusable protected renderer. The broker owns every execution decision.
 use crate::execution_prompt::Presentation;
 use mochi_user_platform as p;
-use p::capability::consent::{Choice, Correlation, frontend as wire, prompt};
+use p::capability::consent::{Choice, Correlation, frontend as wire, question};
 use std::{
     cell::RefCell,
     rc::Rc,
@@ -140,13 +140,13 @@ pub(crate) fn run() -> Result<(), ViewKitError> {
     }
     let broker = Rc::new(startup("broker", Broker::connect()));
     loop {
-        let mut bytes = [0; prompt::MAX_MESSAGE_BYTES];
+        let mut bytes = [0; question::MAX_BYTES];
         let length = startup(
             "wait",
             broker.call(&wire::encode_wait(wire::Kind::Graphical), &mut bytes),
         );
-        let offer = prompt::decode(&bytes[..length]).unwrap_or_else(|_| std::process::exit(1));
-        let correlation = offer.correlation;
+        let offer = question::decode(&bytes[..length]).unwrap_or_else(|_| std::process::exit(1));
+        let correlation = offer.offer.correlation;
         let presentation =
             Presentation::decode(&bytes[..length]).unwrap_or_else(|_| std::process::exit(1));
         let question = Rc::new(Question {
@@ -212,6 +212,7 @@ impl App for ExecutionPromptApp {
     fn body(&self, _: &ViewContext) -> Self::Body {
         let question = Rc::clone(&self.question);
         let proposal = Rc::clone(&question);
+        let administrator = Rc::clone(&question);
         Box::new(ProtectedContent {
             question,
             inner: Box::new(
@@ -221,24 +222,41 @@ impl App for ExecutionPromptApp {
                         Rectangle::new()
                             .color(RectangleColor::Custom(Theme::current().shell.scrim)),
                     )
-                    .child(
-                        self.question
-                            .presentation
-                            .content(move |correlation, choice| {
-                                if choice != Choice::Deny && !proposal.armed.load(Ordering::Acquire)
-                                {
-                                    return;
+                    .child(self.question.presentation.content(
+                        move |correlation, choice| {
+                            if choice != Choice::Deny && !proposal.armed.load(Ordering::Acquire) {
+                                return;
+                            }
+                            match proposal
+                                .broker
+                                .command(correlation, wire::Action::Decide(choice))
+                            {
+                                Ok(()) => viewkit::request_exit(),
+                                Err(reason) if retryable(reason) => {}
+                                Err(_) => viewkit::request_exit(),
+                            }
+                        },
+                        move |bytes| {
+                            if !administrator.armed.load(Ordering::Acquire) {
+                                return false;
+                            }
+                            let mut reply = [0; 8];
+                            match administrator.broker.call(bytes, &mut reply) {
+                                Ok(8) => {
+                                    let status = u64::from_le_bytes(reply);
+                                    if status == 11 {
+                                        return false;
+                                    }
+                                    viewkit::request_exit();
+                                    true
                                 }
-                                match proposal
-                                    .broker
-                                    .command(correlation, wire::Action::Decide(choice))
-                                {
-                                    Ok(()) => viewkit::request_exit(),
-                                    Err(reason) if retryable(reason) => {}
-                                    Err(_) => viewkit::request_exit(),
+                                _ => {
+                                    viewkit::request_exit();
+                                    true
                                 }
-                            }),
-                    ),
+                            }
+                        },
+                    )),
             ),
         })
     }

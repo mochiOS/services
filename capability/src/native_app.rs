@@ -224,6 +224,46 @@ pub(crate) fn launch(
     load_library: impl FnMut(&str) -> Result<VerifiedManifest, Error>,
 ) -> Result<u64, Error> {
     let path = arguments.path;
+    let client = Client::new(EndpointTransport::new(endpoint));
+    let root = client
+        .read_scope_open_executable(scope, true, path)
+        .map_err(app_image::remote)
+        .map_err(app_image::status)?;
+    let root = Reference(root.handle);
+    let bytes = app_image::capture(root.0)?;
+    let catalog = Catalog::resolve(verified, path, load_library)?;
+    catalog.validate(Source::Root, &bytes)?;
+    launch_captured(
+        Some(trusted_images),
+        arguments,
+        endpoint,
+        sender,
+        expected_requester,
+        scope,
+        &bytes,
+        &catalog,
+        capabilities,
+        stdio,
+        false,
+    )
+}
+
+/// Consume the retained code/catalog of an authenticated operation. There is
+/// no executable pathname reopen after the administrator has approved it.
+pub(crate) fn launch_captured(
+    trusted_images: Option<&crate::trusted_images::TrustedImages>,
+    arguments: &Arguments<'_>,
+    endpoint: u32,
+    sender: u64,
+    expected_requester: u64,
+    scope: ObjectHandleAttachment<u32>,
+    bytes: &[u8],
+    catalog: &Catalog,
+    capabilities: &[String],
+    stdio: Option<&crate::app_stdio::Stdio>,
+    administrator: bool,
+) -> Result<u64, Error> {
+    let path = arguments.path;
     let mut random = [0; 16];
     if platform::syscall::call2(
         platform::syscall::SyscallNumber::RandomFill,
@@ -241,14 +281,6 @@ pub(crate) fn launch(
         return Err(Error::from_raw(platform::syscall::EACCES as i64));
     }
     let client = Client::new(EndpointTransport::new(endpoint));
-    let root = client
-        .read_scope_open_executable(scope, true, path)
-        .map_err(app_image::remote)
-        .map_err(app_image::status)?;
-    let root = Reference(root.handle);
-    let bytes = app_image::capture(root.0)?;
-    let catalog = Catalog::resolve(verified, path, load_library)?;
-    catalog.validate(Source::Root, &bytes)?;
     let dynamic = image_preparation::needs_preparation_bytes(&bytes).map_err(app_image::status)?;
     let source = app_image::readonly(&bytes)?;
     let mechanisms = app_image::Mechanisms(&catalog);
@@ -295,7 +327,11 @@ pub(crate) fn launch(
         random,
         mochios_posix_client::process_image::Process {
             image: prepared.as_ref().and_then(|image| image.executable),
-            identity: reader.identity(),
+            identity: if administrator {
+                Default::default()
+            } else {
+                reader.identity()
+            },
             lifecycle: prepared
                 .as_ref()
                 .map(|image| image.lifecycle)
@@ -318,7 +354,7 @@ pub(crate) fn launch(
     let result = (|| {
         let id = platform::process::handle_status(process.0)?.process_id;
         crate::persistent_grant::with_client(|client| {
-            client.register_launched_child_in_scope(
+            client.register_launched_child_credentials(
                 scope,
                 ObjectHandleAttachment {
                     handle: requester.0,
@@ -328,15 +364,24 @@ pub(crate) fn launch(
                     handle: process.0,
                     rights: mnu_abi::HANDLE_RIGHT_WAIT | mnu_abi::HANDLE_RIGHT_SIGNAL,
                 },
+                administrator.then_some(mochios_posix_protocol::SessionInfo {
+                    real_uid: 0,
+                    effective_uid: 0,
+                    real_gid: 0,
+                    effective_gid: 0,
+                    umask: 0o022,
+                }),
             )
         })?;
-        trusted_images.record_created(
-            catalog.identity(),
-            catalog.manifest_digest(),
-            &bytes,
-            output,
-            process.0,
-        )?;
+        if let Some(trusted_images) = trusted_images {
+            trusted_images.record_created(
+                catalog.identity(),
+                catalog.manifest_digest(),
+                &bytes,
+                output,
+                process.0,
+            )?;
+        }
         platform::process::resume_handle(process.0)?;
         Ok(id)
     })();

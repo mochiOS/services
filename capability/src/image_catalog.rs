@@ -140,9 +140,22 @@ pub(crate) fn validate_declared_root(
     Ok(())
 }
 
+struct PackageInput {
+    manifest: package::PackageManifest,
+    identity: ApplicationIdentity,
+}
+impl From<VerifiedManifest> for PackageInput {
+    fn from(verified: VerifiedManifest) -> Self {
+        Self {
+            manifest: verified.manifest,
+            identity: verified.identity,
+        }
+    }
+}
+
 fn matches_dependency(
     required: &package::LibraryDependency,
-    actual: &VerifiedManifest,
+    actual: &PackageInput,
     architecture: Option<&str>,
 ) -> Result<(), syscall::SysError> {
     let provenance = match actual.identity.provenance {
@@ -165,6 +178,34 @@ fn matches_dependency(
 }
 
 impl Catalog {
+    /// The signed standalone root is bound directly to its captured bytes.
+    /// Libraries still require explicit dependency edges and authenticated
+    /// installed manifests; no library-search path gains implicit trust.
+    pub(crate) fn standalone(
+        path: &str,
+        bytes: &[u8],
+        identity: ApplicationIdentity,
+        embedded: Option<&str>,
+        load: impl FnMut(&str) -> Result<VerifiedManifest, syscall::SysError>,
+    ) -> Result<Self, syscall::SysError> {
+        let mut manifest = match embedded {
+            Some(text) => package::parse_manifest(text).ok_or_else(denied)?,
+            None => package::PackageManifest::default(),
+        };
+        manifest.package_id = identity.package_id.clone();
+        let digest = Sha256::digest(bytes).into();
+        Self::collect(
+            Image {
+                path: path.into(),
+                size: bytes.len() as u64,
+                digest,
+            },
+            identity,
+            manifest,
+            digest,
+            load,
+        )
+    }
     pub(crate) fn new(
         verified: VerifiedManifest,
         root_path: &str,
@@ -178,7 +219,7 @@ impl Catalog {
     pub(crate) fn resolve(
         verified: VerifiedManifest,
         root_path: &str,
-        mut load: impl FnMut(&str) -> Result<VerifiedManifest, syscall::SysError>,
+        load: impl FnMut(&str) -> Result<VerifiedManifest, syscall::SysError>,
     ) -> Result<Self, syscall::SysError> {
         let manifest = &verified.manifest;
         if !executable_package(manifest) {
@@ -189,10 +230,26 @@ impl Catalog {
             return Err(denied());
         }
         let root = image(manifest, binary)?;
+        Self::collect(
+            root,
+            verified.identity,
+            verified.manifest,
+            verified.manifest_digest,
+            load,
+        )
+    }
+    fn collect(
+        root: Image,
+        identity: ApplicationIdentity,
+        manifest: package::PackageManifest,
+        manifest_digest: [u8; 32],
+        mut load: impl FnMut(&str) -> Result<VerifiedManifest, syscall::SysError>,
+    ) -> Result<Self, syscall::SysError> {
         let architecture = manifest.package_architecture.clone();
-        let identity = verified.identity.clone();
-        let manifest_digest = verified.manifest_digest;
-        let mut packages = alloc::vec![verified];
+        let mut packages = alloc::vec![PackageInput {
+            manifest,
+            identity: identity.clone()
+        }];
         let mut libraries = Vec::new();
         let mut cursor = 0;
         while cursor < packages.len() {
@@ -227,7 +284,7 @@ impl Catalog {
                     if packages.len() == MAX_PACKAGES {
                         return Err(syscall::SysError::from_raw(-7));
                     }
-                    let loaded = load(&dependency.package)?;
+                    let loaded = PackageInput::from(load(&dependency.package)?);
                     matches_dependency(&dependency, &loaded, architecture.as_deref())?;
                     packages.push(loaded);
                 }

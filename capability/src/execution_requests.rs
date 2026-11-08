@@ -35,6 +35,8 @@ fn same_ticket(a: Ticket, b: Ticket) -> bool {
 pub(crate) struct Reply {
     pub target: u64,
     pub result: Result<(), SysError>,
+    pub process: Option<u64>,
+    pub spawn: bool,
 }
 struct Entry {
     offer: Offer,
@@ -174,6 +176,7 @@ impl Registry {
     fn retire(&mut self, index: usize, controller: &mut Controller, reason: SysError) -> Reply {
         let slot = self.slots[index].take().expect("owned execution slot");
         let target = slot.target();
+        let spawn = matches!(&slot, Slot::Ready(entry) if entry.request.spawn_reply());
         let bytes = match &slot {
             Slot::Reserved { bytes, .. } => *bytes,
             Slot::Ready(entry) => {
@@ -186,6 +189,8 @@ impl Registry {
         self.release(bytes);
         Reply {
             target,
+            spawn,
+            process: None,
             result: Err(reason),
         }
     }
@@ -277,6 +282,28 @@ impl Registry {
         policy_generation: u64,
         now: u64,
     ) -> Result<Reply, SysError> {
+        self.finish_credentials(
+            controller,
+            correlation,
+            approval,
+            current,
+            session,
+            policy_generation,
+            now,
+            None,
+        )
+    }
+    pub(crate) fn finish_credentials(
+        &mut self,
+        controller: &mut Controller,
+        correlation: Correlation,
+        approval: Approval,
+        current: &Peer,
+        session: Session,
+        policy_generation: u64,
+        now: u64,
+        credentials: Option<p::capability::administrator::Credentials<'_>>,
+    ) -> Result<Reply, SysError> {
         controller
             .observe_time(now)
             .map_err(|_| error(NativeError::BackingFailure))?;
@@ -288,17 +315,33 @@ impl Registry {
             unreachable!()
         };
         let bytes = entry.request.source_len();
+        let spawn = entry.request.spawn_reply();
         let target = entry.request.binding().requester.endpoint;
         let result = if now >= entry.offer.deadline {
             drop(entry.request);
             Err(error(NativeError::AccessDenied))
         } else {
-            entry
-                .request
-                .complete(approval, current, session, policy_generation)
+            entry.request.complete_operation(
+                approval,
+                current,
+                session,
+                policy_generation,
+                credentials,
+                entry.offer.deadline,
+            )
         };
         self.release(bytes);
-        Ok(Reply { target, result })
+        let process = if spawn {
+            result.as_ref().ok().copied()
+        } else {
+            None
+        };
+        Ok(Reply {
+            target,
+            result: result.map(|_| ()),
+            spawn,
+            process,
+        })
     }
     pub(crate) fn next_deadline(&self) -> Option<u64> {
         self.slots

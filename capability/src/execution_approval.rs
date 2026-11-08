@@ -1,10 +1,11 @@
 //! Own an authenticated launch across consent, then issue its exact native permit.
 //! A renderer supplies neither the source, grants nor the execution identity.
-use alloc::{string::String, vec::Vec};
+use alloc::{boxed::Box, string::String, vec::Vec};
 use mochi_user_platform as p;
 use p::capability::consent::{Choice, Choices};
 use p::syscall::{NativeError, SysError};
 use sha2::{Digest, Sha256};
+use zeroize::Zeroizing;
 
 use crate::{
     consent::{Action, Approval, Binding, Session},
@@ -12,11 +13,28 @@ use crate::{
     resolver::ApplicationIdentity,
 };
 
+/// An owned continuation supplies only authenticated retained content. The
+/// shared controller remains the sole producer of a one-shot Approval.
+pub(crate) trait Administration {
+    fn authority(&self) -> (&ApplicationIdentity, &[String], &[u8; 32]);
+    fn requirements(&self) -> [u8; 32];
+    fn is_run(&self) -> bool;
+    fn question(&self) -> p::capability::consent::question::Administrator<'_>;
+    fn complete(
+        self: Box<Self>,
+        source: &[u8],
+        peer: &Peer,
+        credentials: p::capability::administrator::Credentials<'_>,
+        deadline: u64,
+    ) -> Result<u64, SysError>;
+}
+
 /// Variants can only contain selections returned by the authenticated source
 /// gate. The original manifest/verification snapshot stays owned here.
 pub(crate) enum Selection {
     Installed(crate::installed_image::Selection),
     Standalone(crate::standalone_image::Selection),
+    Administration(Box<dyn Administration>),
 }
 
 impl Selection {
@@ -27,12 +45,14 @@ impl Selection {
                 .iter()
                 .any(|name| crate::policy::needs_app_prompt(policy, name)),
             Self::Standalone(_) => !requested.is_empty(),
+            Self::Administration(_) => true,
         }
     }
     fn authority(&self) -> (&ApplicationIdentity, &[String], &[u8; 32]) {
         match self {
             Self::Installed(source) => source.authority(),
             Self::Standalone(source) => source.authority(),
+            Self::Administration(source) => source.authority(),
         }
     }
 
@@ -41,6 +61,9 @@ impl Selection {
         requester: &Peer,
         key: &str,
     ) -> Result<bool, SysError> {
+        if matches!(self, Self::Administration(_)) {
+            return Ok(false);
+        }
         let uid = crate::execution_grant::requester_uid(requester)?;
         let (identity, capabilities, digest) = self.authority();
         let remembered = crate::execution_grant::Key::new(uid, identity, capabilities, *digest)?;
@@ -70,6 +93,7 @@ impl Selection {
         match self {
             Self::Installed(source) => source.authorize(policy, sender, key),
             Self::Standalone(source) => source.authorize(sender, key),
+            Self::Administration(_) => Err(error(NativeError::AccessDenied)),
         }
     }
 }
@@ -111,12 +135,13 @@ pub(crate) fn requirements(key: &str, capabilities: &[String]) -> Result<[u8; 32
 /// Non-clonable owner of the original bytes, policy selection and Process
 /// reference. Consuming or cancelling this request releases all three.
 pub(crate) struct Pending {
-    source: Vec<u8>,
+    source: Zeroizing<Vec<u8>>,
     selection: Selection,
     requester: Peer,
     key: String,
     binding: Binding,
-    remembered: crate::execution_grant::Key,
+    remembered: Option<crate::execution_grant::Key>,
+    uid: u32,
 }
 
 impl Pending {
@@ -148,20 +173,33 @@ impl Pending {
             return Err(error(NativeError::AccessDenied));
         }
         let (identity, _, _) = selection.authority();
-        let remembered = crate::execution_grant::Key::new(
-            crate::execution_grant::requester_uid(&requester)?,
-            identity,
-            capabilities,
-            *digest,
-        )?;
+        let uid = crate::execution_grant::requester_uid(&requester)?;
+        let administrator = matches!(selection, Selection::Administration(_));
+        let remembered = if administrator {
+            None
+        } else {
+            Some(crate::execution_grant::Key::new(
+                uid,
+                identity,
+                capabilities,
+                *digest,
+            )?)
+        };
         let binding = Binding {
             requester: requester.instance,
             session,
             policy_generation,
             source_digest: *digest,
             prepared_digest: *digest,
-            requirements_digest: requirements(key, capabilities)?,
-            action: Action::Launch,
+            requirements_digest: match &selection {
+                Selection::Administration(request) => request.requirements(),
+                _ => requirements(key, capabilities)?,
+            },
+            action: if administrator {
+                Action::Operation
+            } else {
+                Action::Launch
+            },
         };
         let mut retained_key = String::new();
         retained_key
@@ -169,12 +207,13 @@ impl Pending {
             .map_err(|_| error(NativeError::ResourceUnavailable))?;
         retained_key.push_str(key);
         Ok(Self {
-            source,
+            source: Zeroizing::new(source),
             selection,
             requester,
             key: retained_key,
             binding,
             remembered,
+            uid,
         })
     }
 
@@ -191,8 +230,19 @@ impl Pending {
         let (identity, capabilities, _) = self.selection.authority();
         (identity, capabilities)
     }
+    pub(crate) fn administrator(&self) -> bool {
+        matches!(self.selection, Selection::Administration(_))
+    }
+    pub(crate) fn spawn_reply(&self) -> bool {
+        matches!(&self.selection, Selection::Administration(request) if request.is_run())
+    }
     pub(crate) fn choices(&self) -> Choices {
-        Choices::new(Choices::ONCE | Choices::PERSISTENT).expect("execution consent choices")
+        Choices::new(if self.administrator() {
+            Choices::ONCE
+        } else {
+            Choices::ONCE | Choices::PERSISTENT
+        })
+        .expect("execution consent choices")
     }
 
     /// Generate frontend content from the retained authenticated selection,
@@ -227,17 +277,20 @@ impl Pending {
             length = end;
             previous = Some(*name);
         }
-        prompt::encode(
-            Prompt {
-                correlation: offer.correlation,
-                deadline: offer.deadline,
-                choices: offer.choices,
-                source_digest: *digest,
-                package: &identity.package_id,
-                requirements: &encoded[..length],
-            },
-            output,
-        )
+        let prompt = Prompt {
+            correlation: offer.correlation,
+            deadline: offer.deadline,
+            choices: offer.choices,
+            source_digest: *digest,
+            package: &identity.package_id,
+            requirements: &encoded[..length],
+        };
+        match &self.selection {
+            Selection::Administration(request) => {
+                p::capability::consent::question::encode(prompt, request.question(), output)
+            }
+            _ => prompt::encode(prompt, output),
+        }
         .map_err(|_| error(NativeError::InvalidArgument))
     }
 
@@ -252,6 +305,25 @@ impl Pending {
         session: Session,
         policy_generation: u64,
     ) -> Result<(), SysError> {
+        self.complete_operation(
+            approval,
+            current,
+            session,
+            policy_generation,
+            None,
+            u64::MAX,
+        )
+        .map(|_| ())
+    }
+    pub(crate) fn complete_operation(
+        self,
+        approval: Approval,
+        current: &Peer,
+        session: Session,
+        policy_generation: u64,
+        credentials: Option<p::capability::administrator::Credentials<'_>>,
+        deadline: u64,
+    ) -> Result<u64, SysError> {
         let (binding, choice) = approval.into_parts();
         if !matches!(choice, Choice::AllowOnce | Choice::AllowPersistently)
             || binding != self.binding
@@ -262,11 +334,24 @@ impl Pending {
         {
             return Err(error(NativeError::AccessDenied));
         }
-        if crate::execution_grant::requester_uid(current)? != self.remembered.uid() {
+        if crate::execution_grant::requester_uid(current)? != self.uid {
+            return Err(error(NativeError::AccessDenied));
+        }
+        if let Selection::Administration(request) = self.selection {
+            if choice != Choice::AllowOnce {
+                return Err(error(NativeError::AccessDenied));
+            }
+            let credentials = credentials.ok_or_else(|| error(NativeError::AccessDenied))?;
+            return request.complete(&self.source, current, credentials, deadline);
+        }
+        if credentials.is_some() {
             return Err(error(NativeError::AccessDenied));
         }
         if choice == Choice::AllowPersistently {
-            crate::execution_grant::remember(self.remembered)?;
+            crate::execution_grant::remember(
+                self.remembered
+                    .ok_or_else(|| error(NativeError::AccessDenied))?,
+            )?;
         }
         let (identity, capabilities, digest) = self.selection.authority();
         crate::resolver::authorize_image_install(
@@ -277,5 +362,6 @@ impl Pending {
             digest,
             self.requester.instance.revision,
         )
+        .map(|()| 0)
     }
 }

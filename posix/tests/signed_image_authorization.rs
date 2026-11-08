@@ -175,7 +175,7 @@ mod execution_grant_io {
 }
 
 pub mod capability {
-    pub use crate::platform_real::capability::{consent, input_authority};
+    pub use crate::platform_real::capability::{administrator, consent, input_authority};
     pub use mochios_capability_protocol::{
         decode_authorize_captured_image_request, decode_authorize_exec_object_request, signed_image,
         library_image,

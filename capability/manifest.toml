@@ -16,6 +16,8 @@ requires = [
     "system.random.read",
     "service.register",
     "capabilities.manage",
+    "account.authenticate",
+    "account.other.modify",
     "io.port@0xcf8:8",
     "device.input",
     "display.read",

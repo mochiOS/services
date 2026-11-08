@@ -68,6 +68,7 @@ struct Active {
     route: InputRoute,
     offer: Offer,
     armed: bool,
+    administrator: bool,
     terminal: Option<crate::consent_peer::ProcessReference>,
     text_input: crate::text_evidence::Evidence,
 }
@@ -81,6 +82,9 @@ pub(crate) struct Frontends {
     text: Vec<TextWaiter>,
 }
 impl Frontends {
+    pub(crate) fn busy(&self) -> bool {
+        self.active.is_some()
+    }
     pub(crate) fn new() -> Self {
         Self {
             idle: [None, None],
@@ -236,6 +240,7 @@ impl Frontends {
         let session = authority.session(&requester)?;
         let route = authority.route()?;
         let request = Pending::new(selection, source, requester, key, session, generation)?;
+        let administrator = request.administrator();
         let requester = request.binding().requester;
         let correlation = controller
             .next_correlation(authority.challenge()?)
@@ -274,6 +279,7 @@ impl Frontends {
             route,
             offer,
             armed: false,
+            administrator,
             terminal,
             text_input: crate::text_evidence::Evidence::default(),
         });
@@ -356,7 +362,33 @@ impl Frontends {
         generation: u64,
         now: u64,
         authority: &mut impl Authority,
+        emit: impl FnMut(Reply),
+    ) -> Result<(), SysError> {
+        self.command_credentials(
+            registry,
+            controller,
+            peer,
+            correlation,
+            action,
+            generation,
+            now,
+            authority,
+            emit,
+            None,
+        )
+    }
+    pub(crate) fn command_credentials(
+        &mut self,
+        registry: &mut Registry,
+        controller: &mut Controller,
+        peer: &Peer,
+        correlation: Correlation,
+        action: Action,
+        generation: u64,
+        now: u64,
+        authority: &mut impl Authority,
         mut emit: impl FnMut(Reply),
+        credentials: Option<p::capability::administrator::Credentials<'_>>,
     ) -> Result<(), SysError> {
         let active = self
             .active
@@ -478,7 +510,16 @@ impl Frontends {
         let Action::Decide(choice) = action else {
             unreachable!()
         };
-        if active.terminal.is_some() && !active.text_input.accepts(choice) {
+        if active.administrator != credentials.is_some() {
+            return Err(denied());
+        }
+        if active.terminal.is_some()
+            && !(if active.administrator {
+                active.text_input.accepts_password()
+            } else {
+                active.text_input.accepts(choice)
+            })
+        {
             return Err(busy());
         }
         let approval =
@@ -497,7 +538,7 @@ impl Frontends {
                 }
             };
         let active = self.active.take().unwrap();
-        let reply = registry.finish(
+        let reply = registry.finish_credentials(
             controller,
             correlation,
             approval,
@@ -505,6 +546,7 @@ impl Frontends {
             witness.current.session.ok_or_else(denied)?,
             generation,
             now,
+            credentials,
         );
         authority.dismiss(correlation, active.presenter.registration);
         let reply = match reply {
@@ -518,7 +560,7 @@ impl Frontends {
                 return Err(reason);
             }
         };
-        let result = reply.result;
+        let result = reply.result.map(|_| ());
         emit(reply);
         result
     }

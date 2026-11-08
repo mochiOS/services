@@ -33,10 +33,21 @@ fn capability_reply(sender: u64, status: u64) {
 }
 
 fn retained_reply(reply: crate::execution_requests::Reply) {
-    capability_reply(
-        reply.target,
-        reply.result.err().map(error_status).unwrap_or(REPLY_OK),
-    );
+    if reply.spawn {
+        reply_spawn(
+            reply.target,
+            reply.result.and_then(|()| {
+                reply
+                    .process
+                    .ok_or_else(|| mochi_user_syscall::SysError::from_raw(-5))
+            }),
+        );
+    } else {
+        capability_reply(
+            reply.target,
+            reply.result.err().map(error_status).unwrap_or(REPLY_OK),
+        );
+    }
 }
 
 /// Both image transports converge after one bounded authenticated capture.
@@ -88,7 +99,7 @@ fn deliver_prompt(
         return;
     };
     let result = (|| {
-        let mut bytes = [0; platform::capability::consent::prompt::MAX_MESSAGE_BYTES];
+        let mut bytes = [0; platform::capability::consent::question::MAX_BYTES];
         let length = requests.write_prompt(
             offer.correlation,
             frontends.presenter_instance(offer.correlation)?,
@@ -215,7 +226,7 @@ pub(crate) fn serve_capability_requests(mut state: CapabilityServiceState) -> ! 
         }
     };
     platform::logln!("capability.service: ready");
-    let mut buf = [0u8; 1024];
+    let mut buf = zeroize::Zeroizing::new([0u8; 8192]);
     let mut wait_items =
         [mochi_user_syscall::HandleWaitItem::default(); mnu_abi::HANDLE_WAIT_MANY_MAX_ITEMS];
     let mut input_authority: Option<crate::consent_input::Channel> = None;
@@ -227,6 +238,8 @@ pub(crate) fn serve_capability_requests(mut state: CapabilityServiceState) -> ! 
     #[cfg(mochios_consent_input_probe_306)]
     let mut input_probe: Option<crate::consent_input_probe::Probe> = None;
     loop {
+        use zeroize::Zeroize;
+        buf.zeroize();
         // Check deadlines before every receive, including under message load.
         if execution_requests.len() != 0 {
             execution_requests.invalidate_policy(
@@ -265,7 +278,7 @@ pub(crate) fn serve_capability_requests(mut state: CapabilityServiceState) -> ! 
             );
         }
         let mut attached = platform::ipc::IpcObjectHandles::default();
-        let msg = match platform::ipc::try_wait_object_handles(&mut buf, &mut attached) {
+        let msg = match platform::ipc::try_wait_object_handles(&mut buf[..], &mut attached) {
             Ok(msg) => msg,
             Err(error)
                 if error.raw() == mochi_user_syscall::NativeError::NotReady.into_raw() as i64 =>
@@ -312,10 +325,15 @@ pub(crate) fn serve_capability_requests(mut state: CapabilityServiceState) -> ! 
         if opcode == platform::pci::MAGIC {
             let result = if attached.count == 0 && attached.is_user_delivery() {
                 crate::pci_resources::request(sender, slice)
-            } else { Err(mochi_user_syscall::SysError::from_raw(-22)) };
+            } else {
+                Err(mochi_user_syscall::SysError::from_raw(-22))
+            };
             close_received_handles(&attached);
             let mut reply = [0; 16];
-            let (status, value) = match result { Ok(value) => (0i64, u64::from(value)), Err(error) => (error.raw(), 0) };
+            let (status, value) = match result {
+                Ok(value) => (0i64, u64::from(value)),
+                Err(error) => (error.raw(), 0),
+            };
             reply[..8].copy_from_slice(&status.to_le_bytes());
             reply[8..].copy_from_slice(&value.to_le_bytes());
             let _ = platform::ipc::reply(sender, &reply);
@@ -559,7 +577,7 @@ pub(crate) fn serve_capability_requests(mut state: CapabilityServiceState) -> ! 
             || opcode == platform::capability::consent::frontend::TEXT_RELEASE_OPCODE
         {
             use platform::capability::consent::{frontend as wire, prompt};
-            let mut output = [0; prompt::MAX_MESSAGE_BYTES];
+            let mut output = [0; platform::capability::consent::question::MAX_BYTES];
             let result = (|| {
                 let release = wire::decode_text_poll(slice)
                     .map_err(|_| mochi_user_syscall::SysError::from_raw(-22))?;
@@ -618,6 +636,7 @@ pub(crate) fn serve_capability_requests(mut state: CapabilityServiceState) -> ! 
         }
         if opcode == platform::capability::consent::frontend::WAIT_OPCODE
             || opcode == platform::capability::consent::frontend::COMMAND_OPCODE
+            || opcode == platform::capability::administrator::AUTHENTICATE_OPCODE
         {
             use platform::capability::consent::frontend as wire;
             let result = (|| {
@@ -640,9 +659,25 @@ pub(crate) fn serve_capability_requests(mut state: CapabilityServiceState) -> ! 
                     frontends.wait(peer, kind, &authority)?;
                     Ok(true)
                 } else {
-                    let (correlation, action) = wire::decode(slice)
-                        .map_err(|_| mochi_user_syscall::SysError::from_raw(-22))?;
-                    frontends.command(
+                    let credentials =
+                        if opcode == platform::capability::administrator::AUTHENTICATE_OPCODE {
+                            Some(
+                                platform::capability::administrator::decode_credentials(slice)
+                                    .map_err(|_| mochi_user_syscall::SysError::from_raw(-22))?,
+                            )
+                        } else {
+                            None
+                        };
+                    let (correlation, action) = if let Some(credentials) = &credentials {
+                        (
+                            credentials.correlation,
+                            wire::Action::Decide(platform::capability::consent::Choice::AllowOnce),
+                        )
+                    } else {
+                        wire::decode(slice)
+                            .map_err(|_| mochi_user_syscall::SysError::from_raw(-22))?
+                    };
+                    frontends.command_credentials(
                         &mut execution_requests,
                         &mut state.consent,
                         &peer,
@@ -652,6 +687,7 @@ pub(crate) fn serve_capability_requests(mut state: CapabilityServiceState) -> ! 
                         platform::time::monotonic_nanoseconds()?,
                         &mut authority,
                         retained_reply,
+                        credentials,
                     )?;
                     Ok(false)
                 }
@@ -666,7 +702,7 @@ pub(crate) fn serve_capability_requests(mut state: CapabilityServiceState) -> ! 
         }
         if opcode == platform::capability::consent::prompt::FETCH_OPCODE {
             use platform::capability::consent::prompt;
-            let mut output = [0; prompt::MAX_MESSAGE_BYTES];
+            let mut output = [0; platform::capability::consent::question::MAX_BYTES];
             let result = (|| {
                 if attached.count != 0 || !attached.is_user_delivery() {
                     return Err(mochi_user_syscall::SysError::from_raw(-22));
@@ -724,6 +760,72 @@ pub(crate) fn serve_capability_requests(mut state: CapabilityServiceState) -> ! 
                 );
             }
             capability_reply(sender, status);
+            continue;
+        }
+        if opcode == platform::capability::administrator::OPERATION_OPCODE
+            || opcode == platform::capability::administrator::RUN_OPCODE
+        {
+            let spawn = opcode == platform::capability::administrator::RUN_OPCODE;
+            let result = (|| {
+                // Do not capture another ELF while the protected seat is in
+                // use. Keep unauthenticated requests outside the I/O path.
+                if frontends.busy() {
+                    return Err(mochi_user_syscall::SysError::from(
+                        mochi_user_syscall::NativeError::NotReady.into_raw(),
+                    ));
+                }
+                let requester = crate::consent_peer::capture(sender)?;
+                let (request, source) = if spawn {
+                    crate::administrator::Request::run(
+                        &state.package_index,
+                        &requester,
+                        slice,
+                        &mut attached,
+                    )?
+                } else {
+                    if attached.count != 0 || !attached.is_user_delivery() {
+                        return Err(mochi_user_syscall::SysError::from_raw(-22));
+                    }
+                    crate::administrator::Request::account(&requester, slice)?
+                };
+                let reservation = execution_requests.reserve(sender, source.len())?;
+                let mut authority = crate::execution_frontend::native::Native {
+                    trusted: &state.trusted_images,
+                    sessions: &desktop_sessions,
+                    display: display_authority.as_ref(),
+                    input: input_authority.as_mut(),
+                };
+                let (offer, destination) = frontends.begin(
+                    reservation,
+                    &mut state.consent,
+                    crate::execution_approval::Selection::Administration(alloc::boxed::Box::new(
+                        request,
+                    )),
+                    source,
+                    requester,
+                    "administrator",
+                    state.authorization_generation,
+                    platform::time::monotonic_nanoseconds()?,
+                    &mut authority,
+                )?;
+                deliver_prompt(
+                    &mut execution_requests,
+                    &mut state.consent,
+                    &mut frontends,
+                    &mut authority,
+                    offer,
+                    destination,
+                );
+                Ok(())
+            })();
+            close_received_handles(&attached);
+            if let Err(reason) = result {
+                if spawn {
+                    reply_spawn(sender, Err(reason));
+                } else {
+                    capability_reply(sender, error_status(reason));
+                }
+            }
             continue;
         }
         if opcode == platform::capability::application_launch::OPCODE {
@@ -1069,7 +1171,8 @@ pub(crate) fn serve_capability_requests(mut state: CapabilityServiceState) -> ! 
                     let caps = capability_decision.effective;
                     let mut identity_items = Vec::new();
                     encode_identity_args(identity, &mut identity_items);
-                    let executable = verified.read_image(path, crate::persistent_grant::read_file)?;
+                    let executable =
+                        verified.read_image(path, crate::persistent_grant::read_file)?;
                     let digest = Sha256::digest(&executable);
                     let mut digest_hex = String::with_capacity(64);
                     for byte in digest {

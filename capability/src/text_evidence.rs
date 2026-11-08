@@ -9,6 +9,7 @@ pub(crate) struct Evidence {
     selected: Option<Choice>,
     confirmed: Option<Choice>,
     released: bool,
+    password_enter: bool,
 }
 impl Evidence {
     pub fn arm(&mut self, released: bool) {
@@ -22,6 +23,7 @@ impl Evidence {
             Transition::AllReleased => self.released = true,
             Transition::PhysicalPress => {
                 self.confirmed = None;
+                self.password_enter = self.released && matches!(event.control, 0x1c | 0x9c);
                 if self.released {
                     match event.control {
                         0x15 => self.selected = Some(Choice::AllowOnce),
@@ -38,8 +40,12 @@ impl Evidence {
             Transition::Repeat | Transition::Synthetic => {
                 self.selected = None;
                 self.confirmed = None;
+                self.password_enter = false;
             }
         }
+    }
+    pub fn accepts_password(&self) -> bool {
+        self.password_enter
     }
     pub fn accepts(&self, choice: Choice) -> bool {
         self.confirmed == Some(choice)
