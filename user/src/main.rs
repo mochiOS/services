@@ -9,6 +9,8 @@ use mochios_user_protocol::{
     Status, decode_opcode,
 };
 use user_service::{password, storage};
+mod administrator;
+mod public_endpoint;
 
 const READ_CAPABILITY: &str = "account.other.read";
 const MODIFY_CAPABILITY: &str = "account.other.modify";
@@ -84,7 +86,7 @@ impl UserService {
             self.reply_status(sender, 0, mochi_user_syscall::EINVAL);
             return;
         };
-        let Ok(bytes) = self.database.encode() else {
+        let Ok(bytes) = public_endpoint::metadata(&self.database).encode() else {
             self.reply_status(sender, request.request_id, mochi_user_syscall::EIO);
             return;
         };
@@ -104,7 +106,7 @@ impl UserService {
             self.reply_status(sender, 0, mochi_user_syscall::EINVAL);
             return;
         };
-        let Ok(bytes) = self.database.encode() else {
+        let Ok(bytes) = public_endpoint::metadata(&self.database).encode() else {
             self.reply_status(sender, request.request_id, mochi_user_syscall::EIO);
             return;
         };
@@ -350,6 +352,11 @@ fn main() {
             platform::process::exit(1);
         }
     };
+    if let Err(error) = administrator::protect_settings() {
+        diagnostic(&format!("user.service: account settings protection failed: {error}"));
+        let _ = platform::service_ready::notify(ready_target, -13);
+        platform::process::exit(1);
+    }
     let endpoint = match platform::ipc::create_handle() {
         Ok(endpoint) => endpoint,
         Err(error) => {
@@ -361,8 +368,19 @@ fn main() {
             platform::process::exit(1);
         }
     };
+    let posix = match mochios_posix_client::Client::from_syscall_launch_context() {
+        Ok(client) => client,
+        Err(_) => { diagnostic("user.service: missing POSIX session authority"); platform::process::exit(1); }
+    };
+    let (public_endpoint, public_view) = match public_endpoint::start(public_endpoint::Snapshot {
+        database: public_endpoint::metadata(&service.database), groups: service.groups.clone(),
+        healthy: service.healthy, groups_healthy: service.groups_healthy,
+    }) {
+        Ok(started) => started,
+        Err(_) => { diagnostic("user.service: public account endpoint startup failed"); platform::process::exit(1); }
+    };
     let rights = mochios_posix_protocol::ACCOUNT_ENDPOINT_RIGHTS;
-    if platform::service_ready::notify_handle(ready_target, 0, endpoint, rights).is_err() {
+    if platform::service_ready::notify_handle(ready_target, 0, public_endpoint, rights).is_err() {
         diagnostic("user.service: ready notification failed");
         platform::process::exit(1);
     }
@@ -443,6 +461,17 @@ fn main() {
             service.reply_status(sender, 0, mochi_user_syscall::EACCES);
             continue;
         }
+        if required_capability == MODIFY_CAPABILITY && !administrator::permits(&posix, sender) {
+            let request_id = match opcode {
+                Ok(Opcode::AddUser) => AddUser::decode(request).map(|request| request.request_id).unwrap_or(0),
+                Ok(Opcode::RemoveUser) => RemoveUser::decode(request).map(|request| request.request_id).unwrap_or(0),
+                Ok(Opcode::SetPassword) => SetPassword::decode(request).map(|request| request.request_id).unwrap_or(0),
+                _ => 0,
+            };
+            service.reply_status(sender, request_id, mochi_user_syscall::EACCES);
+            buffer.zeroize();
+            continue;
+        }
         match opcode {
             Ok(Opcode::SnapshotBegin) => service.handle_snapshot_begin(sender, request),
             Ok(Opcode::SnapshotChunk) => service.handle_snapshot_chunk(sender, request),
@@ -454,5 +483,13 @@ fn main() {
         }
         let used_length = length.min(buffer.len());
         buffer[..used_length].zeroize();
+        // Never hold this projection lock while querying POSIX or saving files.
+        // Publish only metadata after the authoritative mutation has finished.
+        if let Ok(mut view) = public_view.lock() {
+            *view = public_endpoint::Snapshot {
+                database: public_endpoint::metadata(&service.database), groups: service.groups.clone(),
+                healthy: service.healthy, groups_healthy: service.groups_healthy,
+            };
+        } else { platform::process::exit(1); }
     }
 }

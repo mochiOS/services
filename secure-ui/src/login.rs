@@ -223,6 +223,16 @@ impl App for LoginApp {
 }
 
 fn configured_auto_login_user() -> Option<String> {
+    #[cfg(target_os = "mochios")]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let parent = fs::symlink_metadata("/var/config/account").ok()?;
+        let file = fs::symlink_metadata(SETTINGS_PATH).ok()?;
+        if !parent.is_dir() || !file.is_file() || parent.uid() != 0 || file.uid() != 0
+            || (parent.mode() | file.mode()) & 0o022 != 0 {
+            return None;
+        }
+    }
     let text = fs::read_to_string(SETTINGS_PATH).ok()?;
     auto_login_user_from_settings(&text)
 }
