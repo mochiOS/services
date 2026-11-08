@@ -1531,6 +1531,7 @@ dependencies = [
  "mochios-linux-portal-protocol",
  "mochios-posix-client",
  "mochios-posix-protocol",
+ "mochios-signature-protocol",
 ]
 
 [[package]]

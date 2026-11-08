@@ -90,7 +90,7 @@ pub(crate) fn run() -> ! {
                         | Opcode::PrepareBundleResponse
                         | Opcode::StatusResponse,
                     ) => {}
-                    Err(_) => handle_event(message, &mut instances, &mut host),
+                    Err(_) => handle_event(message, sender, &mut instances, &mut host),
                 }
             }
             Err(error)
@@ -513,8 +513,8 @@ fn advance_pending_frame(
     }
 }
 
-fn handle_event(event: &[u8], instances: &mut [LinuxInstance], host: &mut HostClient) {
-    if event.len() < 24 {
+fn handle_event(event: &[u8], sender: u64, instances: &mut [LinuxInstance], host: &mut HostClient) {
+    if event.len() != 24 {
         return;
     }
     let surface_token = read_u64(event, 16);
@@ -526,7 +526,7 @@ fn handle_event(event: &[u8], instances: &mut [LinuxInstance], host: &mut HostCl
                 window
                     .surface
                     .as_ref()
-                    .is_some_and(|surface| surface.token() == surface_token)
+                    .is_some_and(|surface| surface.token() == surface_token && surface.accepts_events_from(sender))
             })
             .map(|window| (instance.id, window))
     }) else {

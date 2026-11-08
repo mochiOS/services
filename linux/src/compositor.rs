@@ -36,6 +36,15 @@ impl Surface {
         if compositor == 0 {
             return Err(CompositorError::Unavailable);
         }
+        let identity = platform::process::thread_security_context(compositor)
+            .map_err(|_| CompositorError::Unavailable)?;
+        if identity.provenance != mochios_signature_protocol::InstallProvenance::BuiltIn as u8
+            || identity.subject_key_id != [0; 32]
+            || identity.package_id.get(..identity.package_id_len as usize) != Some(b"org.mochios.compositor")
+            || identity.developer_id.get(..identity.developer_id_len as usize) != Some(b"org.mochios.system")
+        {
+            return Err(CompositorError::Unavailable);
+        }
         let endpoint = platform::ipc::create().map_err(|_| CompositorError::Unavailable)?;
         let mut request = [0u8; 24];
         put_u32(&mut request, 0, OP_CREATE_SURFACE);
@@ -102,6 +111,10 @@ impl Surface {
 
     pub(crate) const fn token(&self) -> u64 {
         self.token
+    }
+
+    pub(crate) fn accepts_events_from(&self, sender: u64) -> bool {
+        sender == self.compositor && platform::ipc::endpoint_alive(sender)
     }
 
     pub(crate) fn set_title(&self, title: &str) -> Result<(), CompositorError> {
