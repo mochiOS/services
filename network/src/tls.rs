@@ -18,6 +18,7 @@ use mochios_tls_client::{
 use crate::stack::NetworkStack;
 
 const TCP_CHUNK_LEN: usize = MAX_TCP_IO_LEN;
+const MAX_PROCESS_TLS_CONNECTIONS: usize = 4;
 
 pub(crate) struct TlsConnectSuccess {
     pub(crate) handle: u64,
@@ -38,6 +39,7 @@ pub(crate) struct TlsOperationError {
 struct TlsSession {
     handle: u64,
     owner: u64,
+    owner_process: u64,
     tcp_handle: u64,
     connection: TlsConnection,
     pending_plaintext: VecDeque<u8>,
@@ -52,6 +54,19 @@ pub(crate) struct TlsManager {
 }
 
 impl TlsManager {
+    pub(crate) fn reap(&mut self, stack: &mut NetworkStack) {
+        self.sessions.retain(|session| {
+            let live = platform::ipc::endpoint_owner_process(session.owner)
+                .is_ok_and(|process| process == session.owner_process)
+                && (platform::capability::check_thread(session.owner, "net.tls.connect") == Ok(1)
+                    || platform::capability::check_thread(session.owner, "net.http.request")
+                        == Ok(1));
+            if !live {
+                stack.tcp_discard(session.owner, session.tcp_handle);
+            }
+            live
+        });
+    }
     pub(crate) fn new() -> Self {
         #[cfg(not(feature = "test-web-pki"))]
         let roots = Ok(production_root_store());
@@ -101,7 +116,18 @@ impl TlsManager {
         started: u64,
         timeout: u64,
     ) -> Result<TlsConnectSuccess, TlsOperationError> {
-        if self.sessions.len() >= MAX_TLS_CONNECTIONS {
+        self.reap(stack);
+        let owner_process = platform::ipc::endpoint_owner_process(owner).map_err(|_| {
+            operation_error(mochi_user_syscall::EACCES, TlsFailure::PermissionDenied)
+        })?;
+        if self.sessions.len() >= MAX_TLS_CONNECTIONS
+            || self
+                .sessions
+                .iter()
+                .filter(|session| session.owner_process == owner_process)
+                .count()
+                >= MAX_PROCESS_TLS_CONNECTIONS
+        {
             return Err(operation_error(
                 mochios_net_device_protocol::STATUS_CONNECTION_LIMIT as i64 as u64,
                 TlsFailure::ConnectionLimit,
@@ -173,6 +199,13 @@ impl TlsManager {
                     )?;
                 }
                 TlsEvent::Established => {
+                    let owner_process =
+                        platform::ipc::endpoint_owner_process(owner).map_err(|_| {
+                            operation_error(
+                                mochi_user_syscall::EACCES,
+                                TlsFailure::PermissionDenied,
+                            )
+                        })?;
                     let certificate = connection.peer_certificate_info().map_err(tls_error)?;
                     let protocol_version = connection
                         .protocol_version()
@@ -188,6 +221,7 @@ impl TlsManager {
                     self.sessions.push(TlsSession {
                         handle,
                         owner,
+                        owner_process,
                         tcp_handle,
                         connection,
                         pending_plaintext: VecDeque::new(),

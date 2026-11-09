@@ -87,6 +87,7 @@ pub(crate) fn run() -> ! {
     loop {
         let now = platform::time::ticks().unwrap_or(0);
         http.reap(now);
+        tls.reap(&mut stack);
         stack.tick(now);
         for _ in 0..32 {
             match stack.poll_receive(now) {
