@@ -2,6 +2,7 @@
 //! This policy grants nothing: native creation still authorizes the prepared
 //! output separately, after every captured input has passed this check.
 use alloc::{string::String, vec::Vec};
+use core::cell::RefCell;
 use mochi_user_platform::{package, syscall};
 use mochios_posix_client::image_preparation::Source;
 use sha2::{Digest, Sha256};
@@ -26,6 +27,9 @@ pub(crate) struct Catalog {
     libraries: Vec<Image>,
     identity: ApplicationIdentity,
     manifest_digest: [u8; 32],
+    diagnostic_inputs: RefCell<Vec<(Vec<u8>, String, [u8; 32])>>,
+    diagnostic_version: String,
+    diagnostic_name: String,
 }
 
 fn denied() -> syscall::SysError {
@@ -246,6 +250,8 @@ impl Catalog {
         mut load: impl FnMut(&str) -> Result<VerifiedManifest, syscall::SysError>,
     ) -> Result<Self, syscall::SysError> {
         let architecture = manifest.package_architecture.clone();
+        let diagnostic_version = manifest.package_version.clone();
+        let diagnostic_name = manifest.package_name.clone();
         let mut packages = alloc::vec![PackageInput {
             manifest,
             identity: identity.clone()
@@ -296,6 +302,9 @@ impl Catalog {
             libraries,
             identity,
             manifest_digest,
+            diagnostic_inputs: RefCell::new(Vec::new()),
+            diagnostic_version,
+            diagnostic_name,
         })
     }
 
@@ -305,6 +314,19 @@ impl Catalog {
 
     pub(crate) fn manifest_digest(&self) -> [u8; 32] {
         self.manifest_digest
+    }
+
+    pub(crate) fn diagnostic_input(&self, name: &[u8]) -> Option<(String, [u8; 32])> {
+        if name.is_empty() { return Some((self.root.path.clone(), self.root.digest)); }
+        let inputs = self.diagnostic_inputs.try_borrow().ok()?;
+        let mut matches = inputs.iter().filter(|(needed, _, _)| needed == name);
+        let (_, path, digest) = matches.next()?;
+        if matches.next().is_some() { return None; }
+        Some((path.clone(), *digest))
+    }
+
+    pub(crate) fn diagnostic_package(&self) -> (&str, &str) {
+        (&self.diagnostic_name, &self.diagnostic_version)
     }
 
     /// Select a signed record using the actual open candidate, then verify the
@@ -326,6 +348,14 @@ impl Catalog {
             || Sha256::digest(bytes).as_slice() != selected.digest
         {
             return Err(denied());
+        }
+        if let Source::Dependency { needed, .. } = source
+            && let Ok(mut inputs) = self.diagnostic_inputs.try_borrow_mut()
+            && inputs.len() < 128
+            && !inputs.iter().any(|(old, path, _)| old == needed && path == &selected.path)
+            && inputs.try_reserve(1).is_ok()
+        {
+            inputs.push((needed.to_vec(), selected.path.clone(), selected.digest));
         }
         Ok(())
     }

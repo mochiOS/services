@@ -25,7 +25,7 @@ fn client_error(error: ClientError<mochi_user_syscall::SysError>) -> mochi_user_
     }
 }
 
-fn with_client<T>(
+pub(super) fn with_client<T>(
     operation: impl FnOnce(&PosixClient) -> Result<T, ClientError<mochi_user_syscall::SysError>>,
 ) -> Result<T, mochi_user_syscall::SysError> {
     let installed = POSIX_CLIENT

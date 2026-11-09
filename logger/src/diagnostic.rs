@@ -51,6 +51,7 @@ pub fn start() -> std::io::Result<()> {
         .spawn(|| {
             let mut backend = NativeBackend { file: None };
             let mut drain = Drain::new();
+            let mut crashes = crate::crash::Collector::new();
             let mut last_error = None;
             loop {
                 match drain.step(&mut backend) {
@@ -64,6 +65,7 @@ pub fn start() -> std::io::Result<()> {
                         }
                     }
                 }
+                crashes.tick();
                 // Bounded work per tick also leaves ordinary service logging
                 // responsive during recovery from a diagnostic burst.
                 let _ = platform::thread::sleep_milliseconds(250);

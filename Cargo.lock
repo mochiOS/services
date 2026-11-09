@@ -331,6 +331,7 @@ dependencies = [
  "mochios-signature-protocol",
  "mochios-user-database",
  "mochios-user-protocol",
+ "serde_json",
  "sha2",
  "zeroize",
 ]
@@ -1579,6 +1580,7 @@ dependencies = [
  "mochi-user-syscall",
  "mochios-posix-client",
  "mochios-posix-protocol",
+ "serde_json",
 ]
 
 [[package]]

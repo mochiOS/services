@@ -383,6 +383,13 @@ pub(crate) fn launch_captured(
                 process.0,
             )?;
         }
+        if let Err(error) = crate::image_diagnostics::publish(
+            process.0, 0, catalog, bytes, output,
+            prepared.as_ref().map(|image| image.loaded_objects).unwrap_or(&[]),
+            prepared.as_ref().and_then(|image| image.executable).map(|image| image.load_bias).unwrap_or(0),
+        ) {
+            platform::logln!("capability.service: launch diagnostic metadata unavailable: {:?}", error);
+        }
         platform::process::resume_handle(process.0)?;
         Ok(id)
     })();

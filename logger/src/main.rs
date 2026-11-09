@@ -5,6 +5,9 @@ use mochi_user_platform as platform;
 
 mod diagnostic;
 mod diagnostic_drain;
+mod crash;
+mod report_storage;
+mod image_records;
 mod early_diagnostics;
 mod posix_io;
 
@@ -183,6 +186,13 @@ fn main() {
         let len = (msg & 0xffff_ffff) as usize;
         if len == 0 || len > buf.len() {
             close_received_handles(&attached);
+            continue;
+        }
+        if buf[..len].starts_with(platform::diagnostic::IMAGE_METADATA_OPCODE) {
+            let result = image_records::receive(sender, &buf[..len], &attached);
+            close_received_handles(&attached);
+            let status = result.map(|_| 0u64).unwrap_or_else(|error| error.raw() as u64);
+            let _ = platform::ipc::reply(sender, &status.to_le_bytes());
             continue;
         }
         if buf[..len] == platform::logger::INSTALL_POSIX_ENDPOINT_OPCODE.to_le_bytes() {

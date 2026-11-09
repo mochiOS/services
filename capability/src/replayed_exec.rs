@@ -113,5 +113,14 @@ pub(crate) fn authorize(
         p::service::ExecutionClass::Unprivileged,
         &digest,
         mnu_abi::exec::EXEC_AUTHORIZATION_KIND_IMAGE_REPLACE,
-    )
+    )?;
+    if let Some(revision) = before.image.image_revision.checked_add(1) {
+        if let Err(error) = crate::image_diagnostics::publish(
+            session_process.0, revision, &catalog, source, prepared.bytes, prepared.loaded_objects,
+            prepared.executable.map(|image| image.load_bias).unwrap_or(0),
+        ) {
+            p::logln!("capability.service: exec diagnostic metadata unavailable: {:?}", error);
+        }
+    }
+    Ok(())
 }
