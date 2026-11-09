@@ -65,6 +65,7 @@ pub fn start() -> std::io::Result<()> {
                         }
                     }
                 }
+                let _ = crate::report_api::initialize();
                 crashes.tick();
                 // Bounded work per tick also leaves ordinary service logging
                 // responsive during recovery from a diagnostic burst.

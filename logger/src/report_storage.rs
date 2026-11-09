@@ -67,6 +67,28 @@ impl Directory {
                 .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.'))
     }
 
+    pub fn names(&self) -> Result<Vec<String>> {
+        let iterator = Owned(with_client(|c| c.open_at(
+            OpenAtBase::Directory(self.0.0),
+            wire::OPEN_READ | wire::OPEN_DIRECTORY | wire::OPEN_NOFOLLOW, 0, ".",
+        ))?);
+        let mut names = Vec::new();
+        let mut buffer = [0; 4096];
+        loop {
+            let count = p::handle::read(iterator.0.handle, &mut buffer)?;
+            if count == 0 { break; }
+            if count > buffer.len() { return Err(invalid()); }
+            for entry in mochios_posix_client::directory::DirectoryEntries::new(&buffer[..count]) {
+                let entry = entry.map_err(|_| invalid())?;
+                if Self::valid_name(entry.name) && entry.name.ends_with(".json") {
+                    if names.len() >= 4096 { return Err(invalid()); }
+                    names.push(entry.name.to_owned());
+                }
+            }
+        }
+        Ok(names)
+    }
+
     fn sync(&self) -> Result<()> {
         with_client(|c| c.fsync(self.0.0))
     }

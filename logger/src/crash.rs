@@ -57,6 +57,7 @@ impl Collector {
         let result = (|| {
             if let Some((name, bytes, next)) = pending.as_ref() {
                 Directory::open("crashes")?.store(name, bytes, 128)?;
+                crate::report_api::remember(name, bytes);
                 *cursor = *next;
                 *pending = None;
             }
@@ -124,6 +125,8 @@ impl Collector {
                         "address": format!("0x{:x}", record.address),
                     })) } else { None },
                     "image": image,
+                    "owner_uid": image.as_ref().and_then(|image| image["owner_uid"].as_u64()),
+                    "owner_generation": image.as_ref().and_then(|image| image["owner_generation"].as_u64()),
                     "image_metadata_available": image.is_some(),
                 });
                 let bytes = serde_json::to_vec_pretty(&body)
@@ -131,6 +134,7 @@ impl Collector {
                 *pending = Some((name, bytes, position + EXIT_RECORD_LEN as u64));
                 let (name, bytes, _) = pending.as_ref().unwrap();
                 reports.store(name, bytes, 128)?;
+                crate::report_api::remember(name, bytes);
                 // Commit one record only after publication and directory sync.
                 *cursor = position + EXIT_RECORD_LEN as u64;
                 *pending = None;

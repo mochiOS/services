@@ -118,6 +118,7 @@ pub(crate) fn authorize(
         if let Err(error) = crate::image_diagnostics::publish(
             session_process.0, revision, &catalog, source, prepared.bytes, prepared.loaded_objects,
             prepared.executable.map(|image| image.load_bias).unwrap_or(0),
+            credentials.real_uid,
         ) {
             p::logln!("capability.service: exec diagnostic metadata unavailable: {:?}", error);
         }

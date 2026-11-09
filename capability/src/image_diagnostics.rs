@@ -37,6 +37,7 @@ pub(crate) fn publish(
     output: &[u8],
     loaded: &[u8],
     bias: u64,
+    owner_uid: u32,
 ) -> Result<(), p::syscall::SysError> {
     let invalid = || p::syscall::SysError::from_raw(p::syscall::EIO as i64);
     let mut modules = Vec::new();
@@ -69,6 +70,8 @@ pub(crate) fn publish(
         "native_image_sha256":hex(&Sha256::digest(output)),
         "package_id":catalog.identity().package_id,
         "package_name":name, "package_version":version,
+        "owner_uid":owner_uid,
+        "owner_generation":crate::persistent_grant::account_generation(owner_uid).ok(),
         "modules":modules, "initial_modules_complete":complete,
         "later_dynamic_loads_captured":false});
     let bytes = serde_json::to_vec(&body).map_err(|_| invalid())?;

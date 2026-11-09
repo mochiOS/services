@@ -120,6 +120,8 @@ pub fn receive(
         "process_id":before.process_id, "image_revision":revision, "native_image_sha256":digest,
         "package_id":package, "modules":modules,
         "package_name":package_name, "package_version":package_version,
+        "owner_uid":body["owner_uid"].as_u64().filter(|uid| *uid <= u32::MAX as u64),
+        "owner_generation":body["owner_generation"].as_u64().filter(|generation| *generation != 0),
         "initial_modules_complete":body["initial_modules_complete"].as_bool().ok_or_else(denied)?,
         "later_dynamic_loads_captured":false});
     let bytes = serde_json::to_vec(&normalized).map_err(|_| denied())?;

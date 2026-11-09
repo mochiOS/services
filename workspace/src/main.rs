@@ -12,6 +12,7 @@ use mochios_workspace_protocol as protocol;
 
 mod error;
 mod session;
+mod crash_notifications;
 use error::{io_errno as errno, posix_errno as posix_client_errno};
 
 const CLIPBOARD_READ: &str = "clipboard.read";
@@ -238,6 +239,7 @@ impl WorkspaceService {
             | protocol::OP_FILE_PANEL_RETRY
             | protocol::OP_APPLICATION_REGISTER
             | protocol::OP_APPLICATION_ACTIVATE => "ipc.client",
+            protocol::OP_APPLICATION_LAUNCH => "process.spawn",
             protocol::OP_CONTROL_CENTER_CARD_REGISTER => "control-center.register",
             protocol::OP_CONTROL_CENTER_CARD_SNAPSHOT => "control-center.read",
             protocol::OP_NOTIFICATION_POST => "notification.send",
@@ -286,6 +288,23 @@ impl WorkspaceService {
             protocol::OP_FILE_PANEL_RETRY => self.file_panel_retry(sender, request),
             protocol::OP_APPLICATION_REGISTER => self.application_register(sender, request),
             protocol::OP_APPLICATION_ACTIVATE => self.application_activate(sender, request),
+            protocol::OP_APPLICATION_LAUNCH => {
+                let result = std::str::from_utf8(request.payload)
+                    .ok()
+                    .filter(|id| valid_identifier(id, protocol::MAX_BUNDLE_ID_LEN))
+                    .ok_or(platform::syscall::EINVAL)
+                    .and_then(|id| {
+                        installed_applications()
+                            .into_iter()
+                            .find(|app| app.bundle_id == id)
+                            .ok_or(platform::syscall::ENOENT)
+                    })
+                    .and_then(|app| launch_application(&app));
+                match result {
+                    Ok(pid) => self.reply_status(sender, request.request_id, 0, pid),
+                    Err(code) => self.reply_status(sender, request.request_id, code as i32, 0),
+                }
+            }
             protocol::OP_CONTROL_CENTER_CARD_REGISTER => {
                 self.control_center_card_register(sender, request)
             }
@@ -2085,9 +2104,6 @@ fn read_installed_application(root: &Path) -> Option<InstalledApplication> {
         return None;
     }
     let roles = parse_document_roles(&parse_string_array_field(&manifest, "document_roles"));
-    if roles == 0 {
-        return None;
-    }
     let mut associations = Vec::new();
     let mut seen = BTreeSet::new();
     for extension in parse_string_array_field(&manifest, "document_extensions") {
@@ -2114,7 +2130,7 @@ fn read_installed_application(root: &Path) -> Option<InstalledApplication> {
             });
         }
     }
-    (!associations.is_empty()).then_some(InstalledApplication {
+    Some(InstalledApplication {
         name,
         bundle_id,
         entry_path,
@@ -2558,6 +2574,9 @@ fn main() {
         "workspace.service: ready associations={}",
         service.associations.len()
     );
+    if let Err(error) = crash_notifications::start() {
+        platform::logln!("workspace.service: crash watcher unavailable: {error}");
+    }
     let mut buffer = vec![0u8; protocol::MAX_MESSAGE_LEN];
     loop {
         let mut handles = platform::ipc::IpcObjectHandles::default();

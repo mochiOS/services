@@ -15,6 +15,7 @@ requires = [
     "ipc.client",
     "ipc.server",
     "kernel.debug",
+    "process.inspect",
     "system.random.read",
     "system.time.read",
 ]

@@ -8,6 +8,7 @@ mod diagnostic_drain;
 mod crash;
 mod report_storage;
 mod image_records;
+mod report_api;
 mod early_diagnostics;
 mod posix_io;
 
@@ -193,6 +194,11 @@ fn main() {
             close_received_handles(&attached);
             let status = result.map(|_| 0u64).unwrap_or_else(|error| error.raw() as u64);
             let _ = platform::ipc::reply(sender, &status.to_le_bytes());
+            continue;
+        }
+        if report_api::recognizes(&buf[..len]) {
+            report_api::reply(sender, &buf[..len], &attached);
+            close_received_handles(&attached);
             continue;
         }
         if buf[..len] == platform::logger::INSTALL_POSIX_ENDPOINT_OPCODE.to_le_bytes() {
