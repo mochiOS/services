@@ -38,14 +38,19 @@ pub(crate) fn run() -> ! {
             unavailable(ready, errno, authority, streams, dns_objects)
         }
     };
-    let xid = platform::service_ready::generate_token()
-        .map(|value| value as u32)
-        .unwrap_or(0x4d4f_4348);
+    let xid = match platform::service_ready::generate_token() {
+        Ok(value) => value as u32,
+        Err(error) => {
+            platform::logln!("network.service: DHCP entropy unavailable");
+            unavailable(ready, error.raw() as u64, authority, streams, dns_objects)
+        }
+    };
     let mut stack = match NetworkStack::new(driver, xid) {
         Ok(stack) => stack,
         Err(errno) => {
             let _ = platform::logger::write_status_fmt(format_args!(
-                "network.service: interface query failed errno={}\n", errno
+                "network.service: interface query failed errno={}\n",
+                errno
             ));
             unavailable(ready, errno, authority, streams, dns_objects)
         }
@@ -74,7 +79,8 @@ pub(crate) fn run() -> ! {
     );
     if let Err(errno) = stack.start(now) {
         let _ = platform::logger::write_status_fmt(format_args!(
-            "network.service: DHCP startup deferred errno={}\n", errno
+            "network.service: DHCP startup deferred errno={}\n",
+            errno
         ));
     }
     notify_ready(ready, 0, &authority);
@@ -191,7 +197,20 @@ fn handle(
         }
         Opcode::TcpConnect => {
             let (request_id, timeout, port, host) = decode_tcp_connect(request).ok()?;
-            let random = random_value(sender, request_id, now);
+            let random = match platform::service_ready::generate_token() {
+                Ok(value) => value,
+                Err(error) => {
+                    return encode_tcp_connect_result(
+                        request_id,
+                        crate::status::failure_status(error.raw() as u64),
+                        0,
+                        [0; 4],
+                        port,
+                        reply,
+                    )
+                    .ok();
+                }
+            };
             let address = match parse_ipv4_literal(host) {
                 Some(address) => Ok(address),
                 None => stack
@@ -460,12 +479,6 @@ fn handle(
         }
         _ => None,
     }
-}
-
-fn random_value(sender: u64, request_id: u64, now: u64) -> u64 {
-    platform::service_ready::generate_token().unwrap_or_else(|_| {
-        sender.rotate_left(13) ^ request_id.rotate_left(31) ^ now.rotate_left(47)
-    })
 }
 
 fn authorized(sender: u64, opcode: Opcode) -> bool {
