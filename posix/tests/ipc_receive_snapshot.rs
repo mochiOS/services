@@ -28,7 +28,8 @@ thread_local!{
 #[derive(Debug)]struct Resource;
 impl Drop for Resource{fn drop(&mut self){assert!(MAILBOXES.try_lock().is_ok(),"resource destructor held mailbox lock");}}
 #[derive(Debug)]struct ObjectHandleEntry(Arc<Resource>);
-#[derive(Clone,Copy)]struct IpcEndpoint{thread_id:u64,slot:u16,generation:u64}
+#[derive(Clone,Copy,Debug,PartialEq,Eq)]struct IpcEndpoint{thread_id:u64,slot:u16,generation:u64}
+fn endpoint_record_from_handle(handle:u64)->Option<IpcEndpoint>{ (handle == 41 || handle == 42).then_some(IpcEndpoint{thread_id:19,slot:1,generation:4}) }
 fn endpoint()->IpcEndpoint{IpcEndpoint{thread_id:7,slot:0,generation:3}}
 fn endpoint_is_valid(e:IpcEndpoint)->bool{
     if e.thread_id==19{return PEER_VALID.get()&&e.slot==1&&e.generation==4;}
