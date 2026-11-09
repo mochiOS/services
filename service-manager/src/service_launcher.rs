@@ -1,5 +1,9 @@
 use mochi_user_platform as platform;
 
+#[cfg(feature = "native-unix-extension-probe")]
+#[path = "../../posix/tests/support/native_unix_extension_launcher.rs"]
+pub(super) mod native_unix_extension_launcher;
+
 use crate::launch_arguments::encode_native_launch;
 use crate::native_process::NativeProcess;
 use crate::service_config::{

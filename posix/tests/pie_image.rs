@@ -1432,3 +1432,31 @@ fn search_metadata_validates_string_offsets_duplicates_and_runpath_presence() {
     w64(&mut bytes, 0x1098, 8);
     assert!(matches!(Pie::parse_object(&bytes), Err(Error::Invalid)));
 }
+
+#[test]
+fn resident_external_imports_are_explicit_bounded_and_cannot_override_group_definitions() {
+    use mochios_posix_client::pie::link_scope::{Object, Scope};
+    fn imported(name: &[u8]) -> Option<(u64, u64)> {
+        (name == b"symbol").then_some((0x18000000, 8))
+    }
+    fn invalid(_: &[u8]) -> Option<(u64, u64)> { Some((0xffff800000001000, 8)) }
+    for (defined, visibility) in [(true, 0), (false, 0), (false, 2), (false, 3)] {
+        let mut source = symbol_image(1, false, false);
+        source[0x111d] = visibility;
+        if !defined { w16(&mut source, 0x111e, 0); }
+        let image = Pie::parse_object(&source).unwrap();
+        let objects = [Object { name: b"", image: &image, bias: 0x20000000 }];
+        let mut order = [0];
+        let scope = Scope::new(&objects, &mut order).unwrap();
+        let mut output = vec![0; image.output_length().unwrap()];
+        if !defined { assert_eq!(scope.write(0, &mut output), Err(Error::Unsupported)); }
+        let scope = scope.with_external_lookup(imported);
+        if defined || visibility == 0 {
+            scope.write(0, &mut output).unwrap();
+            assert_eq!(loaded_word(&output, 0x20001300), if defined { 0x20001255 } else { 0x18000055 });
+        } else { assert_eq!(scope.write(0, &mut output), Err(Error::Unsupported)); }
+        if !defined && visibility == 0 {
+            assert_eq!(scope.with_external_lookup(invalid).write(0, &mut output), Err(Error::Invalid));
+        }
+    }
+}

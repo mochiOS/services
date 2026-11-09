@@ -916,6 +916,9 @@ impl BootstrapOperations for Runtime {
                     "service-manager.service: posix.service ready endpoint={}",
                     endpoint
                 ));
+                #[cfg(feature = "native-unix-extension-probe")]
+                service_launcher::native_unix_extension_launcher::run(self.logger_endpoint, endpoint);
+                #[cfg(not(feature = "native-unix-extension-probe"))]
                 true
             }
             Err(error) => {
