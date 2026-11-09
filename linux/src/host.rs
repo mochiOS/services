@@ -53,6 +53,7 @@ pub(crate) struct PortalEntry {
 
 pub(crate) struct HostClient {
     agent: u64,
+    peer: platform::execution_peer::MeasuredPeer,
     next_request_id: u64,
     stage_buffer: Option<SharedStageBuffer>,
 }
@@ -64,11 +65,24 @@ impl HostClient {
         if agent == 0 {
             return Err(HostError::Unavailable);
         }
+        let peer = trusted_agent(agent)?;
         Ok(Self {
             agent,
+            peer,
             next_request_id: 1,
             stage_buffer: None,
         })
+    }
+
+    fn current(&self) -> Result<(), HostError> {
+        let peer = trusted_agent(self.agent)?;
+        if peer.context != self.peer.context
+            || peer.image != self.peer.image
+            || platform::handle::same_object(peer.process.0, self.peer.process.0) != Ok(true)
+        {
+            return Err(HostError::Unavailable);
+        }
+        Ok(())
     }
 
     pub(crate) fn launch(&mut self, instance: u64, application: &str) -> Result<(), HostError> {
@@ -446,6 +460,7 @@ impl HostClient {
     }
 
     fn ensure_stage_buffer(&mut self) -> Result<(), HostError> {
+        self.current()?;
         if self.stage_buffer.is_some() {
             return Ok(());
         }
@@ -465,10 +480,13 @@ impl HostClient {
         request[16..24].copy_from_slice(&offset.to_le_bytes());
         request[24..32].copy_from_slice(&(length as u64).to_le_bytes());
         let mut reply = [0u8; 4];
+        self.current()?;
         let raw = platform::ipc::call(self.agent, &request, &mut reply)
             .map_err(|_| HostError::Unavailable)?;
+        self.current()?;
         let reply_length = (raw & 0xffff_ffff) as usize;
-        if reply_length != reply.len() || i32::from_le_bytes(reply) != 0 {
+        if raw >> 32 != self.agent || reply_length != reply.len() || i32::from_le_bytes(reply) != 0
+        {
             return Err(HostError::Unavailable);
         }
         Ok(())
@@ -600,8 +618,13 @@ impl HostClient {
         );
         let encoded = encode_to_string(&request).map_err(|_| HostError::InvalidReply)?;
         let mut reply = [0u8; MAX_IPC_MESSAGE_LEN];
+        self.current()?;
         let raw = platform::ipc::call(self.agent, encoded.as_bytes(), &mut reply)
             .map_err(|_| HostError::Unavailable)?;
+        self.current()?;
+        if raw >> 32 != self.agent {
+            return Err(HostError::InvalidReply);
+        }
         let length = (raw & 0xffff_ffff) as usize;
         let response = decode_line(reply.get(..length).ok_or(HostError::InvalidReply)?)
             .map_err(|_| HostError::InvalidReply)?;
@@ -623,6 +646,23 @@ impl HostClient {
         self.next_request_id = current.wrapping_add(1).max(1);
         current
     }
+}
+
+fn trusted_agent(endpoint: u64) -> Result<platform::execution_peer::MeasuredPeer, HostError> {
+    let peer = platform::execution_peer::capture(endpoint).map_err(|_| HostError::Unavailable)?;
+    let context = &peer.context;
+    if context.provenance != 1
+        || context.subject_key_id != [0; 32]
+        || context.package_id.get(..context.package_id_len as usize)
+            != Some(b"org.mochios.mboot-agent")
+        || context
+            .developer_id
+            .get(..context.developer_id_len as usize)
+            != Some(b"org.mochios.system")
+    {
+        return Err(HostError::Unavailable);
+    }
+    Ok(peer)
 }
 
 pub(crate) fn decode_frame(encoded: &[u8], expected: usize) -> Result<Vec<u8>, HostError> {

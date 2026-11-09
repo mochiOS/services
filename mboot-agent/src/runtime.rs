@@ -115,17 +115,16 @@ fn receive_ipc_request(
     }
     let mut request = [0u8; IPC_MESSAGE_LEN];
     let mut attachments = Attachments::default();
-    let received = match platform::ipc::try_wait_object_handles(
-        &mut request, &mut attachments.handles,
-    ) {
-        Ok(received) => received,
-        Err(error)
-            if error.native_error() == Some(mochi_user_syscall::NativeError::NotReady) =>
-        {
-            return
-        }
-        Err(_) => return,
-    };
+    let received =
+        match platform::ipc::try_wait_object_handles(&mut request, &mut attachments.handles) {
+            Ok(received) => received,
+            Err(error)
+                if error.native_error() == Some(mochi_user_syscall::NativeError::NotReady) =>
+            {
+                return;
+            }
+            Err(_) => return,
+        };
     let sender = received >> 32;
     let length = (received & 0xffff_ffff) as usize;
     let Some(message) = request.get(..length) else {
@@ -171,6 +170,10 @@ fn receive_ipc_request(
         }
     };
     let client_request_id = decoded.request_id;
+    if decoded.known_command().is_some_and(is_linux_command) && !linux_service_owns_sender(sender) {
+        reply_protocol_error(sender, client_request_id, ErrorCode::PermissionDenied);
+        return;
+    }
     match decoded.known_command() {
         Some(KnownCommand::LinuxStageChunk) => {
             *streaming_stage = true;
@@ -179,10 +182,6 @@ fn receive_ipc_request(
             *streaming_stage = false;
         }
         _ => {}
-    }
-    if decoded.known_command().is_some_and(is_linux_command) && !linux_service_owns_sender(sender) {
-        reply_protocol_error(sender, client_request_id, ErrorCode::PermissionDenied);
-        return;
     }
     if decoded.known_command().is_some_and(is_wifi_command)
         && platform::capability::check_thread(sender, "settings.write") != Ok(1)
@@ -220,7 +219,10 @@ fn handle_shared_stage_ipc(
 ) -> bool {
     if message.starts_with(&platform::memory_object::ReadOnlyOffer::MAGIC) {
         if let Ok(received) = SharedStageMapping::receive(
-            sender, linux_service_owns_sender(sender), message, attachments,
+            sender,
+            linux_service_owns_sender(sender),
+            message,
+            attachments,
             mboot_protocol::MAX_BULK_STAGE_BYTES as u64,
         ) {
             *mapping = Some(received);
@@ -308,9 +310,17 @@ fn is_linux_command(command: KnownCommand) -> bool {
 }
 
 fn linux_service_owns_sender(sender: u64) -> bool {
-    let owner = platform::ipc::endpoint_owner_process(sender).ok();
-    let linux_service = platform::process::find_by_name("linux.service").ok();
-    owner.is_some() && owner == linux_service
+    let Ok(peer) = platform::execution_peer::capture(sender) else {
+        return false;
+    };
+    let context = &peer.context;
+    context.provenance == 1
+        && context.subject_key_id == [0; 32]
+        && context.package_id.get(..context.package_id_len as usize) == Some(b"org.mochios.linux")
+        && context
+            .developer_id
+            .get(..context.developer_id_len as usize)
+            == Some(b"org.mochios.system")
 }
 
 fn complete_developer_request(
