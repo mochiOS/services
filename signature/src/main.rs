@@ -21,6 +21,7 @@ const MAX_PACKAGE_LEN: usize = 256 * 1024 * 1024;
 const IPC_BUFFER_LEN: usize = 4128;
 const PACKAGE_VERIFY_CAPABILITY: &str = "package.install";
 const DATABASE_UPDATE_CAPABILITY: &str = "signature.db.write";
+const TRANSFER_LIFETIME_NS: u64 = 120_000_000_000;
 
 include!(concat!(env!("OUT_DIR"), "/trust_anchor.rs"));
 
@@ -52,9 +53,21 @@ struct Verification {
 struct Transfer {
     sender: u64,
     request_id: u64,
+    deadline: u64,
     expected_len: usize,
     expected_digest: [u8; 32],
     bytes: Vec<u8>,
+}
+
+impl Transfer {
+    fn matches(&self, sender: u64, request_id: u64) -> bool {
+        self.sender == sender && self.request_id == request_id
+    }
+    fn current(&self) -> bool {
+        platform::time::monotonic_nanoseconds().is_ok_and(|now| now < self.deadline)
+            && platform::ipc::endpoint_alive(self.sender)
+            && platform::capability::check_thread(self.sender, PACKAGE_VERIFY_CAPABILITY) == Ok(1)
+    }
 }
 
 fn diagnostic(message: &str) {
@@ -541,7 +554,9 @@ fn reply_error(sender: u64, request_id: u64, status: u64) {
 fn endpoint_reply_status(result: Result<(), u64>) -> u64 {
     match result {
         Ok(()) => 0,
-        Err(error) => i64::from(mochios_posix_protocol::status::normalize_failure(error as i64)) as u64,
+        Err(error) => i64::from(mochios_posix_protocol::status::normalize_failure(
+            error as i64,
+        )) as u64,
     }
 }
 
@@ -599,10 +614,26 @@ fn run_server() -> ! {
         }
     };
     let mut database = None;
+    let wait_endpoint =
+        platform::ipc::create_handle().unwrap_or_else(|_| platform::process::exit(1));
     platform::logln!("signature.service: ready");
     let mut transfer: Option<Transfer> = None;
     let mut buf = [0u8; IPC_BUFFER_LEN];
     loop {
+        if transfer.as_ref().is_some_and(|active| !active.current()) {
+            transfer = None;
+        }
+        if let Some(active) = &transfer {
+            let mut items = [platform::syscall::HandleWaitItem {
+                handle: wait_endpoint,
+                interests: platform::syscall::HANDLE_SIGNAL_READABLE,
+                ..Default::default()
+            }];
+            if platform::process::wait_many(&mut items, active.deadline).is_err() {
+                platform::thread::yield_now();
+                continue;
+            }
+        }
         let mut attached = platform::ipc::IpcObjectHandles::default();
         let msg = match platform::ipc::wait_object_handles(endpoint, &mut buf, &mut attached) {
             Ok(msg) => msg,
@@ -612,6 +643,10 @@ fn run_server() -> ! {
             }
         };
         let sender = msg >> 32;
+        // Blocking receive cannot preserve an expired or replaced owner.
+        if transfer.as_ref().is_some_and(|active| !active.current()) {
+            transfer = None;
+        }
         let len = (msg & 0xffff_ffff) as usize;
         let request = &buf[..len.min(buf.len())];
         if request == mochios_signature_protocol::INSTALL_POSIX_ENDPOINT_OPCODE.to_le_bytes() {
@@ -650,6 +685,10 @@ fn run_server() -> ! {
         match decode_opcode(request) {
             Ok(Opcode::VerifyBegin) => match VerifyBegin::decode(request) {
                 Ok(begin) => {
+                    if transfer.is_some() {
+                        reply_error(sender, begin.request_id, mochi_user_syscall::EAGAIN);
+                        continue;
+                    }
                     let database_current = database.as_ref().is_some_and(|database| {
                         platform::time::utc_seconds()
                             .is_ok_and(|now_utc| database.is_current(now_utc))
@@ -667,6 +706,13 @@ fn run_server() -> ! {
                         );
                         continue;
                     }
+                    let Some(deadline) = platform::time::monotonic_nanoseconds()
+                        .ok()
+                        .and_then(|now| now.checked_add(TRANSFER_LIFETIME_NS))
+                    else {
+                        reply_error(sender, begin.request_id, mochi_user_syscall::EIO);
+                        continue;
+                    };
                     let mut bytes = Vec::new();
                     if bytes.try_reserve_exact(expected_len).is_err() {
                         reply_error(sender, begin.request_id, mochi_user_syscall::ENOMEM);
@@ -675,6 +721,7 @@ fn run_server() -> ! {
                     transfer = Some(Transfer {
                         sender,
                         request_id: begin.request_id,
+                        deadline,
                         expected_len,
                         expected_digest: begin.package_digest,
                         bytes,
@@ -689,10 +736,12 @@ fn run_server() -> ! {
                         reply_error(sender, chunk.request_id, mochi_user_syscall::EINVAL);
                         continue;
                     };
+                    if !active.matches(sender, chunk.request_id) {
+                        reply_error(sender, chunk.request_id, mochi_user_syscall::EACCES);
+                        continue;
+                    }
                     let offset = usize::try_from(chunk.offset).unwrap_or(usize::MAX);
-                    let valid = active.sender == sender
-                        && active.request_id == chunk.request_id
-                        && offset == active.bytes.len()
+                    let valid = offset == active.bytes.len()
                         && active
                             .bytes
                             .len()
@@ -710,6 +759,13 @@ fn run_server() -> ! {
             },
             Ok(Opcode::VerifyFinish) => match VerifyFinish::decode(request) {
                 Ok(finish) => {
+                    if !transfer
+                        .as_ref()
+                        .is_some_and(|active| active.matches(sender, finish.request_id))
+                    {
+                        reply_error(sender, finish.request_id, mochi_user_syscall::EACCES);
+                        continue;
+                    }
                     let Some(active) = transfer.take() else {
                         reply_error(sender, finish.request_id, mochi_user_syscall::EINVAL);
                         continue;
