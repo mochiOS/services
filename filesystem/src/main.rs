@@ -97,7 +97,11 @@ fn main() {
         platform::process::exit(1);
     }
     platform::logln!("filesystem.service: ready");
-    eprintln!("filesystem.service: native System mounted at LBA {system_first_lba} (ready)");
+    // POSIX standard streams are not installed yet. Logging must not depend
+    // on raw debug-console authority or panic after publishing readiness.
+    let _ = platform::logger::write_status_fmt(format_args!(
+        "filesystem.service: native System mounted at LBA {system_first_lba} (ready)\n"
+    ));
     let mut request_bytes = vec![0u8; protocol::MAX_MESSAGE_LEN];
     let mut response_bytes = vec![0u8; protocol::MAX_MESSAGE_LEN];
     let mut provider_buffer = filesystem_service::provider_buffer::ProviderReadBuffer::default();
