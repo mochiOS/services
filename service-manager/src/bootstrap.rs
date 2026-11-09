@@ -1,3 +1,9 @@
+// Bootstrap has no guaranteed stderr descriptor. Status logging must remain
+// fallible and use Logger throughout startup, including its error paths.
+macro_rules! boot_status {
+    ($($arguments:tt)*) => { boot_status(format_args!($($arguments)*)) };
+}
+
 use alloc::collections::VecDeque;
 use mochi_user_platform as platform;
 
@@ -159,7 +165,7 @@ impl Runtime {
                 binder_pid,
             )
             .map_err(|error| {
-                eprintln!(
+                boot_status!(
                     "service-manager.service: session identity resolution failed: {:?}",
                     error
                 );
@@ -291,7 +297,7 @@ impl Runtime {
                 let _ = platform::handle::close(endpoint);
                 match installed {
                     Ok(()) => {
-                        eprintln!("service-manager.service: network endpoint handed to POSIX");
+                        boot_status!("service-manager.service: network endpoint handed to POSIX");
                         platform::logln!("service-manager.service: network endpoint handed to POSIX");
                     }
                     Err(status) => platform::logln!(
@@ -309,7 +315,7 @@ impl Runtime {
             Ok(()) => {
                 platform::logln!("service-manager.service: {} ready", service.name());
                 if service == ReadyService::Binder {
-                    eprintln!("service-manager.service: Binder.app ready");
+                    boot_status!("service-manager.service: Binder.app ready");
                     let _ = platform::logger::flush_pending();
                 }
                 true
@@ -319,7 +325,7 @@ impl Runtime {
                     process_target
                 {
                     if let Ok(usage) = platform::process::execution_usage(Some(handle)) {
-                        eprintln!(
+                        boot_status!(
                             "service-manager.service: {} startup CPU user_ticks={} kernel_ticks={} ticks_per_second={}",
                             service.name(),
                             usage.user_ticks,
@@ -434,14 +440,14 @@ impl BootstrapOperations for Runtime {
             return None;
         }
         let target = self.ready.as_ref()?.target(ReadyService::SecureUi);
-        eprintln!("service-manager.service: creating secure-ui.service native process");
+        boot_status!("service-manager.service: creating secure-ui.service native process");
         match service_launcher::spawn_secure_ui(self.logger_endpoint, target, None, endpoint) {
             Ok(process) => {
-                eprintln!("service-manager.service: secure-ui.service native process created");
+                boot_status!("service-manager.service: secure-ui.service native process created");
                 Some(process)
             }
             Err(error) => {
-                eprintln!(
+                boot_status!(
                     "service-manager.service: secure-ui.service native spawn failed errno={}",
                     errno(error)
                 );
@@ -453,11 +459,11 @@ impl BootstrapOperations for Runtime {
     fn spawn_update(&mut self) -> Option<Self::UpdateProcess> {
         match service_launcher::spawn_update_service(self.logger_endpoint, self.posix_endpoint?) {
             Ok(process) => {
-                eprintln!("service-manager.service: update.service native process created");
+                boot_status!("service-manager.service: update.service native process created");
                 Some(process)
             }
             Err(error) => {
-                eprintln!(
+                boot_status!(
                     "service-manager.service: update.service native spawn failed errno={}",
                     errno(error)
                 );
@@ -474,11 +480,11 @@ impl BootstrapOperations for Runtime {
         let target = self.ready.as_ref()?.target(ReadyService::User);
         match service_launcher::spawn_user_service(self.logger_endpoint, target, endpoint) {
             Ok(process) => {
-                eprintln!("service-manager.service: user.service native process created");
+                boot_status!("service-manager.service: user.service native process created");
                 Some(process)
             }
             Err(error) => {
-                eprintln!(
+                boot_status!(
                     "service-manager.service: user.service native spawn failed errno={}",
                     errno(error)
                 );
@@ -495,11 +501,11 @@ impl BootstrapOperations for Runtime {
         let target = self.ready.as_ref()?.target(ReadyService::Network);
         match service_launcher::spawn_network_service(self.logger_endpoint, target, endpoint) {
             Ok(process) => {
-                eprintln!("service-manager.service: network.service native process created");
+                boot_status!("service-manager.service: network.service native process created");
                 Some(process)
             }
             Err(error) => {
-                eprintln!(
+                boot_status!(
                     "service-manager.service: network.service native spawn failed errno={}",
                     errno(error)
                 );
@@ -512,11 +518,11 @@ impl BootstrapOperations for Runtime {
         let endpoint = self.posix_endpoint?;
         match service_launcher::spawn_compositor_service(self.logger_endpoint, endpoint) {
             Ok(process) => {
-                eprintln!("service-manager.service: compositor.service native process created");
+                boot_status!("service-manager.service: compositor.service native process created");
                 Some(process)
             }
             Err(error) => {
-                eprintln!(
+                boot_status!(
                     "service-manager.service: compositor.service native spawn failed errno={}",
                     errno(error)
                 );
@@ -539,7 +545,7 @@ impl BootstrapOperations for Runtime {
                 Some(process)
             }
             Err(error) => {
-                eprintln!(
+                boot_status!(
                     "service-manager.service: display.driver native spawn failed errno={}",
                     errno(error)
                 );
@@ -562,7 +568,7 @@ impl BootstrapOperations for Runtime {
                 Some(process)
             }
             Err(error) => {
-                eprintln!(
+                boot_status!(
                     "service-manager.service: input.service native spawn failed errno={}",
                     errno(error)
                 );
@@ -587,7 +593,7 @@ impl BootstrapOperations for Runtime {
                 Some(process)
             }
             Err(error) => {
-                eprintln!(
+                boot_status!(
                     "service-manager.service: drivers.service spawn failed errno={}",
                     errno(error)
                 );
@@ -603,7 +609,7 @@ impl BootstrapOperations for Runtime {
             .wait_for_hello(process.watch_target())
         {
             Ok(_) => {
-                eprintln!("service-manager.service: drivers.service native HELLO received");
+                boot_status!("service-manager.service: drivers.service native HELLO received");
                 platform::logln!("service-manager.service: drivers.service hello received");
                 true
             }
@@ -633,7 +639,7 @@ impl BootstrapOperations for Runtime {
             Ok(process) => {
                 let process_id = process.process_id();
                 self.mboot_agent = Some((process, token));
-                eprintln!("service-manager.service: mboot-agent.service native process created");
+                boot_status!("service-manager.service: mboot-agent.service native process created");
                 platform::logln!(
                     "service-manager.service: mboot-agent.service spawned pid={}",
                     process_id
@@ -641,7 +647,7 @@ impl BootstrapOperations for Runtime {
                 Some(process_id)
             }
             Err(error) => {
-                eprintln!(
+                boot_status!(
                     "service-manager.service: mboot-agent.service native creation failed errno={}",
                     errno(error)
                 );
@@ -830,7 +836,7 @@ impl BootstrapOperations for Runtime {
     fn wait_display_ready(&mut self, process: &Self::DisplayProcess) -> bool {
         let ready = self.wait_ready(ReadyService::Display, process.watch_target());
         if ready {
-            eprintln!("service-manager.service: display.driver native READY received");
+            boot_status!("service-manager.service: display.driver native READY received");
         }
         ready
     }
@@ -956,7 +962,7 @@ impl BootstrapOperations for Runtime {
                 return false;
             }
             _ => {
-                eprintln!("service-manager.service: user endpoint missing");
+                boot_status!("service-manager.service: user endpoint missing");
                 return false;
             }
         };
@@ -980,11 +986,11 @@ impl BootstrapOperations for Runtime {
         let _ = platform::handle::close(endpoint);
         match result {
             Ok(()) => {
-                eprintln!("service-manager.service: user endpoint handed to POSIX");
+                boot_status!("service-manager.service: user endpoint handed to POSIX");
                 true
             }
             Err(status) => {
-                eprintln!("service-manager.service: user endpoint handoff failed status={status}");
+                boot_status!("service-manager.service: user endpoint handoff failed status={status}");
                 false
             }
         }
@@ -1039,11 +1045,11 @@ impl BootstrapOperations for Runtime {
             .wait_for_complete(process.watch_target(), handshake, &mut self.deferred_requests)
         {
             Ok(()) => {
-                eprintln!("service-manager.service: driver discovery complete");
+                boot_status!("service-manager.service: driver discovery complete");
                 true
             }
             Err(error) => {
-                eprintln!(
+                boot_status!(
                     "service-manager.service: driver discovery failed error={:?}",
                     error
                 );
@@ -1057,9 +1063,9 @@ impl BootstrapOperations for Runtime {
     }
 
     fn installation_required(&self) -> bool {
-        eprintln!("service-manager.service: checking installation state");
+        boot_status!("service-manager.service: checking installation state");
         let required = std::fs::metadata("/system/.installed").is_err();
-        eprintln!("service-manager.service: installation required={required}");
+        boot_status!("service-manager.service: installation required={required}");
         required
     }
 }
@@ -1073,7 +1079,7 @@ pub(crate) fn run() -> ! {
             (outcome, Some(runtime))
         }
         Err(error) => {
-            eprintln!(
+            boot_status!(
                 "service-manager.service: driver controller create failed error={:?}",
                 error
             );
@@ -1168,12 +1174,6 @@ fn log_ready_error(service: ReadyService, error: ReadyError) {
         service.name(),
         error
     ));
-    // Startup failures must remain visible before logger persistence is ready.
-    eprintln!(
-        "service-manager.service: {} readiness failed: {:?}",
-        service.name(),
-        error
-    );
 }
 
 fn resident(
@@ -1203,7 +1203,7 @@ fn resident(
                 binder_thread,
             )
             .map_err(|error| {
-                eprintln!(
+                boot_status!(
                     "service-manager.service: session identity resolution failed: {:?}",
                     error
                 );
@@ -1213,7 +1213,7 @@ fn resident(
     let mut request_bytes = [0u8; 1024];
     let mut consent_session = crate::consent_session::Epoch::default();
     let initial_context = active_session.map_or((1, false), |session| (session.id, true));
-    eprintln!("service-manager.service: publishing desktop session");
+    boot_status!("service-manager.service: publishing desktop session");
     let initial_publication = (|| {
         if let Some(session) = active_session {
             runtime.as_ref().ok_or_else(|| mochi_user_syscall::SysError::from_raw(-3))?
@@ -1221,7 +1221,7 @@ fn resident(
         }
         consent_session.native(initial_context.0, initial_context.1)
     })();
-    eprintln!("service-manager.service: desktop session publication finished success={}", initial_publication.is_ok());
+    boot_status!("service-manager.service: desktop session publication finished success={}", initial_publication.is_ok());
     let mut presenter_prewarm_allowed = initial_publication.is_ok() && active_session.is_some();
     let mut ime_warmup_pending = presenter_prewarm_allowed;
     if let Err(error) = initial_publication {
@@ -1256,7 +1256,7 @@ fn resident(
         }
     }
     let mut pending_logout: Option<PendingLogout> = None;
-    eprintln!("service-manager.service: resident requests enabled");
+    boot_status!("service-manager.service: resident requests enabled");
     loop {
         service_launcher::retry_failed_launch_cleanup();
         if let Some(runtime) = runtime.as_mut() {
