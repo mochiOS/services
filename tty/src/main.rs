@@ -66,10 +66,22 @@ fn find_input_service() -> Option<u64> {
     None
 }
 
-fn subscribe_input_events(tty_endpoint: u64) -> bool {
-    let Some(input_tid) = find_input_service() else {
-        return false;
-    };
+fn trusted_peer(endpoint: u64, package: &[u8]) -> Option<platform::execution_peer::MeasuredPeer> {
+    let peer = platform::execution_peer::capture(endpoint).ok()?;
+    let context = &peer.context;
+    (context.provenance == 1
+        && context.subject_key_id == [0; 32]
+        && context.package_id.get(..context.package_id_len as usize) == Some(package)
+        && context
+            .developer_id
+            .get(..context.developer_id_len as usize)
+            == Some(b"org.mochios.system"))
+    .then_some(peer)
+}
+
+fn subscribe_input_events(tty_endpoint: u64) -> Option<u64> {
+    let input_tid = find_input_service()?;
+    let peer = trusted_peer(input_tid, b"org.mochios.input")?;
     let subscribe = platform::input::SubscribeRequest {
         opcode: platform::input::SUBSCRIBE_OPCODE,
         reserved: 0,
@@ -77,11 +89,20 @@ fn subscribe_input_events(tty_endpoint: u64) -> bool {
     };
     let subscribe_reply = input_subscribe_reply_buf();
     subscribe_reply.fill(0);
-    matches!(platform::ipc::call(
+    let message = platform::ipc::call(
         input_tid,
         platform::input::bytes_of(&subscribe),
         subscribe_reply,
-    ), Ok(message) if message as u32 == 1 && subscribe_reply[0] == 0)
+    )
+    .ok()?;
+    let current = trusted_peer(input_tid, b"org.mochios.input")?;
+    (message >> 32 == input_tid
+        && message as u32 == 1
+        && subscribe_reply[0] == 0
+        && current.context == peer.context
+        && current.image == peer.image
+        && platform::handle::same_object(current.process.0, peer.process.0) == Ok(true))
+    .then_some(input_tid)
 }
 
 fn main() {
@@ -94,9 +115,12 @@ fn main() {
     };
     let logger_endpoint = platform::logger::endpoint().unwrap_or(0);
 
-    while !subscribe_input_events(tty_endpoint) {
+    let input_endpoint = loop {
+        if let Some(endpoint) = subscribe_input_events(tty_endpoint) {
+            break endpoint;
+        }
         platform::thread::yield_now();
-    }
+    };
 
     // Keep the POSIX child object for the broker's lifetime. Spawn performs
     // exec authorization, image Handle replacement and FD inheritance through
@@ -108,6 +132,15 @@ fn main() {
             platform::process::exit(1);
         }
     };
+    // Retain the native Process backing this POSIX child before accepting a
+    // registration. The child ID comes from our own spawn, never IPC bytes.
+    let shell_process = platform::execution_peer::ProcessReference(
+        platform::process::open_handle_for_process_id(
+            u64::from(_shell.id()),
+            platform::handle::HANDLE_RIGHT_WAIT,
+        )
+        .unwrap_or_else(|_| platform::process::exit(1)),
+    );
 
     let mut shell_endpoint = 0u64;
     loop {
@@ -120,16 +153,14 @@ fn main() {
         let len = (msg & 0xffff_ffff) as usize;
         let sender = msg >> 32;
         let len = len.min(buf.len());
-        if len == core::mem::size_of::<u64>() {
-            shell_endpoint = u64::from_le_bytes([
-                buf[0], buf[1], buf[2], buf[3], buf[4], buf[5], buf[6], buf[7],
-            ]);
-            continue;
-        }
-        if len == core::mem::size_of::<u64>() * 2 {
-            shell_endpoint = u64::from_le_bytes([
-                buf[0], buf[1], buf[2], buf[3], buf[4], buf[5], buf[6], buf[7],
-            ]);
+        if matches!(len, 8 | 16) {
+            if shell_endpoint == 0
+                && let Some(peer) = trusted_peer(sender, b"org.mochios.msh")
+                && platform::handle::same_object(peer.process.0, shell_process.0) == Ok(true)
+                && buf[..8] == sender.to_le_bytes()
+            {
+                shell_endpoint = sender;
+            }
             continue;
         }
         if is_tty_output(&buf[..len]) {
@@ -140,7 +171,7 @@ fn main() {
             let _ = platform::ipc::reply(sender, &status.to_le_bytes());
             continue;
         }
-        if len != INPUT_EVENT_SIZE {
+        if len != INPUT_EVENT_SIZE || sender != input_endpoint {
             continue;
         }
         if shell_endpoint != 0 {

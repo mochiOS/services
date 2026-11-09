@@ -11,6 +11,7 @@ kind = "service"
 requires = [
     "fs.read.all",
     "process.spawn",
+    "process.inspect",
     "ipc.client",
     "ipc.server",
     "input.keyboard.global",
