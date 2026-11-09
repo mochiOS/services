@@ -33,12 +33,17 @@ pub(crate) struct Key {
 impl Key {
     pub(crate) fn new(
         uid: u32,
+        generation: u64,
         identity: &ApplicationIdentity,
         capabilities: &[alloc::string::String],
         source: [u8; 32],
     ) -> Result<Self, SysError> {
+        if generation == 0 {
+            return Err(error(NativeError::InvalidArgument));
+        }
         let mut digest = Sha256::new();
-        digest.update(b"mochiOS remembered execution subject v1\0");
+        digest.update(b"mochiOS remembered execution subject v2\0");
+        digest.update(generation.to_le_bytes());
         for field in [
             identity.package_id.as_bytes(),
             identity.developer_id.as_bytes(),
@@ -65,8 +70,8 @@ impl Key {
     }
 }
 
-pub(crate) fn requester_uid(peer: &Peer) -> Result<u32, SysError> {
-    io::requester_uid(peer)
+pub(crate) fn requester_account(peer: &Peer) -> Result<(u32, u64), SysError> {
+    io::requester_account(peer)
 }
 
 fn checksum(bytes: &[u8]) -> [u8; 32] {

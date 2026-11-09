@@ -1191,6 +1191,7 @@ pub(crate) fn serve_capability_requests(mut state: CapabilityServiceState) -> ! 
                     let mut target_context = crate::requester_context::RequesterContext::default();
                     target_context.effective_uid = requester_context.effective_uid;
                     target_context.effective_gid = requester_context.effective_gid;
+                    target_context.account_generation = requester_context.account_generation;
                     target_context.package_id_len = package_id.len() as u16;
                     target_context.developer_id_len = developer_id.len() as u16;
                     target_context.package_id[..package_id.len()].copy_from_slice(package_id);

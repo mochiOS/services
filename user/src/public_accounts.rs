@@ -15,6 +15,10 @@ pub fn reply(
     let user = match query {
         Query::Uid(uid) => database.find_uid(uid),
         Query::Name(name) => database.find_name(name),
+        Query::Generation(uid) => {
+            let generation = database.account_generation(uid).ok_or(-2)?;
+            return wire::encode_generation_reply(id, uid, generation, output).map_err(|_| -5);
+        }
     }
     .ok_or(-2)?;
     wire::encode_reply(

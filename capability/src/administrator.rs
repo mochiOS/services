@@ -301,10 +301,13 @@ impl Request {
         credentials: wire::Credentials<'_>,
         deadline: u64,
         binding: crate::consent::Binding,
+        account: (u32, u64),
     ) -> Result<u64, SysError> {
         // Credentials are accepted only after consuming a fresh physical input
         // approval in execution_frontend. No plaintext-input RPC can get here.
-        let uid = crate::execution_grant::requester_uid(peer)?;
+        if crate::execution_grant::requester_account(peer)? != account {
+            return Err(denied());
+        }
         let mut request = Zeroizing::new(vec![0; mochios_user_protocol::MAX_MESSAGE_LEN]);
         let length = mochios_user_protocol::VerifyAdministrator {
             request_id: credentials.correlation.ticket.id,
@@ -317,7 +320,7 @@ impl Request {
         let current = crate::consent_peer::capture(peer.instance.endpoint)?;
         if current.instance != peer.instance
             || !p::handle::same_object(current.process.0, peer.process.0)?
-            || crate::execution_grant::requester_uid(&current)? != uid
+            || crate::execution_grant::requester_account(&current)? != account
             || p::time::monotonic_nanoseconds()? >= deadline
             || p::capability::check_thread(peer.instance.endpoint, self.required()) != Ok(1)
         {
@@ -328,7 +331,7 @@ impl Request {
                 prepared,
                 approvals,
             } => {
-                prepared.approve(&approvals, peer, binding, deadline)?;
+                prepared.approve(&approvals, peer, binding, deadline, account)?;
                 Ok(0)
             }
             Operation::Account { payload } => {
@@ -663,7 +666,8 @@ impl crate::execution_approval::Administration for Request {
         credentials: wire::Credentials<'_>,
         deadline: u64,
         binding: crate::consent::Binding,
+        account: (u32, u64),
     ) -> Result<u64, SysError> {
-        (*self).complete(source, peer, credentials, deadline, binding)
+        (*self).complete(source, peer, credentials, deadline, binding, account)
     }
 }

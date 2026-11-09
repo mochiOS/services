@@ -95,9 +95,15 @@ pub(crate) fn launch_endpoint() -> Result<platform::handle::Handle, mochi_user_s
 pub(crate) fn requester_context(
     endpoint: u64,
 ) -> Result<crate::requester_context::RequesterContext, mochi_user_syscall::SysError> {
-    crate::requester_context::read(endpoint, |process| {
+    let mut context = crate::requester_context::read(endpoint, |process| {
         with_client(|client| client.process_session_info(process))
-    })
+    })?;
+    context.account_generation = account_generation(context.effective_uid)?;
+    Ok(context)
+}
+
+pub(crate) fn account_generation(uid: u32) -> Result<u64, mochi_user_syscall::SysError> {
+    with_client(|client| client.account_generation(uid))
 }
 
 pub(crate) fn validate_posix_endpoint(
@@ -179,7 +185,8 @@ pub(crate) fn read_file_bounded(
     let result = (|| {
         let mut output = Vec::new();
         let mut buffer = Vec::new();
-        buffer.try_reserve_exact(4096)
+        buffer
+            .try_reserve_exact(4096)
             .map_err(|_| sys_error(mochi_user_syscall::ENOMEM))?;
         buffer.resize(4096, 0);
         loop {
@@ -339,6 +346,10 @@ pub(crate) fn append_persistent_grant(
     resource: Option<&str>,
     all_user_grantable: bool,
 ) -> Result<(), mochi_user_syscall::SysError> {
+    let generation = account_generation(context.effective_uid)?;
+    if context.account_generation == 0 || generation != context.account_generation {
+        return Err(sys_error(mochi_user_syscall::EACCES));
+    }
     ensure_policy_dir()?;
     recover_grant_db()?;
     if capability
@@ -361,8 +372,10 @@ pub(crate) fn append_persistent_grant(
         Err(error) if error.raw() == mochi_user_syscall::ENOENT as i64 => alloc::vec::Vec::new(),
         Err(error) => return Err(error),
     };
-    data.extend_from_slice(b"v2\t");
+    data.extend_from_slice(b"v3\t");
     data.extend_from_slice(context.effective_uid.to_string().as_bytes());
+    data.push(b'\t');
+    data.extend_from_slice(generation.to_string().as_bytes());
     data.push(b'\t');
     data.extend_from_slice(&context.package_id[..context.package_id_len as usize]);
     data.push(b'\t');
@@ -392,6 +405,12 @@ fn grant_db_matches(
     capability: &str,
     resource: Option<&str>,
 ) -> bool {
+    let Ok(generation) = account_generation(context.effective_uid) else {
+        return false;
+    };
+    if context.account_generation == 0 || generation != context.account_generation {
+        return false;
+    }
     if recover_grant_db().is_err() {
         return false;
     }
@@ -400,6 +419,7 @@ fn grant_db_matches(
     };
     let key_hex = hex_digest(&context.subject_key_id);
     let uid = context.effective_uid.to_string();
+    let generation = generation.to_string();
     let provenance = context.provenance.to_string();
     let package = &context.package_id[..context.package_id_len as usize];
     let developer = &context.developer_id[..context.developer_id_len as usize];
@@ -408,10 +428,14 @@ fn grant_db_matches(
             continue;
         }
         let mut fields = line.split(|b| *b == b'\t');
-        if fields.next() != Some(b"v2".as_slice()) {
+        // Legacy UID-only grants cannot identify which account approved them.
+        if fields.next() != Some(b"v3".as_slice()) {
             continue;
         }
         let Some(grant_uid) = fields.next() else {
+            continue;
+        };
+        let Some(grant_generation) = fields.next() else {
             continue;
         };
         let Some(grant_package) = fields.next() else {
@@ -437,6 +461,7 @@ fn grant_db_matches(
             .and_then(|v| core::str::from_utf8(v).ok())
             .unwrap_or("");
         if grant_uid != uid.as_bytes()
+            || grant_generation != generation.as_bytes()
             || grant_package != package
             || grant_developer != developer
             || grant_key != key_hex.as_bytes()

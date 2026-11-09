@@ -27,6 +27,7 @@ pub(crate) trait Administration {
         credentials: p::capability::administrator::Credentials<'_>,
         deadline: u64,
         binding: Binding,
+        account: (u32, u64),
     ) -> Result<u64, SysError>;
 }
 
@@ -65,13 +66,14 @@ impl Selection {
         if matches!(self, Self::Administration(_)) {
             return Ok(false);
         }
-        let uid = crate::execution_grant::requester_uid(requester)?;
+        let (uid, generation) = crate::execution_grant::requester_account(requester)?;
         let (identity, capabilities, digest) = self.authority();
-        let remembered = crate::execution_grant::Key::new(uid, identity, capabilities, *digest)?;
+        let remembered =
+            crate::execution_grant::Key::new(uid, generation, identity, capabilities, *digest)?;
         if !crate::execution_grant::contains(remembered)? {
             return Ok(false);
         }
-        if crate::execution_grant::requester_uid(requester)? != uid {
+        if crate::execution_grant::requester_account(requester)? != (uid, generation) {
             return Err(error(NativeError::AccessDenied));
         }
         crate::resolver::authorize_image_install(
@@ -143,6 +145,7 @@ pub(crate) struct Pending {
     binding: Binding,
     remembered: Option<crate::execution_grant::Key>,
     uid: u32,
+    account_generation: u64,
 }
 
 impl Pending {
@@ -174,13 +177,14 @@ impl Pending {
             return Err(error(NativeError::AccessDenied));
         }
         let (identity, _, _) = selection.authority();
-        let uid = crate::execution_grant::requester_uid(&requester)?;
+        let (uid, account_generation) = crate::execution_grant::requester_account(&requester)?;
         let administrator = matches!(selection, Selection::Administration(_));
         let remembered = if administrator {
             None
         } else {
             Some(crate::execution_grant::Key::new(
                 uid,
+                account_generation,
                 identity,
                 capabilities,
                 *digest,
@@ -215,6 +219,7 @@ impl Pending {
             binding,
             remembered,
             uid,
+            account_generation,
         })
     }
 
@@ -335,7 +340,9 @@ impl Pending {
         {
             return Err(error(NativeError::AccessDenied));
         }
-        if crate::execution_grant::requester_uid(current)? != self.uid {
+        if crate::execution_grant::requester_account(current)?
+            != (self.uid, self.account_generation)
+        {
             return Err(error(NativeError::AccessDenied));
         }
         if let Selection::Administration(request) = self.selection {
@@ -343,7 +350,14 @@ impl Pending {
                 return Err(error(NativeError::AccessDenied));
             }
             let credentials = credentials.ok_or_else(|| error(NativeError::AccessDenied))?;
-            return request.complete(&self.source, current, credentials, deadline, self.binding);
+            return request.complete(
+                &self.source,
+                current,
+                credentials,
+                deadline,
+                self.binding,
+                (self.uid, self.account_generation),
+            );
         }
         if credentials.is_some() {
             return Err(error(NativeError::AccessDenied));

@@ -197,6 +197,8 @@ fn spawn_authorized(
     let mut grant_context = crate::requester_context::RequesterContext::default();
     grant_context.effective_uid = scope_session.effective_uid;
     grant_context.effective_gid = scope_session.effective_gid;
+    grant_context.account_generation =
+        crate::persistent_grant::account_generation(scope_session.effective_uid)?;
     grant_context.subject_key_id = identity.subject_key_id;
     grant_context.provenance = identity.provenance as u8;
     let package_id = identity.package_id.as_bytes();

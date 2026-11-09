@@ -156,6 +156,9 @@ mod execution_grant_io {
     pub(crate) fn requester_uid(_: &consent_peer::Peer) -> Result<u32, SysError> {
         STATE.with_borrow(|s| s.uid_error.map_or(Ok(s.uid), Err))
     }
+    pub(crate) fn requester_account(peer: &consent_peer::Peer) -> Result<(u32, u64), SysError> {
+        requester_uid(peer).map(|uid| (uid, 1))
+    }
     pub(crate) fn read() -> Result<Option<Vec<u8>>, SysError> {
         STATE.with_borrow(|s| {
             s.grant_read_error

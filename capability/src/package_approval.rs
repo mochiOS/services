@@ -146,6 +146,7 @@ impl Prepared {
         peer: &Peer,
         binding: Binding,
         deadline: u64,
+        account: (u32, u64),
     ) -> Result<(), SysError> {
         let owner = consent_peer::capture(peer.instance.endpoint)?;
         if owner.instance != binding.requester
@@ -153,7 +154,9 @@ impl Prepared {
         {
             return Err(denied());
         }
-        let uid = crate::execution_grant::requester_uid(&owner)?;
+        if crate::execution_grant::requester_account(&owner)? != account {
+            return Err(denied());
+        }
         let mut registry = registry.borrow_mut();
         if registry.entries.len() >= wire::MAX_PENDING {
             return Err(SysError::from(NativeError::NotReady.into_raw()));
@@ -166,7 +169,7 @@ impl Prepared {
         registry.entries.push(Grant {
             prepared: self,
             owner,
-            uid,
+            account,
             binding,
             deadline,
         });
@@ -176,7 +179,7 @@ impl Prepared {
 struct Grant {
     prepared: Prepared,
     owner: Peer,
-    uid: u32,
+    account: (u32, u64),
     binding: Binding,
     deadline: u64,
 }
@@ -239,7 +242,7 @@ impl Registry {
             || current.instance != entry.binding.requester
             || !p::handle::same_object(current.process.0, objects.handles[1].handle)?
             || !p::handle::same_object(current.process.0, entry.owner.process.0)?
-            || crate::execution_grant::requester_uid(&current)? != entry.uid
+            || crate::execution_grant::requester_account(&current)? != entry.account
             || session(&current)? != entry.binding.session
             || p::capability::check_thread(current.instance.endpoint, entry.prepared.capability())
                 != Ok(1)

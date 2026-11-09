@@ -8,12 +8,12 @@ const DATABASE: PolicyFileSet = PolicyFileSet {
     previous: "/var/lib/security/execution-consent.db.old",
 };
 
-pub(super) fn requester_uid(peer: &Peer) -> Result<u32, SysError> {
+pub(super) fn requester_account(peer: &Peer) -> Result<(u32, u64), SysError> {
     let context = files::requester_context(peer.instance.endpoint)?;
     if context.process_id != peer.instance.process {
         return Err(error(NativeError::AccessDenied));
     }
-    Ok(context.effective_uid)
+    Ok((context.effective_uid, context.account_generation))
 }
 
 pub(super) fn read() -> Result<Option<Vec<u8>>, SysError> {

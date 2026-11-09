@@ -40,6 +40,12 @@ pub fn lookup<T: Transport>(
         .call(&request[..n], &mut response)
         .map_err(error)?;
     let bytes = response.get(..n).ok_or(-5)?;
+    if let wire::Query::Generation(uid) = query {
+        let generation = wire::decode_generation_response(id, uid, bytes).map_err(|_| -5)??;
+        let mut output = vec![0; wire::GENERATION_LEN];
+        wire::encode_generation(uid, generation, &mut output).map_err(|_| -5)?;
+        return Ok(output);
+    }
     let record = wire::decode_response(id, bytes).map_err(|_| -5)??;
     let mut output = Vec::new();
     output.try_reserve(wire::MAX_RECORD).map_err(|_| -12)?;

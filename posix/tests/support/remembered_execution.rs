@@ -121,11 +121,12 @@ fn key_binds_publisher_provenance_and_exact_caps_but_not_argument_order() {
         provenance: mochios_signature_protocol::InstallProvenance::Development,
     };
     let caps = vec!["net.connect".into(), "fs.read.tmp".into()];
-    let original = Key::new(1000, &identity(), &caps, [7; 32]).unwrap();
+    let original = Key::new(1000, 1, &identity(), &caps, [7; 32]).unwrap();
     assert_eq!(
         original,
         Key::new(
             1000,
+            1,
             &identity(),
             &[caps[1].clone(), caps[0].clone(), caps[1].clone()],
             [7; 32]
@@ -145,7 +146,7 @@ fn key_binds_publisher_provenance_and_exact_caps_but_not_argument_order() {
             }
             _ => caps.push("net.listen".into()),
         }
-        assert_ne!(original, Key::new(1000, &changed, &caps, [7; 32]).unwrap());
+        assert_ne!(original, Key::new(1000, 1, &changed, &caps, [7; 32]).unwrap());
     }
 }
 
