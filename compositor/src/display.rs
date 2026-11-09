@@ -239,6 +239,21 @@ pub(crate) fn wait_for_service(attempts: usize) -> Option<u64> {
         if let Ok(tid) = platform::process::find_by_name(DISPLAY_SERVICE_NAME)
             && tid != 0
         {
+            // This generation-bound endpoint will receive the complete frame
+            // MemoryObject. A process name does not authorize that delegation.
+            let peer = platform::execution_peer::capture(tid).ok()?;
+            let context = &peer.context;
+            if context.provenance != 1
+                || context.subject_key_id != [0; 32]
+                || context.package_id.get(..context.package_id_len as usize)
+                    != Some(b"org.mochios.display")
+                || context
+                    .developer_id
+                    .get(..context.developer_id_len as usize)
+                    != Some(b"org.mochios.system")
+            {
+                return None;
+            }
             return Some(tid);
         }
         sleep_one_tick();
