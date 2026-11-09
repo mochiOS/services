@@ -277,6 +277,8 @@ static int loader_inspection(void)
         int (*evaluate)(int) = (int (*)(int))dlsym(handle, "native_unix_value");
         int (*constructed)(void) = (int (*)(void))dlsym(handle, "native_unix_constructor_result");
         CHECK(evaluate && constructed && evaluate(7) == 130 && constructed() == 1);
+        double (*math_result)(void) = (double (*)(void))dlsym(handle, "native_unix_math_result");
+        CHECK(math_result && math_result() == 15.0);
         Dl_info info;
         CHECK(dladdr((void *)(uintptr_t)evaluate, &info) == 1 && info.dli_fname && info.dli_fbase
             && info.dli_sname && !strcmp(info.dli_sname, "native_unix_value")
