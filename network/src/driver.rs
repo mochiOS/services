@@ -10,15 +10,31 @@ const DRIVER_NAME: &str = "virtio-net.driver";
 const REQUEST_MAX: usize = HEADER_LEN + 4 + MAX_FRAME_LEN;
 pub(crate) struct DriverClient {
     thread: u64,
+    peer: platform::execution_peer::MeasuredPeer,
     next_request: u64,
+}
+
+fn trusted_peer(thread: u64) -> Result<platform::execution_peer::MeasuredPeer, u64> {
+    let peer = platform::execution_peer::capture(thread).map_err(|error| error.raw() as u64)?;
+    let c = &peer.context;
+    if c.provenance != 1
+        || c.subject_key_id != [0; 32]
+        || c.package_id.get(..c.package_id_len as usize) != Some(b"org.mochios.network.virtio-net")
+        || c.developer_id.get(..c.developer_id_len as usize) != Some(b"org.mochios.system")
+    {
+        return Err(mochi_user_syscall::EACCES);
+    }
+    Ok(peer)
 }
 impl DriverClient {
     pub(crate) fn connect(deadline: u64) -> Result<Self, u64> {
         loop {
             match platform::process::find_by_name(DRIVER_NAME) {
                 Ok(thread) if thread != 0 => {
+                    let peer = trusted_peer(thread)?;
                     return Ok(Self {
                         thread,
+                        peer,
                         next_request: 1,
                     });
                 }
@@ -37,14 +53,27 @@ impl DriverClient {
         id
     }
     fn call(&self, request: &[u8], reply: &mut [u8]) -> Result<usize, u64> {
+        self.current()?;
         let result =
             platform::ipc::call(self.thread, request, reply).map_err(|e| e.raw() as u64)?;
+        self.current()?;
         let len = (result & 0xffff_ffff) as usize;
-        if len > reply.len() {
+        if result >> 32 != self.thread || len > reply.len() {
             Err(mochi_user_syscall::EIO)
         } else {
             Ok(len)
         }
+    }
+    fn current(&self) -> Result<(), u64> {
+        let current = trusted_peer(self.thread)?;
+        if current.image != self.peer.image
+            || current.context != self.peer.context
+            || !platform::handle::same_object(current.process.0, self.peer.process.0)
+                .map_err(|error| error.raw() as u64)?
+        {
+            return Err(mochi_user_syscall::EACCES);
+        }
+        Ok(())
     }
     pub(crate) fn info(&mut self) -> Result<InterfaceInfo, u64> {
         let id = self.id();
