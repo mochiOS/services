@@ -55,6 +55,7 @@ pub(crate) fn subscribe_input_events(endpoint: u64) -> Result<u64, u32> {
     let Some(input_tid) = find_service(INPUT_SERVICE_NAME) else {
         return Err(crate::protocol::errno_status(mochi_user_syscall::ENOENT));
     };
+    let peer = trusted_input(input_tid)?;
     let subscribe = unsafe {
         core::slice::from_raw_parts_mut(
             core::ptr::addr_of_mut!(INPUT_SUBSCRIBE_REQ).cast::<u8>(),
@@ -74,6 +75,14 @@ pub(crate) fn subscribe_input_events(endpoint: u64) -> Result<u64, u32> {
     let message = platform::ipc::call(input_tid, subscribe, reply).map_err(|error| {
         crate::protocol::errno_status(error.errno().unwrap_or(mochi_user_syscall::EIO))
     })?;
+    let current = trusted_input(input_tid)?;
+    if message >> 32 != input_tid
+        || current.context != peer.context
+        || current.image != peer.image
+        || platform::handle::same_object(current.process.0, peer.process.0) != Ok(true)
+    {
+        return Err(crate::protocol::errno_status(mochi_user_syscall::EACCES));
+    }
     let length = message as u32 as usize;
     let bytes = reply
         .get(..length)
@@ -83,10 +92,27 @@ pub(crate) fn subscribe_input_events(endpoint: u64) -> Result<u64, u32> {
     };
     let status = u32::from(*status);
     if status == 0 {
-        Ok(message >> 32)
+        Ok(input_tid)
     } else {
         Err(status)
     }
+}
+
+fn trusted_input(endpoint: u64) -> Result<platform::execution_peer::MeasuredPeer, u32> {
+    let denied = crate::protocol::errno_status(mochi_user_syscall::EACCES);
+    let peer = platform::execution_peer::capture(endpoint).map_err(|_| denied)?;
+    let context = &peer.context;
+    if context.provenance != 1
+        || context.subject_key_id != [0; 32]
+        || context.package_id.get(..context.package_id_len as usize) != Some(b"org.mochios.input")
+        || context
+            .developer_id
+            .get(..context.developer_id_len as usize)
+            != Some(b"org.mochios.system")
+    {
+        return Err(denied);
+    }
+    Ok(peer)
 }
 
 pub(crate) fn is_input_message(message: u64, input_sender: Option<u64>) -> bool {
@@ -802,13 +828,13 @@ fn encode_key_event_detail(flags: u16, modifiers: u32) -> u32 {
 
 #[cfg(test)]
 mod tests {
-    use crate::geometry::Rect;
     use super::hit_test;
     use super::panel_observer_event;
     use super::{
         encode_key_event_detail, encode_surface_event, modal_filtered_target,
         pointer_keyboard_focus_target, surface_process,
     };
+    use crate::geometry::Rect;
     use crate::state::ModalSession;
     use crate::surface::{Surface, SurfaceHandle, SurfaceRole};
     use crate::window::{Window, WindowId};
