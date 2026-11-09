@@ -370,10 +370,12 @@ fn queue_basic(now_utc: u64, device: &str) -> io::Result<()> {
         "os": {"version": version, "build_number": build_number, "architecture": std::env::consts::ARCH},
         "install_date": install_date,
         "last_active_date": last_active_date,
-        "boot_succeeded": true,
+        // This producer has no authenticated boot-outcome/hardware evidence.
+        // Unknown measurements must not become a 100% success statistic.
+        "boot_succeeded": null,
         "previous_shutdown": "unknown",
         "ram_band": "unknown",
-        "is_mochi_pc": false,
+        "is_mochi_pc": null,
         "frequent_apps": null,
         "country_or_region": null,
     });
