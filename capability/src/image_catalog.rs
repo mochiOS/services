@@ -30,6 +30,7 @@ pub(crate) struct Catalog {
     diagnostic_inputs: RefCell<Vec<(Vec<u8>, String, [u8; 32])>>,
     diagnostic_version: String,
     diagnostic_name: String,
+    resources: Vec<ResourceSet>,
 }
 
 fn denied() -> syscall::SysError {
@@ -144,15 +145,26 @@ pub(crate) fn validate_declared_root(
     Ok(())
 }
 
+/// Inert startup authority plan, derived only from an installed authenticated
+/// manifest. File bytes are separately captured and checked before publication.
+pub(crate) struct ResourceSet {
+    pub(crate) alias: String,
+    pub(crate) identity: ApplicationIdentity,
+    pub(crate) manifest_digest: [u8; 32],
+    pub(crate) files: Vec<package::resources::SelectedResource>,
+}
+
 struct PackageInput {
     manifest: package::PackageManifest,
     identity: ApplicationIdentity,
+    manifest_digest: [u8; 32],
 }
 impl From<VerifiedManifest> for PackageInput {
     fn from(verified: VerifiedManifest) -> Self {
         Self {
             manifest: verified.manifest,
             identity: verified.identity,
+            manifest_digest: verified.manifest_digest,
         }
     }
 }
@@ -207,6 +219,7 @@ impl Catalog {
             identity,
             manifest,
             digest,
+            false,
             load,
         )
     }
@@ -239,6 +252,7 @@ impl Catalog {
             verified.identity,
             verified.manifest,
             verified.manifest_digest,
+            true,
             load,
         )
     }
@@ -247,6 +261,7 @@ impl Catalog {
         identity: ApplicationIdentity,
         manifest: package::PackageManifest,
         manifest_digest: [u8; 32],
+        installed: bool,
         mut load: impl FnMut(&str) -> Result<VerifiedManifest, syscall::SysError>,
     ) -> Result<Self, syscall::SysError> {
         let architecture = manifest.package_architecture.clone();
@@ -254,7 +269,8 @@ impl Catalog {
         let diagnostic_name = manifest.package_name.clone();
         let mut packages = alloc::vec![PackageInput {
             manifest,
-            identity: identity.clone()
+            identity: identity.clone(),
+            manifest_digest,
         }];
         let mut libraries = Vec::new();
         let mut cursor = 0;
@@ -297,6 +313,60 @@ impl Catalog {
             }
             cursor += 1;
         }
+        // Resource-only providers are authenticated with the same resolver, but
+        // never enter the code graph. If a code edge already loaded a package,
+        // use that exact snapshot; a second index lookup may select a new build.
+        let mut resources = Vec::new();
+        if installed {
+            let main = &packages[0].manifest;
+            let own = package::resources::own_resources(main, &root.path).map_err(|_| denied())?;
+            resources.push(ResourceSet {
+                alias: String::new(),
+                identity: identity.clone(),
+                manifest_digest,
+                files: own,
+            });
+            let aliases = main
+                .binary(&root.path)
+                .ok_or_else(denied)?
+                .resource_dependencies
+                .clone();
+            for alias in aliases {
+                let dependency = package::resources::resource_dependency(
+                    &packages[0].manifest,
+                    &root.path,
+                    &alias,
+                )
+                .map_err(|_| denied())?
+                .clone();
+                let index = match packages
+                    .iter()
+                    .position(|p| p.manifest.package_id == dependency.provider.package)
+                {
+                    Some(index) => index,
+                    None => {
+                        if packages.len() >= MAX_PACKAGES {
+                            return Err(syscall::SysError::from_raw(-7));
+                        }
+                        let provider = PackageInput::from(load(&dependency.provider.package)?);
+                        packages.push(provider);
+                        packages.len() - 1
+                    }
+                };
+                let provider = &packages[index];
+                // Opaque data need not use the consumer CPU architecture.
+                matches_dependency(&dependency.provider, provider, None)?;
+                let files =
+                    package::resources::exported_resources(&provider.manifest, &dependency.export)
+                        .map_err(|_| denied())?;
+                resources.push(ResourceSet {
+                    alias,
+                    identity: provider.identity.clone(),
+                    manifest_digest: provider.manifest_digest,
+                    files,
+                });
+            }
+        }
         Ok(Self {
             root,
             libraries,
@@ -305,7 +375,47 @@ impl Catalog {
             diagnostic_inputs: RefCell::new(Vec::new()),
             diagnostic_version,
             diagnostic_name,
+            resources,
         })
+    }
+
+    /// Aliases are local to the selected executable. An installed package or
+    /// code dependency alone is never enough to select an external data set.
+    pub(crate) fn resource_set(&self, alias: &str) -> Result<&ResourceSet, syscall::SysError> {
+        self.resources
+            .iter()
+            .find(|set| set.alias == alias)
+            .ok_or_else(denied)
+    }
+
+    /// Capture only the selected asset and check the exact signed bytes. A
+    /// concurrent update cannot silently replace an old startup snapshot.
+    /// The reader is privileged broker I/O, never a client-supplied pathname.
+    pub(crate) fn read_resource(
+        &self,
+        alias: &str,
+        name: &str,
+        mut read: impl FnMut(&str, usize) -> Result<Vec<u8>, syscall::SysError>,
+    ) -> Result<Vec<u8>, syscall::SysError> {
+        if !package::resources::valid_resource_name(name) {
+            return Err(denied());
+        }
+        let file = self
+            .resource_set(alias)?
+            .files
+            .iter()
+            .find(|file| file.name == name)
+            .ok_or_else(denied)?;
+        let size = usize::try_from(file.size).map_err(|_| denied())?;
+        if size > 128 * 1024 * 1024 {
+            return Err(syscall::SysError::from_raw(-7));
+        }
+        let bytes = read(&file.path, size)?;
+        let hash = file.digest.strip_prefix("sha256:").ok_or_else(denied)?;
+        if bytes.len() != size || <[u8; 32]>::from(Sha256::digest(&bytes)) != decode_key(hash)? {
+            return Err(denied());
+        }
+        Ok(bytes)
     }
 
     pub(crate) fn identity(&self) -> &ApplicationIdentity {
@@ -317,11 +427,15 @@ impl Catalog {
     }
 
     pub(crate) fn diagnostic_input(&self, name: &[u8]) -> Option<(String, [u8; 32])> {
-        if name.is_empty() { return Some((self.root.path.clone(), self.root.digest)); }
+        if name.is_empty() {
+            return Some((self.root.path.clone(), self.root.digest));
+        }
         let inputs = self.diagnostic_inputs.try_borrow().ok()?;
         let mut matches = inputs.iter().filter(|(needed, _, _)| needed == name);
         let (_, path, digest) = matches.next()?;
-        if matches.next().is_some() { return None; }
+        if matches.next().is_some() {
+            return None;
+        }
         Some((path.clone(), *digest))
     }
 
@@ -352,7 +466,9 @@ impl Catalog {
         if let Source::Dependency { needed, .. } = source
             && let Ok(mut inputs) = self.diagnostic_inputs.try_borrow_mut()
             && inputs.len() < 128
-            && !inputs.iter().any(|(old, path, _)| old == needed && path == &selected.path)
+            && !inputs
+                .iter()
+                .any(|(old, path, _)| old == needed && path == &selected.path)
             && inputs.try_reserve(1).is_ok()
         {
             inputs.push((needed.to_vec(), selected.path.clone(), selected.digest));

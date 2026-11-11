@@ -23,6 +23,9 @@ mod policy {
     }
 }
 #[allow(dead_code)]
+#[path = "../../capability/src/pci_resources.rs"]
+mod pci_resources;
+#[allow(dead_code)]
 #[path = "../../capability/src/image_catalog.rs"]
 mod image_catalog;
 #[path = "support/package_image_catalog.rs"]

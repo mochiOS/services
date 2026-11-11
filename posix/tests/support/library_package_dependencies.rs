@@ -391,3 +391,150 @@ abi = "shared-1"
     assert_eq!(error.raw(), -7);
     assert!(calls > 32 && calls <= 256);
 }
+
+fn resource_edge(id: &str, alias: &str) -> String {
+    format!(
+        r#"
+[[resource_dependency]]
+alias = "{alias}"
+package = "{id}"
+developer = "org.mochios.system"
+subject_key_id = "{}"
+provenance = "built-in"
+abi = "shared-1"
+export = "data-v1"
+"#,
+        "0".repeat(64)
+    )
+}
+fn resource_provider(id: &str, extra: &str) -> String {
+    provider(id, A_PATH, A_BYTES, extra)
+        + &format!(
+            r#"
+[[file]]
+id = "data"
+path = "/system/data/regular.ttf"
+digest = "sha256:{:x}"
+size = 4
+mode = "0444"
+[[resource_export]]
+name = "data-v1"
+files = {{ "fonts/regular.ttf" = "data" }}
+"#,
+            Sha256::digest(b"font")
+        )
+}
+fn resource_root(extra: &str) -> resolver::VerifiedManifest {
+    let text = manifest().replace(
+        "requires = []",
+        "requires = []\nresource_dependencies = [\"fonts\"]",
+    ) + &resource_edge(A, "fonts")
+        + extra;
+    install(&text);
+    resolver::verified_manifest(MANIFEST, read_file).unwrap()
+}
+#[test]
+fn data_edge_does_not_grant_code_or_follow_provider_code_dependencies() {
+    let root = resource_root("");
+    put(&resource_provider(A, &edge(B)));
+    let approved = image_catalog::Catalog::resolve(root, APP, load).unwrap();
+    let set = approved.resource_set("fonts").unwrap();
+    assert_eq!(set.identity.package_id, A);
+    assert_eq!(set.files.len(), 1);
+    assert_eq!(set.files[0].name, "fonts/regular.ttf");
+    assert!(
+        approved
+            .validate(dependency(A_PATH.as_bytes()), A_BYTES)
+            .is_err()
+    );
+    assert!(approved.resource_set("unselected").is_err());
+    assert!(approved.resource_set(A).is_err());
+}
+#[test]
+fn code_and_data_share_one_authenticated_provider_snapshot() {
+    let root = resource_root(&edge(A));
+    put(&resource_provider(A, ""));
+    let mut loads = 0;
+    let approved = image_catalog::Catalog::resolve(root, APP, |id| {
+        loads += 1;
+        let snapshot = load(id)?;
+        // The package index changes after the first authenticated read.
+        put(&provider(A, A_PATH, b"changed", ""));
+        Ok(snapshot)
+    })
+    .unwrap();
+    assert_eq!(loads, 1);
+    assert!(
+        approved
+            .validate(dependency(A_PATH.as_bytes()), A_BYTES)
+            .is_ok()
+    );
+    assert_eq!(approved.resource_set("fonts").unwrap().files[0].size, 4);
+}
+#[test]
+fn asset_capture_rejects_updates_truncation_and_path_escape_before_publication() {
+    let root = resource_root("");
+    put(&resource_provider(A, ""));
+    let approved = image_catalog::Catalog::resolve(root, APP, load).unwrap();
+    let read = |path: &str, size| {
+        assert_eq!(path, "/system/data/regular.ttf");
+        assert_eq!(size, 4);
+        Ok(b"font".to_vec())
+    };
+    assert_eq!(
+        approved
+            .read_resource("fonts", "fonts/regular.ttf", read)
+            .unwrap(),
+        b"font"
+    );
+    for bad in [b"x".as_slice(), b"FONT", b"fontx"] {
+        assert!(
+            approved
+                .read_resource("fonts", "fonts/regular.ttf", |_, _| Ok(bad.to_vec()))
+                .is_err()
+        );
+    }
+    for (alias, name) in [
+        ("fonts", "../fonts/regular.ttf"),
+        ("", "fonts/regular.ttf"),
+        ("fonts", "/system/data/regular.ttf"),
+    ] {
+        assert!(
+            approved
+                .read_resource(alias, name, |_, _| panic!("unauthorized reader called"))
+                .is_err()
+        );
+    }
+}
+#[test]
+fn data_provider_identity_and_export_are_verified() {
+    for replacement in [
+        ("org.mochios.system", "org.untrusted"),
+        ("shared-1", "incompatible-2"),
+        ("data-v1", "missing"),
+    ] {
+        let text = manifest().replace(
+            "requires = []",
+            "requires = []\nresource_dependencies = [\"fonts\"]",
+        ) + &resource_edge(A, "fonts").replace(replacement.0, replacement.1);
+        install(&text);
+        let root = resolver::verified_manifest(MANIFEST, read_file).unwrap();
+        put(&resource_provider(A, ""));
+        assert!(image_catalog::Catalog::resolve(root, APP, load).is_err());
+    }
+}
+#[test]
+fn standalone_manifest_cannot_mint_installed_resource_authority() {
+    let text = manifest().replace(
+        "requires = []",
+        "requires = []\nresource_dependencies = [\"fonts\"]",
+    ) + &resource_edge(A, "fonts");
+    install(&text);
+    let root = resolver::verified_manifest(MANIFEST, read_file).unwrap();
+    let catalog = image_catalog::Catalog::standalone(APP, ROOT, root.identity, Some(&text), |_| {
+        panic!("standalone data lookup")
+    })
+    .unwrap();
+    assert!(catalog.resource_set("").is_err());
+    assert!(catalog.resource_set("fonts").is_err());
+}
