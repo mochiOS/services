@@ -29,3 +29,7 @@ pub mod bootstrap_ipc;
 pub mod storage_region;
 
 pub mod whole_file_lock;
+
+pub mod readonly_tree;
+
+pub mod readonly_tree_ipc;

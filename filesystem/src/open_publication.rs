@@ -24,6 +24,7 @@ pub fn publish(
     ordinary_rights: u64,
     publisher: &mut impl Publisher,
 ) -> Result<IpcObjectHandle, i32> {
+    let ordinary_rights = service.snapshot_rights(open_id).unwrap_or(ordinary_rights);
     let external = service.external_open(open_id)?;
     let rights = if external.is_some() || service.is_fifo_description(open_id)? {
         METADATA_RIGHTS

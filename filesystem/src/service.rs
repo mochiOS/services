@@ -40,6 +40,8 @@ mod creation_policy;
 mod fifo_namespace;
 #[path = "whole_file_lock_state.rs"]
 mod whole_file_lock_state;
+#[path = "snapshot_operations.rs"]
+mod snapshot_operations;
 
 #[path = "storage_inventory.rs"]
 pub mod storage_inventory;
@@ -97,6 +99,8 @@ pub struct FilesystemService {
     orphans: HashMap<u64, Orphan>,
     removed_directories: HashMap<u64, removed_directories::RetainedDirectory>,
     next_open_id: u64,
+    snapshot_opens: HashMap<u64, crate::readonly_tree::Open>,
+    snapshot_budget: crate::readonly_tree::Budget,
     memory_updates: Option<Box<dyn crate::memory_updates::MemoryUpdates>>,
     memory_admission: Option<crate::memory_updates::AdmissionScope>,
 }
@@ -152,6 +156,8 @@ impl FilesystemService {
             orphans: HashMap::new(),
             removed_directories: HashMap::new(),
             next_open_id: 1,
+            snapshot_opens: HashMap::new(),
+            snapshot_budget: Default::default(),
             memory_updates: None,
             memory_admission: None,
         }
@@ -471,6 +477,10 @@ impl FilesystemService {
                 && request.flags & protocol::OPEN_AT_WRITE == 0
         {
             return Err(EINVAL);
+        }
+        if let Some(base) = anchors.base_open_id.filter(|id| self.snapshot_opens.contains_key(id)) {
+            self.authorize_snapshot(anchors, credentials, payload)?;
+            return self.snapshot_open_at(request, base, payload);
         }
         let uid = credentials.effective_uid;
         let gid = credentials.effective_gid;
@@ -1419,6 +1429,12 @@ impl FilesystemService {
         {
             return Err(EINVAL);
         }
+        if let Some(base) = anchors.base_open_id.filter(|id| self.snapshot_opens.contains_key(id)) {
+            self.authorize_snapshot(anchors, credentials, payload)?;
+            let open = self.snapshot_opens.get(&base).ok_or(EBADF)?;
+            let node = open.tree.resolve(open.node, payload)?;
+            return self.snapshot_status(request, open, node);
+        }
         let uid = credentials.effective_uid;
         let gid = credentials.effective_gid;
         let groups = credentials.supplementary_groups();
@@ -1471,6 +1487,11 @@ impl FilesystemService {
     /// Obtains metadata from an existing provider object. The caller must
     /// identify the attached Handle through the kernel before invoking this.
     pub fn stat_handle(&self, request: protocol::Header, open_id: u64) -> Result<Response, i32> {
+        if let Some(open) = self.snapshot_opens.get(&open_id) {
+            if request.flags != 0 { return Err(EINVAL); }
+            return self.snapshot_status(request, open, open.node);
+        }
+
         if request.flags != 0 {
             return Err(EINVAL);
         }
@@ -1536,6 +1557,18 @@ impl FilesystemService {
         anchors: PathAnchors,
         credentials: protocol::Credentials,
     ) -> Result<Response, i32> {
+        if let Some(base) = anchors.base_open_id.filter(|id| self.snapshot_opens.contains_key(id)) {
+            if request.flags & !protocol::ACCESS_AT_FLAGS_ALL != 0
+                || (request.flags & protocol::ACCESS_AT_ROOT_ATTACHED != 0) != anchors.root_open_id.is_some()
+                || (request.flags & protocol::ACCESS_AT_BASE_ATTACHED != 0) != anchors.base_open_id.is_some() { return Err(EINVAL); }
+            self.authorize_snapshot(anchors, credentials, payload)?;
+            let open = self.snapshot_opens.get(&base).ok_or(EBADF)?;
+            let node = open.tree.resolve(open.node, payload)?;
+            if request.flags & protocol::ACCESS_AT_WRITE != 0 { return Err(EROFS); }
+            if request.flags & protocol::ACCESS_AT_EXECUTE != 0 && !open.tree.directory(node)? { return Err(EACCES); }
+            return Ok(self.success(request));
+        }
+
         self.authorize_path(
             payload,
             anchors,
@@ -1765,6 +1798,12 @@ impl FilesystemService {
     }
 
     pub fn provider_read(&mut self, open_id: u64, length: usize) -> Result<Vec<u8>, i32> {
+        if let Some(open) = self.snapshot_opens.get_mut(&open_id) {
+            if open.tree.directory(open.node)? { return open.read_directory(length); }
+            let mut output = vec![0; length.min(mnu_abi::provider::MAX_DATA_LEN)];
+            let (n, _) = open.read(&mut output)?; output.truncate(n); return Ok(output);
+        }
+
         if self.opens.device(open_id).is_some() {
             return self.read_device(open_id, length.min(mnu_abi::provider::MAX_DATA_LEN));
         }
@@ -1805,6 +1844,12 @@ impl FilesystemService {
         open_id: u64,
         length: usize,
     ) -> Result<(Vec<u8>, u64), i32> {
+        if let Some(open) = self.snapshot_opens.get_mut(&open_id) {
+            if length > mnu_abi::provider::MAX_POSITIONED_READ_LEN { return Err(EINVAL); }
+            let mut output = vec![0; length]; let (n, start) = open.read(&mut output)?;
+            output.truncate(n); return Ok((output, start));
+        }
+
         if length > mnu_abi::provider::MAX_POSITIONED_READ_LEN {
             return Err(EINVAL);
         }
@@ -1829,6 +1874,11 @@ impl FilesystemService {
         open_id: u64,
         output: &mut [u8],
     ) -> Result<(usize, u64), i32> {
+        if let Some(open) = self.snapshot_opens.get_mut(&open_id) {
+            if output.is_empty() || output.len() > mnu_abi::provider::MAX_SHARED_READ_LEN { return Err(EINVAL); }
+            return open.read(output);
+        }
+
         if output.is_empty() || output.len() > mnu_abi::provider::MAX_SHARED_READ_LEN {
             return Err(EINVAL);
         }
@@ -1855,6 +1905,8 @@ impl FilesystemService {
         open_id: u64,
         payload: &[u8],
     ) -> Result<(usize, u64), i32> {
+        if self.snapshot_opens.contains_key(&open_id) { return Err(EROFS); }
+
         self.provider_write_range(open_id, payload, None)
     }
 
@@ -1864,6 +1916,8 @@ impl FilesystemService {
         payload: &[u8],
         byte_end: u64,
     ) -> Result<(usize, u64), i32> {
+        if self.snapshot_opens.contains_key(&open_id) { return Err(EROFS); }
+
         self.provider_write_range(open_id, payload, Some(byte_end))
     }
 
@@ -1936,6 +1990,11 @@ impl FilesystemService {
         offset: u64,
         output: &mut [u8],
     ) -> Result<usize, i32> {
+        if let Some(open) = self.snapshot_opens.get(&open_id) {
+            if output.len() > mnu_abi::provider::MAX_SHARED_READ_LEN { return Err(EINVAL); }
+            return open.tree.read(open.node, offset, output);
+        }
+
         if output.len() > mnu_abi::provider::MAX_SHARED_READ_LEN {
             return Err(EINVAL);
         }
@@ -1956,6 +2015,8 @@ impl FilesystemService {
         offset: u64,
         payload: &[u8],
     ) -> Result<usize, i32> {
+        if self.snapshot_opens.contains_key(&open_id) { return Err(EROFS); }
+
         if payload.len() > mnu_abi::provider::MAX_DATA_LEN {
             return Err(EINVAL);
         }
@@ -1971,6 +2032,8 @@ impl FilesystemService {
     }
 
     pub fn provider_sync(&self, open_id: u64) -> Result<(), i32> {
+        if self.snapshot_opens.contains_key(&open_id) { return Ok(()); }
+
         if self.opens.device(open_id).is_some() {
             return Err(EINVAL);
         }
@@ -1979,6 +2042,8 @@ impl FilesystemService {
     }
 
     pub fn provider_byte_length(&mut self, open_id: u64) -> Result<u64, i32> {
+        if let Some(open) = self.snapshot_opens.get(&open_id) { return open.tree.length(open.node); }
+
         let open = self.opens.get_mut(&open_id).ok_or(EBADF)?;
         refresh_provider_file(open)?;
         let file = open.file.as_ref().ok_or(EISDIR)?;
@@ -1986,6 +2051,10 @@ impl FilesystemService {
     }
 
     pub fn provider_memory_object(&self, open_id: u64) -> Result<u64, i32> {
+        if let Some(open) = self.snapshot_opens.get(&open_id) {
+            return Ok(if open.tree.directory(open.node)? { 0 } else { open.identity_base + open.node as u64 });
+        }
+
         if self.opens.device(open_id).is_some() {
             return Ok(0);
         }
@@ -2007,6 +2076,8 @@ impl FilesystemService {
     }
 
     pub fn provider_seek(&mut self, open_id: u64, offset: i64, basis: u64) -> Result<u64, i32> {
+        if let Some(open) = self.snapshot_opens.get_mut(&open_id) { return open.seek(offset, basis); }
+
         if let Some(open) = self.opens.device_mut(open_id) {
             let directory = match &mut open.backing {
                 DeviceBacking::Null(null) => {
@@ -2063,6 +2134,8 @@ impl FilesystemService {
     /// An external description is metadata only; its data stream belongs to
     /// the registered factory's native owner, not this service.
     pub fn external_open(&self, open_id: u64) -> Result<Option<&crate::devfs::ExternalOpen>, i32> {
+        if self.snapshot_opens.contains_key(&open_id) { return Ok(None); }
+
         if let Some(open) = self.opens.device(open_id) {
             return Ok(match &open.backing {
                 DeviceBacking::ExternalMetadata(external) => Some(external),
@@ -2075,6 +2148,7 @@ impl FilesystemService {
     /// Identity from the retained description, never from a caller's path or
     /// reply flags. Publication uses this to prevent granting disk I/O rights.
     pub(crate) fn is_fifo_description(&self, open_id: u64) -> Result<bool, i32> {
+        if self.snapshot_opens.contains_key(&open_id) { return Ok(false); }
         if self.opens.device(open_id).is_some() {
             return Ok(false);
         }
@@ -2088,6 +2162,8 @@ impl FilesystemService {
     }
 
     pub fn provider_close(&mut self, open_id: u64) -> Result<(), i32> {
+        if self.snapshot_opens.remove(&open_id).is_some() { return Ok(()); }
+
         // Native OP_RELEASE means the final Handle alias is gone. Filesystem
         // orphan cleanup may still fail, but cannot retain a dead owner's lock.
         if let Some(open) = self.opens.get_mut(&open_id) {
@@ -3871,6 +3947,10 @@ impl FilesystemService {
         request: protocol::Header,
         open_id: u64,
     ) -> Result<Response, i32> {
+        if let Some(open) = self.snapshot_opens.get(&open_id) {
+            let mut response = self.success(request); response.header.flags = open.flags; return Ok(response);
+        }
+
         let mut response = self.success(request);
         if let Some(open) = self.opens.device(open_id) {
             response.header.flags = open.flags()?;
@@ -3896,6 +3976,8 @@ impl FilesystemService {
         open_id: u64,
         mask: u32,
     ) -> Result<Response, i32> {
+        if self.snapshot_opens.contains_key(&open_id) { return Err(EROFS); }
+
         if mask & !protocol::OPEN_STATUS_FLAGS_ALL != 0 || request.flags & !mask != 0 {
             return Err(EINVAL);
         }

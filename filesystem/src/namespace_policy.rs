@@ -95,6 +95,11 @@ impl FilesystemService {
         access: u8,
         base_slot: u32,
     ) -> Result<(), i32> {
+        if anchors.base_open_id.is_some_and(|id| self.snapshot_opens.contains_key(&id)) {
+            self.authorize_snapshot(anchors, credentials, path)?;
+            if access & 2 != 0 { return Err(EROFS); }
+            return Ok(());
+        }
         let scope = credentials.namespace;
         let read = access & 1 != 0;
         let write = access & 2 != 0;

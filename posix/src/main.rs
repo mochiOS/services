@@ -454,6 +454,31 @@ fn main() {
         let sender = message >> 32;
         let length = (message & 0xffff_ffff) as usize;
         if let Some(bytes) = request_bytes.get(..length)
+            && bytes.starts_with(&mochios_filesystem_protocol::readonly_tree::MAGIC)
+        {
+            // Generic byte import, not a privileged pathname lookup. Keep
+            // borrowed incoming references separate from received reply owners.
+            let incoming = received_handles;
+            let mut forwarded = platform::ipc::IpcObjectHandles::default();
+            forwarded.count = incoming.count;
+            forwarded.handles = incoming.handles;
+            let mut reply = [0; 8];
+            let valid = incoming.is_user_delivery() && incoming.count == 1
+                && bytes.len() == mochios_filesystem_protocol::readonly_tree::REQUEST_LEN;
+            let result = if valid { platform::ipc::call_object_handles(filesystem_endpoint, bytes, &mut reply, &mut forwarded) }
+                else { Err(platform::syscall::SysError::from_raw(-22)) };
+            if result == Ok(8) && forwarded.delivery_flags == 0 {
+                let _ = platform::ipc::reply_object_handles(sender, &reply, &forwarded);
+            } else {
+                let _ = platform::ipc::reply(sender, &(-5i64).to_le_bytes());
+            }
+            for object in incoming.handles.iter().take(incoming.count as usize) { let _ = platform::handle::close(object.handle); }
+            if result.is_ok() {
+                for object in forwarded.handles.iter().take(forwarded.count as usize) { let _ = platform::handle::close(object.handle); }
+            }
+            continue;
+        }
+        if let Some(bytes) = request_bytes.get(..length)
             && bytes.starts_with(&mnu_abi::provider::MAGIC.to_le_bytes())
         {
             // Only native final-reference delivery can retire a scope. A

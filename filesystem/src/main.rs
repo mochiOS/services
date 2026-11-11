@@ -121,6 +121,19 @@ fn main() {
         let sender = message >> 32;
         let length = (message & 0xffff_ffff) as usize;
         let request = &request_bytes[..length.min(request_bytes.len())];
+        if request.starts_with(&protocol::readonly_tree::MAGIC) {
+            let result = filesystem_service::readonly_tree_ipc::handle(&mut service, endpoint, request, &attached);
+            close_attached_handles(&attached);
+            match result {
+                Ok(object) => {
+                    let mut outgoing = platform::ipc::IpcObjectHandles::default(); outgoing.count = 1; outgoing.handles[0] = object;
+                    let _ = platform::ipc::reply_object_handles(sender, &0i64.to_le_bytes(), &outgoing);
+                    let _ = platform::handle::close(object.handle);
+                }
+                Err(error) => { let _ = platform::ipc::reply(sender, &(-i64::from(error)).to_le_bytes()); }
+            }
+            continue;
+        }
         if request.starts_with(&protocol::storage_region::MAGIC) {
             let result=filesystem_service::storage_region::admit(request,&attached,|| {
                 platform::capability::check_thread(sender,"device.storage.scoped.write")==Ok(1)
