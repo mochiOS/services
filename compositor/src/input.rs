@@ -474,6 +474,24 @@ fn panel_observer_event(surface: &Surface, x: i32, y: i32, already_notified: boo
     }
 }
 
+// A decorator only receives activation for the window it already decorates.
+fn decoration_focus_targets<'a>(
+    surfaces: &'a [Surface],
+    content: &Surface,
+) -> impl Iterator<Item = &'a Surface> {
+    let window =
+        (!content.is_decoration && content.window != WindowId(0)).then_some(content.window);
+    surfaces.iter().filter(move |candidate| {
+        candidate.live && candidate.is_decoration && window == Some(candidate.window)
+    })
+}
+
+fn notify_decoration_focus(surfaces: &[Surface], content: &Surface, kind: u32) {
+    for decoration in decoration_focus_targets(surfaces, content) {
+        send_event(decoration.event_endpoint, decoration.token, kind, 0, 0, 0);
+    }
+}
+
 pub(crate) fn update_keyboard_focus(
     surfaces: &[Surface],
     keyboard_focus: &mut Option<usize>,
@@ -490,6 +508,7 @@ pub(crate) fn update_keyboard_focus(
             // Preemption cancels the lease. A delayed release must never
             // pull input away from the new focus owner.
             surface.keyboard_capture.set(None);
+            notify_decoration_focus(surfaces, surface, EVENT_FOCUS_LOST);
             send_event(
                 surface.event_endpoint,
                 surface.token,
@@ -505,6 +524,7 @@ pub(crate) fn update_keyboard_focus(
         if let Some(surface) = surfaces.get(index)
             && surface.live
         {
+            notify_decoration_focus(surfaces, surface, EVENT_FOCUS_GAINED);
             send_event(
                 surface.event_endpoint,
                 surface.token,
@@ -838,6 +858,41 @@ mod tests {
     use crate::state::ModalSession;
     use crate::surface::{Surface, SurfaceHandle, SurfaceRole};
     use crate::window::{Window, WindowId};
+
+    #[test]
+    fn activation_only_reaches_live_decorations_for_the_same_window() {
+        let mut content = Surface::empty();
+        content.live = true;
+        content.window = WindowId(7);
+        let mut matching = Surface::empty();
+        matching.live = true;
+        matching.is_decoration = true;
+        matching.window = WindowId(7);
+        matching.token = 11;
+        let mut other = Surface::empty();
+        other.live = true;
+        other.is_decoration = true;
+        other.window = WindowId(8);
+        let mut dead = Surface::empty();
+        dead.is_decoration = true;
+        dead.window = WindowId(7);
+        let surfaces = [matching, other, dead];
+        assert_eq!(
+            super::decoration_focus_targets(&surfaces, &content)
+                .map(|s| s.token)
+                .collect::<Vec<_>>(),
+            vec![11]
+        );
+        assert_eq!(
+            super::decoration_focus_targets(&surfaces, &surfaces[0]).count(),
+            0
+        );
+        content.window = WindowId(0);
+        assert_eq!(
+            super::decoration_focus_targets(&surfaces, &content).count(),
+            0
+        );
+    }
 
     #[test]
     fn native_window_drag_reaches_status_area_and_screen_edges() {

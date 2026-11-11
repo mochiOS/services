@@ -2,7 +2,7 @@ use crate::protocol::errno_status;
 use crate::state::{MAX_DIMENSION, MAX_SHARED_PIXELS};
 
 #[allow(dead_code)]
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy, Default, PartialEq)]
 pub(crate) struct Rect {
     pub(crate) x: i32,
     pub(crate) y: i32,

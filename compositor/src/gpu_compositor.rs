@@ -5,7 +5,7 @@ use crate::fps_overlay;
 use crate::geometry::{Rect, clip_present_rect};
 use crate::protocol::{PIXEL_FORMAT_GPU_SCENE, PIXEL_FORMAT_XRGB8888};
 use crate::surface::{Surface, read_current_pixel, surface_has_current_pixels};
-use crate::window::{Window, window_frame_rect, window_index_by_id};
+use crate::window::{Window, WindowId, window_frame_rect, window_index_by_id};
 
 const CURSOR_TEXTURE_KEY: u64 = u64::MAX;
 const WHITE_TEXTURE_KEY: u64 = u64::MAX - 1;
@@ -198,10 +198,25 @@ struct WindowClip {
     interior: [f32; 4],
 }
 
+#[derive(Clone, PartialEq)]
+struct WindowChrome {
+    id: WindowId,
+    frame: Rect,
+    radius: f32,
+    active: bool,
+}
+
 #[derive(PartialEq)]
 struct DesktopGeometryKey {
+    windows: Vec<WindowChrome>,
     size: (u32, u32),
     surfaces: Vec<SurfaceGeometryKey>,
+}
+
+struct ChromeGeometry {
+    key: WindowChrome,
+    shadow: Vec<Vertex>,
+    border: Vec<Vertex>,
 }
 
 struct SurfaceGeometry {
@@ -212,6 +227,7 @@ struct SurfaceGeometry {
 
 #[derive(Default)]
 pub(crate) struct GpuCompositor {
+    active_window: Option<WindowId>,
     textures: Vec<TextureRequirement>,
     uploads: Vec<TextureUpload>,
     batches: Vec<mochios_viewkit_gpu_protocol::compositor::Batch>,
@@ -223,9 +239,14 @@ pub(crate) struct GpuCompositor {
     dirty_vertices: Vec<Vertex>,
     dirty_batches: Vec<mochios_viewkit_gpu_protocol::compositor::Batch>,
     surface_geometry: Vec<SurfaceGeometry>,
+    chrome_geometry: Vec<ChromeGeometry>,
 }
 
 impl GpuCompositor {
+    pub(crate) fn set_active_window(&mut self, active: Option<WindowId>) {
+        self.active_window = active;
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn compose(
         &mut self,
@@ -279,6 +300,23 @@ impl GpuCompositor {
             (surface.stack_layer(), surface.z)
         });
         let desktop_key = DesktopGeometryKey {
+            windows: windows
+                .iter()
+                .filter_map(|window| {
+                    if !window.live || window.decoration.is_none() {
+                        return None;
+                    }
+                    let content = surfaces
+                        .iter()
+                        .find(|s| s.live && s.visible && s.handle == window.content)?;
+                    Some(WindowChrome {
+                        id: window.id,
+                        frame: window_frame_rect(content, window),
+                        radius: window.corner_radius(),
+                        active: self.active_window == Some(window.id),
+                    })
+                })
+                .collect(),
             size: (display_width, display_height),
             surfaces: indices
                 .iter()
@@ -303,6 +341,29 @@ impl GpuCompositor {
                 })
                 .collect(),
         };
+        self.chrome_geometry
+            .retain(|cached| desktop_key.windows.iter().any(|w| w.id == cached.key.id));
+        for chrome in &desktop_key.windows {
+            let index = self
+                .chrome_geometry
+                .iter()
+                .position(|cached| cached.key.id == chrome.id);
+            if index.is_some_and(|i| self.chrome_geometry[i].key == *chrome) {
+                continue;
+            }
+            let mut cached = ChromeGeometry {
+                key: chrome.clone(),
+                shadow: Vec::new(),
+                border: Vec::new(),
+            };
+            append_window_chrome(&mut cached.shadow, chrome, true);
+            append_window_chrome(&mut cached.border, chrome, false);
+            if let Some(i) = index {
+                self.chrome_geometry[i] = cached;
+            } else {
+                self.chrome_geometry.push(cached);
+            }
+        }
         self.surface_geometry.retain(|cached| {
             desktop_key
                 .surfaces
@@ -327,8 +388,33 @@ impl GpuCompositor {
                 0,
                 self.vertices.len() as u32,
             );
-            for (index, key) in indices.into_iter().zip(&desktop_key.surfaces) {
+            for (position, (index, key)) in indices
+                .iter()
+                .copied()
+                .zip(&desktop_key.surfaces)
+                .enumerate()
+            {
                 let surface = &surfaces[index];
+                let chrome = desktop_key.windows.iter().find(|w| w.id == surface.window);
+                if let Some(chrome) = chrome {
+                    if !indices[..position]
+                        .iter()
+                        .any(|&i| surfaces[i].window == chrome.id)
+                    {
+                        let first = self.vertices.len() as u32;
+                        if let Some(cached) =
+                            self.chrome_geometry.iter().find(|c| c.key.id == chrome.id)
+                        {
+                            self.vertices.extend_from_slice(&cached.shadow);
+                        }
+                        push_batch(
+                            &mut self.batches,
+                            WHITE_TEXTURE_KEY,
+                            first,
+                            self.vertices.len() as u32,
+                        );
+                    }
+                }
                 let first = self.vertices.len() as u32;
                 let cached_index = self
                     .surface_geometry
@@ -375,6 +461,25 @@ impl GpuCompositor {
                     first,
                     self.vertices.len() as u32,
                 );
+                if let Some(chrome) = chrome {
+                    if !indices[position + 1..]
+                        .iter()
+                        .any(|&i| surfaces[i].window == chrome.id)
+                    {
+                        let first = self.vertices.len() as u32;
+                        if let Some(cached) =
+                            self.chrome_geometry.iter().find(|c| c.key.id == chrome.id)
+                        {
+                            self.vertices.extend_from_slice(&cached.border);
+                        }
+                        push_batch(
+                            &mut self.batches,
+                            WHITE_TEXTURE_KEY,
+                            first,
+                            self.vertices.len() as u32,
+                        );
+                    }
+                }
             }
         }
         self.desktop_vertices = self.vertices.len();
@@ -944,6 +1049,89 @@ fn clip_convex_edge(
     output
 }
 
+// Edge-only meshes: no full-window image allocation or per-pixel integration.
+// Their geometry is retained with the desktop scene until size/z/focus changes.
+fn append_window_chrome(output: &mut Vec<Vertex>, chrome: &WindowChrome, shadow: bool) {
+    use mochios_viewkit_gpu_protocol::continuous_corner::{RoundedRect, polygon_segments};
+    let shape = RoundedRect::uniform(
+        [
+            chrome.frame.x as f32,
+            chrome.frame.y as f32,
+            chrome.frame.width as f32,
+            chrome.frame.height as f32,
+        ],
+        chrome.radius,
+    );
+    let segments = polygon_segments(chrome.radius + 20.0);
+    if shadow {
+        if chrome.radius == 0.0 {
+            return;
+        }
+        let layers: &[crate::window_elevation::Layer] = if chrome.active {
+            &crate::window_elevation::ACTIVE
+        } else {
+            &crate::window_elevation::INACTIVE
+        };
+        for layer in layers.iter().rev() {
+            // A middle stop softens the falloff without multiplying full shapes.
+            let contour = |fraction: f32| {
+                let mut points = Vec::new();
+                shape.for_each_offset_point(
+                    segments,
+                    (layer.blur_radius + layer.spread) as f32 * fraction,
+                    |(x, y)| points.push((x, y + layer.offset_y as f32 * fraction)),
+                );
+                points
+            };
+            let inside = contour(0.0);
+            let middle = contour(0.4);
+            let outside = contour(1.0);
+            let alpha = layer.alpha as f32 / 255.0;
+            append_contour_ring(output, &inside, &middle, alpha, alpha * 0.35);
+            append_contour_ring(output, &middle, &outside, alpha * 0.35, 0.0);
+        }
+    } else {
+        let mut outside = Vec::new();
+        let mut inside = Vec::new();
+        shape.for_each_offset_point(segments, 0.0, |p| outside.push(p));
+        shape.for_each_offset_point(segments, -1.0, |p| inside.push(p));
+        let alpha = if chrome.active {
+            crate::window_elevation::BORDER_ALPHA
+        } else {
+            crate::window_elevation::INACTIVE_BORDER_ALPHA
+        } as f32
+            / 255.0;
+        append_contour_ring(output, &inside, &outside, alpha, alpha);
+    }
+}
+
+fn append_contour_ring(
+    output: &mut Vec<Vertex>,
+    inside: &[(f32, f32)],
+    outside: &[(f32, f32)],
+    inner_alpha: f32,
+    outer_alpha: f32,
+) {
+    if inside.len() != outside.len() {
+        return;
+    }
+    let vertex = |p: (f32, f32), alpha| Vertex {
+        x: p.0,
+        y: p.1,
+        u: 0.5,
+        v: 0.5,
+        color: [0.0, 0.0, 0.0, alpha],
+    };
+    for i in 0..inside.len() {
+        let j = (i + 1) % inside.len();
+        let a = vertex(inside[i], inner_alpha);
+        let b = vertex(outside[i], outer_alpha);
+        let c = vertex(outside[j], outer_alpha);
+        let d = vertex(inside[j], inner_alpha);
+        output.extend_from_slice(&[a, b, c, a, c, d]);
+    }
+}
+
 fn push_solid_quad(output: &mut Vec<Vertex>, bounds: Rect, color: [f32; 4]) {
     output.extend_from_slice(&solid_quad(bounds, color));
 }
@@ -1264,6 +1452,57 @@ fn encode_compositor_scene(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn window_elevation_meshes_are_hollow_bounded_and_focus_sensitive() {
+        let mut chrome = WindowChrome {
+            id: WindowId(7),
+            frame: Rect {
+                x: 100,
+                y: 100,
+                width: 400,
+                height: 300,
+            },
+            radius: crate::window_elevation::CORNER_RADIUS,
+            active: true,
+        };
+        let mut shadow = Vec::new();
+        append_window_chrome(&mut shadow, &chrome, true);
+        let active_alpha: f32 = shadow.iter().map(|v| v.color[3]).sum();
+        assert!(!shadow.is_empty() && shadow.len() < 4096);
+        for v in &shadow {
+            assert!(v.x >= 80. && v.x <= 520. && v.y >= 80. && v.y <= 420.);
+            assert!(v.color[3] >= 0. && v.color[3] <= 32. / 255.);
+        }
+        for triangle in shadow.chunks_exact(3) {
+            let min_x = triangle.iter().map(|v| v.x).fold(f32::INFINITY, f32::min);
+            let max_x = triangle
+                .iter()
+                .map(|v| v.x)
+                .fold(f32::NEG_INFINITY, f32::max);
+            let min_y = triangle.iter().map(|v| v.y).fold(f32::INFINITY, f32::min);
+            let max_y = triangle
+                .iter()
+                .map(|v| v.y)
+                .fold(f32::NEG_INFINITY, f32::max);
+            assert!(!(min_x <= 300. && max_x >= 300. && min_y <= 250. && max_y >= 250.));
+        }
+        chrome.active = false;
+        let mut inactive = Vec::new();
+        append_window_chrome(&mut inactive, &chrome, true);
+        assert!(inactive.iter().map(|v| v.color[3]).sum::<f32>() < active_alpha);
+        let mut border = Vec::new();
+        append_window_chrome(&mut border, &chrome, false);
+        assert!(!border.is_empty());
+        assert!(border.iter().all(|v| v.color[3] == crate::window_elevation::INACTIVE_BORDER_ALPHA as f32 / 255.));
+        chrome.radius = 0.;
+        shadow.clear();
+        append_window_chrome(&mut shadow, &chrome, true);
+        assert!(
+            shadow.is_empty(),
+            "maximized windows must not acquire a desktop shadow"
+        );
+    }
 
     #[test]
     fn maximize_and_restore_change_both_window_clip_and_input_corners() {

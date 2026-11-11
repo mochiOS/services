@@ -83,7 +83,7 @@ pub(crate) fn handle_request(
     next_z: &mut u32,
     pointer_serials: &mut [PointerSerial],
     _pointer_focus: &mut Option<usize>,
-    _keyboard_focus: &mut Option<usize>,
+    keyboard_focus: &mut Option<usize>,
     pointer_grab: &mut Option<PointerGrab>,
     pointer_x: i32,
     pointer_y: i32,
@@ -305,6 +305,20 @@ pub(crate) fn handle_request(
                     .max(40i32.saturating_add(insets.top as i32));
             }
             reposition_window_surfaces(surfaces, &windows[window_index]);
+            let active = content_surface_index_for_window(surfaces, &windows[window_index])
+                .is_some_and(|index| *keyboard_focus == Some(index));
+            send_event(
+                surfaces[decoration_index].event_endpoint,
+                surfaces[decoration_index].token,
+                if active {
+                    EVENT_FOCUS_GAINED
+                } else {
+                    EVENT_FOCUS_LOST
+                },
+                0,
+                0,
+                0,
+            );
             put_u32(&mut reply, 0, 0);
         }
         OP_DECOR_DETACH => {

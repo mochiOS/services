@@ -130,6 +130,7 @@ fn perf_counter() -> u64 {
 fn try_gpu_scene_present(
     surfaces: &[Surface],
     windows: &[Window],
+    keyboard_focus: Option<usize>,
     present_frame: &mut PresentFrame,
     display_tid: u64,
     display_width: u32,
@@ -155,6 +156,12 @@ fn try_gpu_scene_present(
     if force_atlas_upload {
         gpu_compositor.invalidate_textures();
     }
+    gpu_compositor.set_active_window(
+        keyboard_focus
+            .and_then(|i| surfaces.get(i))
+            .filter(|s| s.live && s.window != WindowId(0))
+            .map(|s| s.window),
+    );
     let composition_start = perf_counter();
     let copy_result = (|| {
         let scene = gpu_compositor.compose(
@@ -349,6 +356,7 @@ pub(crate) fn composite_and_present(
         return try_gpu_scene_present(
             surfaces,
             windows,
+            keyboard_focus,
             present_frame,
             display_tid,
             display_width,
@@ -481,12 +489,9 @@ pub(crate) fn composite_and_present(
             }
             let coverage_mask =
                 window_style.map(|(_, frame, _, radius)| RoundedCoverage::new(frame, radius));
-            let border_mask =
-                window_style
-                    .filter(|(_, _, active, _)| *active)
-                    .map(|(_, frame, _, radius)| {
-                        RoundedCoverage::new(inset_rect(frame, 1), (radius - 1.0).max(0.0))
-                    });
+            let border_mask = window_style.map(|(_, frame, _, radius)| {
+                RoundedCoverage::new(inset_rect(frame, 1), (radius - 1.0).max(0.0))
+            });
             for dy in copy_top as usize..copy_bottom as usize {
                 let sy = (dy as i64).saturating_sub(surface.y as i64) as usize;
                 for dx in copy_left as usize..copy_right as usize {
@@ -514,8 +519,13 @@ pub(crate) fn composite_and_present(
                         let inner_coverage = mask.at(dx as i32, dy as i32);
                         let border_coverage = coverage.saturating_sub(inner_coverage);
                         if border_coverage != 0 {
-                            let alpha = ((u32::from(ACTIVE_WINDOW_BORDER_ALPHA)
-                                * u32::from(border_coverage)
+                            let alpha = ((u32::from(
+                                if window_style.is_some_and(|(_, _, active, _)| active) {
+                                    ACTIVE_WINDOW_BORDER_ALPHA
+                                } else {
+                                    crate::window_elevation::INACTIVE_BORDER_ALPHA
+                                },
+                            ) * u32::from(border_coverage)
                                 + 127)
                                 / 255) as u8;
                             *slot = blend_black_over_xrgb(*slot, alpha);
