@@ -10,6 +10,7 @@ mod app_image;
 mod native_app;
 mod image_diagnostics;
 mod image_catalog;
+mod resource_tokens;
 mod native_bootstrap;
 mod prepared_image;
 mod broker_launch;

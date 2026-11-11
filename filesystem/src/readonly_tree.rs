@@ -77,10 +77,11 @@ impl Tree {
                 }
             }
         }
-        // Charge metadata as well, including path components and map entries.
+        // Conservatively charge 1 KiB per node plus both name copies, covering
+        // node-vector capacity, sparse B-tree allocations and path components.
         let metadata = nodes
             .iter()
-            .try_fold(0usize, |n, node| n.checked_add(256 + node.name.len() * 2))
+            .try_fold(0usize, |n, node| n.checked_add(1024 + node.name.len() * 2))
             .ok_or(12)?;
         let charged = bytes.len().checked_add(metadata).ok_or(12)?;
         budget
@@ -169,6 +170,8 @@ pub struct Open {
     pub tree: Arc<Tree>,
     pub node: usize,
     pub identity_base: u64,
+    /// Filesystem namespace volume identity, distinct from pager identity.
+    pub volume: u32,
     pub offset: u64,
     pub flags: u32,
     pub cursor_records: bool,
@@ -194,7 +197,7 @@ impl Open {
             };
             let result = if self.cursor_records {
                 wire::encode_cursor_dir_entry(
-                    self.identity_base + index as u64,
+                    (u64::from(self.volume) << 32) | (index as u64 + 1),
                     kind,
                     name.as_bytes(),
                     ordinal as u64 + 1,
@@ -202,7 +205,7 @@ impl Open {
                 )
             } else {
                 wire::encode_dir_entry(
-                    self.identity_base + index as u64,
+                    (u64::from(self.volume) << 32) | (index as u64 + 1),
                     kind,
                     name.as_bytes(),
                     &mut out[written..],

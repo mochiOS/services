@@ -62,6 +62,7 @@ fn metadata_impl<'a>(
         process,
         mapped,
         None,
+        None,
     )
 }
 
@@ -85,6 +86,7 @@ pub(crate) fn metadata_for_vectors(
         process,
         None,
         Some(stdio),
+        None,
     )
 }
 
@@ -100,6 +102,7 @@ fn metadata_vectors<'a>(
         &app_image::Mechanisms<'a>,
     )>,
     stdio: Option<&crate::app_stdio::Stdio>,
+    resources: Option<&crate::resource_tokens::Token>,
 ) -> Result<Vec<u8>, Error> {
     use mnu_abi::process_create::{self, HandleGrant};
     let mut startup = vec![0; process_create::MAX_REQUEST_BYTES];
@@ -151,6 +154,7 @@ fn metadata_vectors<'a>(
             | mnu_abi::HANDLE_RIGHT_DUPLICATE
             | mnu_abi::HANDLE_RIGHT_TRANSFER,
     }];
+    if let Some(resources) = resources { handles.extend(resources.handles()); }
     let mut values = Vec::new();
     if let Some(stdio) = stdio {
         handles.extend(stdio.handles());
@@ -318,6 +322,7 @@ pub(crate) fn launch_captured(
         .map(|image| image.image)
         .unwrap_or(source.handle());
     let output = prepared.as_ref().map(|image| image.bytes).unwrap_or(&bytes);
+    let resources = crate::resource_tokens::issue(catalog, output)?;
     let mut metadata_owner = mochios_posix_client::startup_metadata::Owner::default();
     let metadata = metadata_vectors(
         path,
@@ -342,6 +347,7 @@ pub(crate) fn launch_captured(
         },
         Some((&mut metadata_owner, &mechanisms)),
         stdio,
+        resources.as_ref(),
     )?;
     crate::resolver::authorize_spawn_image(
         0,

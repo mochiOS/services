@@ -147,6 +147,7 @@ pub(crate) fn validate_declared_root(
 
 /// Inert startup authority plan, derived only from an installed authenticated
 /// manifest. File bytes are separately captured and checked before publication.
+#[derive(Clone)]
 pub(crate) struct ResourceSet {
     pub(crate) alias: String,
     pub(crate) identity: ApplicationIdentity,
@@ -367,6 +368,7 @@ impl Catalog {
                 });
             }
         }
+        if resources.iter().map(|set| set.files.len()).sum::<usize>() > 8192 { return Err(syscall::SysError::from_raw(-7)); }
         Ok(Self {
             root,
             libraries,
@@ -381,6 +383,8 @@ impl Catalog {
 
     /// Aliases are local to the selected executable. An installed package or
     /// code dependency alone is never enough to select an external data set.
+    pub(crate) fn resource_sets(&self) -> Vec<ResourceSet> { self.resources.clone() }
+
     pub(crate) fn resource_set(&self, alias: &str) -> Result<&ResourceSet, syscall::SysError> {
         self.resources
             .iter()

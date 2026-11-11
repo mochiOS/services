@@ -6,6 +6,9 @@ mod app_image;
 #[path = "../../capability/src/image_catalog.rs"]
 mod image_catalog;
 #[allow(dead_code)]
+#[path = "../../capability/src/resource_tokens.rs"]
+mod resource_tokens;
+#[allow(dead_code)]
 #[path = "../../capability/src/native_app.rs"]
 mod production;
 
@@ -185,6 +188,12 @@ mod persistent_grant {
     }
 }
 
+mod image_diagnostics {
+    pub(crate) fn publish(_: u32, _: u64, _: &crate::image_catalog::Catalog, _: &[u8], _: &[u8], _: &[u8], _: u64, _: u32) -> Result<(), mochi_user_platform::syscall::SysError> {
+        panic!("metadata tests must not publish native process observations")
+    }
+}
+
 mod trusted_images {
     pub(crate) struct TrustedImages;
     impl TrustedImages {
@@ -258,6 +267,7 @@ fn application_metadata_accepts_local_prepared_data_and_keeps_remote_items_unpri
         lifecycle: b"life\0",
         tls: b"tls\0",
         indirect: &[],
+        loaded_objects: &[],
     };
     let bytes = production::metadata_for_process(
         "/app",
@@ -361,7 +371,7 @@ fn full_executable_identity_is_not_limited_by_the_display_label() {
 fn application_launch_uses_native_creation_and_registers_before_resume() {
     let source = include_str!("../../capability/src/native_app.rs");
     assert!(
-        source.find("register_launched_child_in_scope(").unwrap()
+        source.find("register_launched_child_credentials(").unwrap()
             < source.find("resume_handle(").unwrap()
     );
     assert!(source.contains("create_stopped(image, &metadata)"));

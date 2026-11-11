@@ -11,6 +11,14 @@ impl FilesystemService {
             return Err(ENOSPC);
         }
         let tree = Tree::capture(bytes, &self.snapshot_budget)?;
+        if self.namespace.is_none() {
+            self.namespace = Some(Namespace::new(self.fs.clone())?);
+        }
+        let volume = self
+            .namespace
+            .as_mut()
+            .ok_or(EIO)?
+            .readonly_tree_volume(&tree)?;
         let identity_base = self.next_open_id;
         let id = identity_base.checked_add(tree.nodes() as u64).ok_or(EIO)?;
         let next = id
@@ -24,6 +32,7 @@ impl FilesystemService {
                 tree,
                 node: 0,
                 identity_base,
+                volume,
                 offset: 0,
                 flags: protocol::OPEN_AT_READ | protocol::OPEN_AT_DIRECTORY,
                 cursor_records: true,
@@ -95,6 +104,7 @@ impl FilesystemService {
             tree: parent.tree.clone(),
             node,
             identity_base: parent.identity_base,
+            volume: parent.volume,
             offset: 0,
             flags: protocol::OPEN_AT_READ
                 | if directory {
@@ -130,8 +140,8 @@ impl FilesystemService {
             open.tree.length(node)?
         };
         let status = protocol::NodeStatus {
-            device: u64::MAX,
-            node_id: open.identity_base + node as u64,
+            device: u64::from(open.volume),
+            node_id: (u64::from(open.volume) << 32) | (node as u64 + 1),
             kind: if directory {
                 protocol::NODE_TYPE_DIRECTORY
             } else {

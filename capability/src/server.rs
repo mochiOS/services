@@ -215,6 +215,10 @@ pub(crate) fn serve_capability_requests(mut state: CapabilityServiceState) -> ! 
             platform::process::exit(1);
         }
     };
+    if let Err(error) = crate::resource_tokens::initialize(receive_object) {
+        platform::logln!("capability.service: resource registry failed raw={}", error.raw());
+        platform::process::exit(1);
+    }
     let mut execution_requests = match crate::execution_requests::Registry::new() {
         Ok(registry) => registry,
         Err(error) => {
@@ -339,6 +343,27 @@ pub(crate) fn serve_capability_requests(mut state: CapabilityServiceState) -> ! 
         } else {
             0
         };
+        if opcode == mnu_abi::provider::MAGIC {
+            let released = crate::resource_tokens::release(slice, &attached);
+            close_received_handles(&attached);
+            if !released { capability_reply(sender, 13); }
+            continue;
+        }
+        if opcode == platform::capability::resources::OPCODE {
+            let result = crate::resource_tokens::request(sender, slice, &attached);
+            close_received_handles(&attached);
+            match result {
+                Ok(Some(object)) => {
+                    let mut objects = platform::ipc::IpcObjectHandles::default(); objects.count = 1;
+                    objects.handles[0] = platform::ipc::IpcObjectHandle { handle: object.handle, reserved: 0, rights: object.rights };
+                    let _ = platform::ipc::reply_object_handles(sender, &0i64.to_le_bytes(), &objects);
+                    let _ = platform::handle::close(object.handle);
+                }
+                Ok(None) => { let _ = platform::ipc::reply(sender, &0i64.to_le_bytes()); }
+                Err(error) => { let _ = platform::ipc::reply(sender, &(-(error_status(error) as i64)).to_le_bytes()); }
+            }
+            continue;
+        }
         if opcode == platform::pci::MAGIC {
             let result = if attached.count == 0 && attached.is_user_delivery() {
                 crate::pci_resources::request(sender, slice)

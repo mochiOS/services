@@ -42,6 +42,7 @@ enum NodeBacking {
 enum Volume {
     Ext4(Ext4),
     Device(DeviceFilesystem),
+    Snapshot(std::sync::Weak<crate::readonly_tree::Tree>),
 }
 
 impl Node {
@@ -117,6 +118,19 @@ impl Namespace {
             named_mounts: BTreeMap::new(),
             named_parents: HashMap::new(),
         })
+    }
+
+    /// Allocate a volume identity representable by the existing C stat ABI.
+    /// Weak ownership permits reuse only after every tree reference is gone.
+    pub(crate) fn readonly_tree_volume(&mut self, tree: &Arc<crate::readonly_tree::Tree>) -> Result<u32, i32> {
+        for (id, volume) in self.volumes.iter_mut().enumerate() {
+            if let Volume::Snapshot(old) = volume && old.strong_count() == 0 {
+                *old = Arc::downgrade(tree); return u32::try_from(id).map_err(|_| 75);
+            }
+        }
+        let id = self.volumes.len(); if id > u16::MAX as usize { return Err(28); }
+        self.volumes.try_reserve(1).map_err(|_| 12)?;
+        self.volumes.push(Volume::Snapshot(Arc::downgrade(tree))); Ok(id as u32)
     }
 
     pub fn root(&self) -> Node {
@@ -672,7 +686,7 @@ impl Namespace {
         self.validate(node)?;
         match self.volumes.get(node.volume as usize) {
             Some(Volume::Ext4(filesystem)) => Ok(filesystem),
-            Some(Volume::Device(_)) => Err(95),
+            Some(Volume::Device(_) | Volume::Snapshot(_)) => Err(95),
             None => Err(EINVAL),
         }
     }

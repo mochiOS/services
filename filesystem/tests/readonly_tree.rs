@@ -60,6 +60,7 @@ fn captured_bytes_and_budget_follow_the_last_reference() {
         tree: tree.clone(),
         node,
         identity_base: 10,
+        volume: 1,
         offset: 0,
         flags: 0,
         cursor_records: true,
@@ -82,6 +83,7 @@ fn directory_stream_preserves_cookies_and_omits_other_directory_contents() {
         tree,
         node: 0,
         identity_base: 10,
+        volume: 1,
         offset: 0,
         flags: 0,
         cursor_records: true,
@@ -190,6 +192,9 @@ fn filesystem_status_open_pager_and_mutation_use_the_same_snapshot() {
         .open_id;
     let status = service.stat_handle(wire::Header::default(), file).unwrap();
     let status = wire::decode_node_status(&status.payload).unwrap();
+    assert!(status.device <= u16::MAX as u64);
+    assert_eq!(status.node_id >> 32, status.device);
+    assert!(status.node_id as u32 <= u16::MAX as u32);
     assert_eq!(status.size, 6);
     assert_eq!(status.mode, 0o444);
     assert_eq!(service.provider_read(file, 2).unwrap(), b"ab");
