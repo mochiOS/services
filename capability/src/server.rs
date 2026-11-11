@@ -1006,6 +1006,26 @@ pub(crate) fn serve_capability_requests(mut state: CapabilityServiceState) -> ! 
             let _ = platform::ipc::reply(sender, &reply);
             continue;
         }
+        if opcode == platform::capability::prepared_exec::WITH_RESOURCES_OPCODE {
+            let result = (|| {
+                let length = crate::replayed_exec::length(slice)?;
+                let _reservation = execution_requests.reserve_image(sender, length)?;
+                crate::replayed_exec::authorize_resources(&state, sender, slice, &attached)
+            })();
+            close_received_handles(&attached);
+            match result {
+                Ok(Some(token)) => {
+                    let mut objects = platform::ipc::IpcObjectHandles::default(); objects.count = 2;
+                    for (index, grant) in token.handles().iter().enumerate() {
+                        objects.handles[index] = platform::ipc::IpcObjectHandle { handle: grant.source, reserved: 0, rights: grant.rights };
+                    }
+                    let _ = platform::ipc::reply_object_handles(sender, &0u64.to_le_bytes(), &objects);
+                }
+                Ok(None) => capability_reply(sender, 13),
+                Err(error) => capability_reply(sender, error_status(error)),
+            }
+            continue;
+        }
         if opcode == platform::capability::prepared_exec::OPCODE {
             let result = (|| {
                 let length = crate::replayed_exec::length(slice)?;

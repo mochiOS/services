@@ -131,8 +131,8 @@ mod address_space {
         }
     }
 }
-fn attach_fd_launch_context(_: &FdTable<FdObject>, _: &mut [u8], len: usize) -> Result<usize, i32> {
-    Ok(len)
+fn attach_fd_launch_context(_: &FdTable<FdObject>, output: &mut [u8], len: usize, resources: &[mnu_abi::process_image::ContextUpdate; 2]) -> Result<usize, i32> {
+    mnu_abi::process_image::attach_context(output, len, resources).map_err(|_| EIO)
 }
 struct Client;
 fn posix_client() -> Result<Client, i32> {
@@ -243,6 +243,9 @@ impl Client {
 mod syscall {
     pub use mnu_abi::SyscallNumber;
     pub const HANDLE_RIGHT_READ: u64 = mnu_abi::HANDLE_RIGHT_READ;
+    pub const HANDLE_RIGHT_DUPLICATE: u64 = mnu_abi::HANDLE_RIGHT_DUPLICATE;
+    pub const HANDLE_RIGHT_TRANSFER: u64 = mnu_abi::HANDLE_RIGHT_TRANSFER;
+    pub const HANDLE_RIGHT_SEND: u64 = mnu_abi::HANDLE_RIGHT_SEND;
     pub fn raw_syscall3(n: SyscallNumber, d: u64, s: u64, l: u64) -> Result<u64, i32> {
         super::user_copy_native::syscall::raw_syscall3(n, d, s, l)
     }
@@ -394,7 +397,7 @@ mod syscall {
         assert!(super::DEFER.get() > 0);
         let request = unsafe { std::slice::from_raw_parts(request as *const u8, len as usize) };
         let replayed =
-            request[..4] == mochios_capability_protocol::prepared_exec::OPCODE.to_le_bytes();
+            request[..4] == mochios_capability_protocol::prepared_exec::WITH_RESOURCES_OPCODE.to_le_bytes();
         let (digest, key) = if replayed {
             let (key, length, digest) =
                 mochios_capability_protocol::prepared_exec::decode(request).unwrap();
@@ -453,6 +456,12 @@ mod syscall {
                 return Err(super::EAGAIN);
             }
             *objects = Default::default();
+            if replayed && s.failure != 5 {
+                objects.count = 2;
+                let rights = HANDLE_RIGHT_DUPLICATE | HANDLE_RIGHT_TRANSFER;
+                objects.handles[0] = mnu_abi::IpcObjectHandle { handle: 405, reserved: 0, rights };
+                objects.handles[1] = mnu_abi::IpcObjectHandle { handle: 406, reserved: 0, rights: rights | HANDLE_RIGHT_SEND };
+            }
             if s.failure == 6 {
                 objects.count = 2;
                 objects.handles[0].handle = 404;
@@ -526,11 +535,20 @@ fn table() -> FdTable<FdObject> {
     );
     t
 }
+// Use a real fixed ELF; random bytes must not reach image authorization.
+fn fixed_fixture() -> Vec<u8> {
+    let mut bytes: Vec<_> = (0..17001).map(|n| (n % 251) as u8).collect();
+    bytes[..120].fill(0); bytes[..7].copy_from_slice(b"\x7fELF\x02\x01\x01");
+    for (at, value) in [(16, 2u16), (18, 62), (52, 64), (54, 56), (56, 1)] { bytes[at..at+2].copy_from_slice(&value.to_le_bytes()); }
+    bytes[20..24].copy_from_slice(&1u32.to_le_bytes());
+    for (at, value) in [(24, 0x400080u64), (32, 64), (80, 0x400000), (88, 0x400000), (96, 17001), (104, 20480), (112, 4096)] { bytes[at..at+8].copy_from_slice(&value.to_le_bytes()); }
+    bytes[64..68].copy_from_slice(&1u32.to_le_bytes()); bytes[68..72].copy_from_slice(&5u32.to_le_bytes()); bytes
+}
 fn reset(failure: u8) {
     STATE.with_borrow_mut(|s| {
         *s = State {
             failure,
-            bytes: (0..17001).map(|n| (n % 251) as u8).collect(),
+            bytes: fixed_fixture(),
             ..Default::default()
         }
     });
@@ -2156,7 +2174,7 @@ fn static_fixed_image_preserves_exact_bytes_in_a_private_readonly_snapshot() {
             "-fno-stack-protector",
             "-nostdlib",
             "-static",
-            "-Wl,-no-pie,-e,_start,-z,noexecstack",
+            "-Wl,-no-pie,-e,_start,-z,noexecstack,-Ttext-segment=0x400000",
         ])
         .arg(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/elf_symbol_fixture.c"))
         .arg("-o")
@@ -2197,21 +2215,32 @@ fn static_fixed_image_preserves_exact_bytes_in_a_private_readonly_snapshot() {
         assert!(!s.closed.contains(&19));
     });
     for stride in [56usize, 64] {
-        let mut source = bytes.clone();
+        let mut source = fixed_fixture();
         if stride != 56 {
-            let offset = u64::from_le_bytes(bytes[32..40].try_into().unwrap()) as usize;
-            let count = u16::from_le_bytes(bytes[56..58].try_into().unwrap()) as usize;
+            // A relocated program-header table must itself remain mapped.
+            // Use a single real RX load rather than expanding one segment
+            // across unrelated segments in a host linker's output.
+            let mut entry = source[64..120].to_vec();
+            source.resize(source.len().div_ceil(8)*8, 0);
             let expanded = source.len();
-            for entry in bytes[offset..offset + count * 56].chunks_exact(56) {
-                source.extend_from_slice(entry);
-                source.extend_from_slice(&[0xa5; 8]);
-            }
+            let total = expanded + 64;
+            entry[32..40].copy_from_slice(&(total as u64).to_le_bytes());
+            source.extend_from_slice(&entry);
+            source.extend_from_slice(&[0xa5; 8]);
             source[32..40].copy_from_slice(&(expanded as u64).to_le_bytes());
             source[54..56].copy_from_slice(&(stride as u16).to_le_bytes());
         }
         assert_eq!(search_exec(&source, &[], &[], 0, 0), Err(ENOEXEC));
         STATE.with_borrow(|state| {
-            assert_eq!(state.entered, 1);
+            if stride != 56 {
+                // The loader deliberately accepts ELF64's exact 56-byte
+                // records, rejecting unknown layouts before authorization.
+                assert_eq!(state.entered, 0);
+                assert!(!state.closed.contains(&19));
+                return;
+            }
+
+            assert_eq!(state.entered, 1, "stride={stride}");
             assert_eq!(state.prepared, source);
             assert!(state.library_paths.is_empty());
             assert!(
@@ -2362,4 +2391,20 @@ fn exec_requires_the_writable_contract_and_keeps_readonly_source_loads_readonly(
             }
         });
     }
+}
+
+#[test]
+fn dynamic_exec_installs_its_own_resource_context_and_reclaims_failed_commit_replies() {
+    let (root, library) = dependency_fixture(&[], &[]);
+    assert_eq!(search_exec(&root, &[(b"/usr/lib/libscope.so", &library)], &[], 0, 0), Err(ENOEXEC));
+    STATE.with_borrow(|state| {
+        assert_eq!(state.entered, 1);
+        let image = mnu_abi::process_image::decode(&state.startup).unwrap();
+        let context: Vec<_> = image.context_updates().collect();
+        use mochios_capability_protocol::resources::{ROOT_KEY, CONTROL_KEY};
+        use mnu_abi::process_image::ContextUpdate as U;
+        assert!(context.contains(&U { kind: U::SET_HANDLE, key: ROOT_KEY, value: 405 }));
+        assert!(context.contains(&U { kind: U::SET_HANDLE, key: CONTROL_KEY, value: 406 }));
+        for handle in [405, 406] { assert_eq!(state.closed.iter().filter(|h| **h == handle).count(), 1); }
+    });
 }

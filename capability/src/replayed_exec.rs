@@ -24,6 +24,24 @@ pub(crate) fn authorize(
     request: &[u8],
     attached: &p::ipc::IpcObjectHandles,
 ) -> Result<(), SysError> {
+    authorize_impl(state, sender, request, attached, false).map(|_| ())
+}
+
+pub(crate) fn authorize_resources(
+    state: &crate::state::CapabilityServiceState,
+    sender: u64,
+    request: &[u8],
+    attached: &p::ipc::IpcObjectHandles,
+) -> Result<Option<crate::resource_tokens::Token>, SysError> {
+    authorize_impl(state, sender, request, attached, true)
+}
+fn authorize_impl(
+    state: &crate::state::CapabilityServiceState,
+    sender: u64,
+    request: &[u8],
+    attached: &p::ipc::IpcObjectHandles,
+    resources: bool,
+) -> Result<Option<crate::resource_tokens::Token>, SysError> {
     let (key, length, expected) = p::capability::prepared_exec::decode(request)
         .map_err(|_| SysError::from_raw(EINVAL as i64))?;
     if !attached.is_user_delivery() || attached.count != 1 {
@@ -116,12 +134,27 @@ pub(crate) fn authorize(
     )?;
     if let Some(revision) = before.image.image_revision.checked_add(1) {
         if let Err(error) = crate::image_diagnostics::publish(
-            session_process.0, revision, &catalog, source, prepared.bytes, prepared.loaded_objects,
-            prepared.executable.map(|image| image.load_bias).unwrap_or(0),
+            session_process.0,
+            revision,
+            &catalog,
+            source,
+            prepared.bytes,
+            prepared.loaded_objects,
+            prepared
+                .executable
+                .map(|image| image.load_bias)
+                .unwrap_or(0),
             credentials.real_uid,
         ) {
-            p::logln!("capability.service: exec diagnostic metadata unavailable: {:?}", error);
+            p::logln!(
+                "capability.service: exec diagnostic metadata unavailable: {:?}",
+                error
+            );
         }
     }
-    Ok(())
+    if resources {
+        crate::resource_tokens::issue(&catalog, prepared.bytes)
+    } else {
+        Ok(None)
+    }
 }
