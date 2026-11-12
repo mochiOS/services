@@ -446,6 +446,23 @@ impl Catalog {
             .map(|image| (image.path.clone(), image.size, image.digest))
             .collect()
     }
+    /// Search only directories of authenticated declared library inputs. This
+    /// is discovery, not authority: scoped reads and captured digests still
+    /// validate every candidate. Never include the executable's ambient folder.
+    pub(crate) fn library_path(&self) -> Result<Option<Vec<u8>>, syscall::SysError> {
+        let mut directories = Vec::<&str>::new();
+        for image in &self.libraries {
+            let (directory, _) = image.path.rsplit_once('/').ok_or_else(denied)?;
+            let directory = if directory.is_empty() { "/" } else { directory };
+            if directory.contains(':') {
+                return Err(denied());
+            }
+            if !directories.contains(&directory) {
+                directories.push(directory);
+            }
+        }
+        Ok((!directories.is_empty()).then(|| directories.join(":").into_bytes()))
+    }
     pub(crate) fn matches_provider(
         required: &package::LibraryDependency,
         actual: &VerifiedManifest,

@@ -408,3 +408,21 @@ fn file_bound_commands_keep_root_and_dependency_digest_checks() {
             .is_err()
     );
 }
+
+#[test]
+fn library_search_uses_only_authenticated_code_directories() {
+    assert_eq!(
+        catalog().library_path().unwrap().as_deref(),
+        Some(&b"/applications/Test.app/lib"[..])
+    );
+    let text = manifest()
+        .replace(
+            "/applications/Test.app/lib/library.so",
+            "/applications/Test.app/lib:other/library.so",
+        )
+        .replace("$/lib/library.so", "$/lib:other/library.so");
+    install(&text);
+    let snapshot = resolver::verified_manifest(MANIFEST, read_file).unwrap();
+    let catalog = image_catalog::Catalog::new(snapshot, APP).unwrap();
+    assert!(catalog.library_path().is_err());
+}

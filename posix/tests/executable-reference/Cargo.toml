@@ -4,6 +4,7 @@ version="0.1.0"
 edition="2024"
 [workspace]
 [dependencies]
+libc = "0.2"
 mochi-user-platform={path="../../../../user/crates/platform",default-features=false,features=["std"]}
 mochios-posix-client={path="../../../../user/crates/posix-client",default-features=false,features=["syscall-endpoint"]}
 mochios-posix-protocol={path="../../../../user/crates/posix-protocol"}

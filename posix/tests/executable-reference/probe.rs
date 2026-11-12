@@ -3,7 +3,7 @@ use mochi_user_platform as p;
 use std::{
     fs::OpenOptions,
     io::{Read, Write},
-    os::fd::AsFd,
+    os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd},
 };
 fn main() {
     std::panic::set_hook(Box::new(|info| {
@@ -56,6 +56,47 @@ fn main() {
             std::fs::read_to_string("/tmp/executable-api-fd.log")?,
             "owned-helper\n"
         );
+        // Real WebKit transport: packet boundaries, CLOEXEC source sockets,
+        // explicitly delegated child FD 3, and a bidirectional native roundtrip.
+        let mut pair = [-1; 2];
+        if unsafe {
+            libc::socketpair(
+                libc::AF_UNIX,
+                libc::SOCK_SEQPACKET | libc::SOCK_CLOEXEC,
+                0,
+                pair.as_mut_ptr(),
+            )
+        } != 0
+        {
+            return Err(std::io::Error::last_os_error());
+        }
+        let server = unsafe { OwnedFd::from_raw_fd(pair[0]) };
+        let client = unsafe { OwnedFd::from_raw_fd(pair[1]) };
+        let mut command = Command::new(Executable::dependency("external-worker")?);
+        command
+            .arg("ipc")
+            .arg("3")
+            .env_clear()
+            .inherit_fd(client.as_fd(), 3)?;
+        let mut child = command.spawn()?;
+        drop(client);
+        assert_eq!(
+            unsafe { libc::send(server.as_raw_fd(), b"host".as_ptr().cast(), 4, 0) },
+            4
+        );
+        let mut reply = [0; 64];
+        let length = unsafe {
+            libc::recv(
+                server.as_raw_fd(),
+                reply.as_mut_ptr().cast(),
+                reply.len(),
+                0,
+            )
+        };
+        assert_eq!(length, 16);
+        assert_eq!(&reply[..16], b"external-helper\n");
+        assert!(child.wait()?.success());
+        writeln!(result, "SOCK_SEQPACKET FD3 roundtrip PASS")?;
         Ok(())
     }));
     match run {

@@ -33,7 +33,8 @@ such a permission to make this test pass. No helper is loaded from initfs.
 The probe checks own-package and publisher-pinned external helper selection,
 missing/invalid aliases, ABI mismatch, refusal of a child requiring more
 capabilities, empty child environment, pipe output, stable repeated wait, and
-an explicitly mapped FD 7 with verified file contents. It also catches failure
+an explicitly mapped FD 7 with verified file contents, and a bidirectional
+`SOCK_SEQPACKET` IPC roundtrip through delegated FD 3 (the WebKit transport). It also catches failure
 to preserve signed Bundle startup keys across fork and to decode packed IPC
 reply lengths correctly. The external helper is an exported application binary
 inside a library package, rather than an implicitly executable library.

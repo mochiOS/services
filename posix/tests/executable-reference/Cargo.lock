@@ -200,6 +200,7 @@ version = "0.1.0"
 name = "native-executable-reference-fixture"
 version = "0.1.0"
 dependencies = [
+ "libc",
  "mochi-user-platform",
  "mochios-appcore",
  "mochios-posix-client",

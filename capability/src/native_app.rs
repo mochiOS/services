@@ -301,13 +301,14 @@ pub(crate) fn launch_captured(
                     .map(str::as_bytes)
             })
         };
+        let declared_library_path = catalog.library_path()?;
         Some(
             reader
                 .prepare(
                     &mut owner,
                     source.handle(),
                     Environment {
-                        library_path: environment("LD_LIBRARY_PATH"),
+                        library_path: environment("LD_LIBRARY_PATH").or(declared_library_path.as_deref()),
                         preload: environment("LD_PRELOAD"),
                         audit: environment("LD_AUDIT"),
                     },
