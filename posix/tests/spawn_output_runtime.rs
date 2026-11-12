@@ -316,3 +316,19 @@ fn committed_exec_succeeds_even_when_the_new_image_has_already_exited() {
         }
     }
 }
+
+#[test]
+fn code_spawn_transfers_the_checked_child_reference_and_rolls_back_copy_failure() {
+    let _serial = SERIAL.lock().unwrap();
+    reset();
+    let mut output=[0u8;8];
+    assert_eq!(implementation::publish_reference(37,HANDLE,output.as_mut_ptr()),0);
+    assert_eq!(i32::from_ne_bytes(output[..4].try_into().unwrap()),37);
+    assert_eq!(u32::from_ne_bytes(output[4..].try_into().unwrap()),HANDLE);
+    assert!(CLOSED.lock().unwrap().is_empty());
+    assert!(CLEANED.lock().unwrap().is_empty());
+    assert!(CONTROL.callback_resources.is_empty());
+    reset();
+    assert_eq!(implementation::publish_reference(37,HANDLE,std::ptr::null_mut()),EFAULT);
+    assert_retired(false);
+}

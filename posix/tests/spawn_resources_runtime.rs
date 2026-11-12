@@ -129,7 +129,8 @@ fn read_spawn_status(handle:u32)->Result<mochios_posix_client::spawn::ExecStatus
   _=>Ok(mochios_posix_client::spawn::ExecStatus::Succeeded)
  }}
 }}
-mod spawn_output{{pub fn publish(pid:u64,handle:u32,output:*mut i32)->i32{{
+mod spawn_output{{pub fn publish_reference(pid:u64,handle:u32,output:*mut u8)->i32{{publish(pid,handle,output.cast())}}
+pub fn publish(pid:u64,handle:u32,output:*mut i32)->i32{{
  assert_eq!(pid,37);assert_eq!(handle,42);assert!(crate::CONTROL.native.load(crate::Ordering::Relaxed)>0);
  crate::event("publish".into());
  // The real nested publication owner is covered separately; model its two

@@ -59,6 +59,7 @@ pub(crate) struct ApplicationIdentity {
 
 /// One authenticated manifest snapshot. Consumers must use this parsed value,
 /// rather than attaching the authentication result to an earlier index copy.
+#[derive(Clone)]
 pub(crate) struct VerifiedManifest {
     pub(crate) manifest: platform::package::PackageManifest,
     pub(crate) identity: ApplicationIdentity,

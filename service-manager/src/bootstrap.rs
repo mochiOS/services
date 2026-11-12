@@ -917,7 +917,19 @@ impl BootstrapOperations for Runtime {
                     endpoint
                 ));
                 #[cfg(feature = "native-unix-extension-probe")]
-                service_launcher::native_unix_extension_launcher::run(self.logger_endpoint, endpoint);
+                {
+                    #[cfg(feature = "native-executable-reference-probe")]
+                    {
+                        let Some(user) = self.spawn_user() else { return false; };
+                        if !self.wait_user_ready(&user) { return false; }
+                        // Retain the authenticated account service throughout the
+                        // fixture; run() below does not return.
+                        let _user = user;
+                        service_launcher::native_unix_extension_launcher::run(self.logger_endpoint, endpoint);
+                    }
+                    #[cfg(not(feature = "native-executable-reference-probe"))]
+                    service_launcher::native_unix_extension_launcher::run(self.logger_endpoint, endpoint);
+                }
                 #[cfg(not(feature = "native-unix-extension-probe"))]
                 true
             }

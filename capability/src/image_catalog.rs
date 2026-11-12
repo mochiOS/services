@@ -31,6 +31,7 @@ pub(crate) struct Catalog {
     diagnostic_version: String,
     diagnostic_name: String,
     resources: Vec<ResourceSet>,
+    executable_owner: Option<(VerifiedManifest, String)>,
 }
 
 fn denied() -> syscall::SysError {
@@ -240,7 +241,13 @@ impl Catalog {
         load: impl FnMut(&str) -> Result<VerifiedManifest, syscall::SysError>,
     ) -> Result<Self, syscall::SysError> {
         let manifest = &verified.manifest;
-        if !executable_package(manifest) {
+        if !executable_package(manifest)
+            && !(manifest.package_kind.as_deref() == Some("library")
+                && manifest.executable_exports.iter().any(|e| {
+                    package::executables::exported(manifest, &e.name)
+                        .is_some_and(|b| b.path == root_path)
+                }))
+        {
             return Err(denied());
         }
         let binary = manifest.binary(root_path).ok_or_else(denied)?;
@@ -248,14 +255,17 @@ impl Catalog {
             return Err(denied());
         }
         let root = image(manifest, binary)?;
-        Self::collect(
+        let owner = (verified.clone(), root_path.into());
+        let mut catalog = Self::collect(
             root,
             verified.identity,
             verified.manifest,
             verified.manifest_digest,
             true,
             load,
-        )
+        )?;
+        catalog.executable_owner = Some(owner);
+        Ok(catalog)
     }
     fn collect(
         root: Image,
@@ -368,7 +378,9 @@ impl Catalog {
                 });
             }
         }
-        if resources.iter().map(|set| set.files.len()).sum::<usize>() > 8192 { return Err(syscall::SysError::from_raw(-7)); }
+        if resources.iter().map(|set| set.files.len()).sum::<usize>() > 8192 {
+            return Err(syscall::SysError::from_raw(-7));
+        }
         Ok(Self {
             root,
             libraries,
@@ -378,12 +390,15 @@ impl Catalog {
             diagnostic_version,
             diagnostic_name,
             resources,
+            executable_owner: None,
         })
     }
 
     /// Aliases are local to the selected executable. An installed package or
     /// code dependency alone is never enough to select an external data set.
-    pub(crate) fn resource_sets(&self) -> Vec<ResourceSet> { self.resources.clone() }
+    pub(crate) fn resource_sets(&self) -> Vec<ResourceSet> {
+        self.resources.clone()
+    }
 
     pub(crate) fn resource_set(&self, alias: &str) -> Result<&ResourceSet, syscall::SysError> {
         self.resources
@@ -420,6 +435,27 @@ impl Catalog {
             return Err(denied());
         }
         Ok(bytes)
+    }
+
+    pub(crate) fn executable_owner(&self) -> Option<(VerifiedManifest, String)> {
+        self.executable_owner.clone()
+    }
+    pub(crate) fn code_inputs(&self) -> Vec<(String, u64, [u8; 32])> {
+        core::iter::once(&self.root)
+            .chain(self.libraries.iter())
+            .map(|image| (image.path.clone(), image.size, image.digest))
+            .collect()
+    }
+    pub(crate) fn matches_provider(
+        required: &package::LibraryDependency,
+        actual: &VerifiedManifest,
+        architecture: &str,
+    ) -> Result<(), syscall::SysError> {
+        matches_dependency(
+            required,
+            &PackageInput::from(actual.clone()),
+            Some(architecture),
+        )
     }
 
     pub(crate) fn identity(&self) -> &ApplicationIdentity {

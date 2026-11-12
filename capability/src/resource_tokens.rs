@@ -18,6 +18,7 @@ struct Grant {
     identity: ApplicationIdentity,
     image: [u8; 32],
     sets: Vec<ResourceSet>,
+    executable_owner: Option<(crate::resolver::VerifiedManifest, String)>,
 }
 struct Registry {
     endpoint: u32,
@@ -86,7 +87,10 @@ pub(crate) fn issue(catalog: &Catalog, prepared: &[u8]) -> Result<Option<Token>,
         return Err(error(-28));
     }
     let id = registry.next;
-    registry.next = id.checked_add(1).ok_or_else(|| error(-28))?;
+    registry.next = id
+        .checked_add(1)
+        .filter(|next| *next < 1u64 << 62)
+        .ok_or_else(|| error(-28))?;
     let handle = p::handle::create_provider_object(registry.endpoint, id, RIGHTS)?;
     let endpoint = registry.endpoint;
     registry.grants.insert(
@@ -95,6 +99,7 @@ pub(crate) fn issue(catalog: &Catalog, prepared: &[u8]) -> Result<Option<Token>,
             identity: catalog.identity().clone(),
             image: Sha256::digest(prepared).into(),
             sets,
+            executable_owner: catalog.executable_owner(),
         },
     );
     Ok(Some(Token { handle, endpoint }))
@@ -104,22 +109,56 @@ fn matches(
     context: &p::syscall::ThreadSecurityContext,
     image: &p::syscall::ProcessImageInfo,
 ) -> bool {
-    let provenance = match grant.identity.provenance {
+    matches_identity(&grant.identity, &grant.image, context, image)
+}
+pub(crate) fn matches_identity(
+    identity: &ApplicationIdentity,
+    digest: &[u8; 32],
+    context: &p::syscall::ThreadSecurityContext,
+    image: &p::syscall::ProcessImageInfo,
+) -> bool {
+    let provenance = match identity.provenance {
         mochios_signature_protocol::InstallProvenance::BuiltIn => 1,
         mochios_signature_protocol::InstallProvenance::VerifiedPackage => 2,
         mochios_signature_protocol::InstallProvenance::Development => 3,
     };
     image.digest_kind == p::syscall::PROCESS_IMAGE_DIGEST_SHA256
-        && image.digest == grant.image
+        && image.digest == *digest
         && context.package_id.get(..context.package_id_len as usize)
-            == Some(grant.identity.package_id.as_bytes())
+            == Some(identity.package_id.as_bytes())
         && context
             .developer_id
             .get(..context.developer_id_len as usize)
-            == Some(grant.identity.developer_id.as_bytes())
-        && context.subject_key_id == grant.identity.subject_key_id
+            == Some(identity.developer_id.as_bytes())
+        && context.subject_key_id == identity.subject_key_id
         && context.provenance == provenance
 }
+/// Validate native startup authority before exposing its retained signed plan.
+pub(crate) fn executable_owner(
+    sender: u64,
+    attached: &p::ipc::IpcObjectHandles,
+) -> Result<(crate::resolver::VerifiedManifest, String), Error> {
+    if !attached.is_user_delivery() || attached.count != 1 {
+        return Err(error(-13));
+    }
+    let token = attached.handles[0];
+    if token.handle == 0 || token.reserved != 0 || token.rights != mnu_abi::HANDLE_RIGHT_TRANSFER {
+        return Err(error(-13));
+    }
+    let id = p::handle::identify_provider_object(token.handle)?;
+    let peer = p::execution_peer::capture(sender)?;
+    let registry = REGISTRY
+        .get()
+        .ok_or_else(|| error(-13))?
+        .lock()
+        .map_err(|_| error(-5))?;
+    let grant = registry.grants.get(&id).ok_or_else(|| error(-13))?;
+    if !matches(grant, &peer.context, &peer.image) {
+        return Err(error(-13));
+    }
+    grant.executable_owner.clone().ok_or_else(|| error(-13))
+}
+
 /// Receiver-only native release is the sole authority to retire a grant.
 pub(crate) fn release(bytes: &[u8], attached: &p::ipc::IpcObjectHandles) -> bool {
     let Ok((header, payload)) = mnu_abi::provider::RequestHeader::decode(bytes) else {
@@ -245,7 +284,13 @@ pub(crate) fn request(
 
 /// Walk canonical components through explicit directory references. Reject
 /// symlinks at every step and nonregular final objects before any data read.
-fn read_asset(path: &str, limit: usize) -> Result<Vec<u8>, Error> {
+pub(crate) fn read_asset(path: &str, limit: usize) -> Result<Vec<u8>, Error> {
+    read_with_mode(path, limit, 0)
+}
+pub(crate) fn read_code(path: &str, limit: usize, executable: bool) -> Result<Vec<u8>, Error> {
+    read_with_mode(path, limit, if executable { 0o555 } else { 0o444 })
+}
+fn read_with_mode(path: &str, limit: usize, required_mode: u32) -> Result<Vec<u8>, Error> {
     use mochios_posix_protocol as flags;
     struct Reference(u32);
     impl Drop for Reference {
@@ -287,7 +332,10 @@ fn read_asset(path: &str, limit: usize) -> Result<Vec<u8>, Error> {
     }
     let (file, _file_owner) = file.ok_or_else(|| error(-13))?;
     let status = crate::persistent_grant::with_client(|client| client.fstat(file))?;
-    if status.mode & 0o170000 != 0o100000 || status.size != limit as i64 {
+    if status.mode & 0o170000 != 0o100000
+        || status.mode & required_mode != required_mode
+        || status.size != limit as i64
+    {
         return Err(error(-13));
     }
     let mut bytes = Vec::new();
@@ -325,6 +373,7 @@ mod tests {
             },
             image: [3; 32],
             sets: Vec::new(),
+            executable_owner: None,
         }
     }
     fn peer() -> (

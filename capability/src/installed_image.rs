@@ -66,7 +66,13 @@ fn select_kind(
                 verified.manifest.package_kind.as_deref(),
                 None | Some("application" | "binary")
             ) || (kind == "library"
-                && verified.manifest.package_kind.as_deref() == Some("library")))
+                && verified.manifest.package_kind.as_deref() == Some("library"))
+                || (kind == "application"
+                    && verified.manifest.package_kind.as_deref() == Some("library")
+                    && verified.manifest.executable_exports.iter().any(|export| {
+                        p::package::executables::exported(&verified.manifest, &export.name)
+                            .is_some_and(|binary| binary.path == *path)
+                    })))
             || binding.digest != *digest
             || binding.size != length
         {

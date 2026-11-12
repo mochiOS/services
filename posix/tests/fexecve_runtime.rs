@@ -474,7 +474,8 @@ mod syscall {
             unsafe {
                 std::ptr::copy_nonoverlapping(status.to_le_bytes().as_ptr(), reply as *mut u8, 8);
             }
-            Ok(if s.failure == 7 { 7 } else { 8 })
+            // Exercise the actual packed native IPC result, not a bare length.
+            Ok((1u64 << 62) | (2u64 << 32) | if s.failure == 7 { 7 } else { 8 })
         })
     }
     pub mod image {

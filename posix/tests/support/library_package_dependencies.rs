@@ -538,3 +538,34 @@ fn standalone_manifest_cannot_mint_installed_resource_authority() {
     assert!(catalog.resource_set("").is_err());
     assert!(catalog.resource_set("fonts").is_err());
 }
+
+#[test]
+fn explicit_library_package_helpers_preserve_signed_owner_and_capture_only_declared_code() {
+    let helper = provider(A,A_PATH,A_BYTES,&edge(B))
+        .replacen("kind = \"binary\"", "kind = \"library\"",1)
+        .replace("kind = \"library\"\nfile", "kind = \"application\"\nfile")
+        .replace("mode = \"0644\"", "mode = \"0755\"")
+        + &format!("\n[[executable_export]]\nname=\"worker\"\nbinary=\"{A_PATH}\"\n");
+    put(&helper);put(&provider(B,B_PATH,B_BYTES,""));
+    let authenticated=load(A).unwrap();
+    let constraint=package::parse_manifest(&(manifest()+&edge(A))).unwrap().library_dependencies.remove(0);
+    image_catalog::Catalog::matches_provider(&constraint,&authenticated,"x86_64").unwrap();
+    let mut wrong=authenticated.clone();wrong.identity.subject_key_id[0]=7;
+    assert!(image_catalog::Catalog::matches_provider(&constraint,&wrong,"x86_64").is_err());
+    assert!(image_catalog::Catalog::matches_provider(&constraint,&authenticated,"aarch64").is_err());
+    let approved=image_catalog::Catalog::resolve(authenticated,A_PATH,load).unwrap();
+    let inputs=approved.code_inputs();
+    assert_eq!(inputs.len(),2);
+    assert_eq!(inputs[0],(A_PATH.into(),A_BYTES.len() as u64,Sha256::digest(A_BYTES).into()));
+    assert_eq!(inputs[1],(B_PATH.into(),B_BYTES.len() as u64,Sha256::digest(B_BYTES).into()));
+    // Replacing the installed record cannot rewrite a retained startup owner.
+    put(&helper.replace("version = \"1\"","version = \"2\""));
+    let (owner,path)=approved.executable_owner().unwrap();
+    assert_eq!(owner.manifest.package_version,"1");assert_eq!(path,A_PATH);
+    approved.validate(Source::Root,A_BYTES).unwrap();
+    assert!(approved.validate(Source::Root,b"replaced bytes").is_err());
+    assert!(approved.validate(Source::Dependency{needed:b"unexpected",path:b"/libraries/undeclared.so"},A_BYTES).is_err());
+    // Removing the explicit export makes a library package non-executable.
+    put(&helper.split("[[executable_export]]").next().unwrap());
+    assert!(image_catalog::Catalog::resolve(load(A).unwrap(),A_PATH,load).is_err());
+}

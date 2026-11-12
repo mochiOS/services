@@ -156,6 +156,7 @@ mod resolver {
         pub subject_key_id: [u8; 32],
         pub provenance: mochios_signature_protocol::InstallProvenance,
     }
+    #[derive(Clone)]
     pub(crate) struct VerifiedManifest {
         pub manifest: mochi_user_platform::package::PackageManifest,
         pub identity: ApplicationIdentity,

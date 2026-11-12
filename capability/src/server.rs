@@ -215,7 +215,7 @@ pub(crate) fn serve_capability_requests(mut state: CapabilityServiceState) -> ! 
             platform::process::exit(1);
         }
     };
-    if let Err(error) = crate::resource_tokens::initialize(receive_object) {
+    if let Err(error) = crate::resource_tokens::initialize(receive_object).and_then(|()| crate::executable_tokens::initialize(receive_object)) {
         platform::logln!("capability.service: resource registry failed raw={}", error.raw());
         platform::process::exit(1);
     }
@@ -344,9 +344,23 @@ pub(crate) fn serve_capability_requests(mut state: CapabilityServiceState) -> ! 
             0
         };
         if opcode == mnu_abi::provider::MAGIC {
-            let released = crate::resource_tokens::release(slice, &attached);
+            let released = crate::executable_tokens::release(slice, &attached) || crate::resource_tokens::release(slice, &attached);
             close_received_handles(&attached);
             if !released { capability_reply(sender, 13); }
+            continue;
+        }
+        if opcode == platform::capability::executables::OPCODE {
+            let result = crate::executable_tokens::request(&state, sender, slice, &attached);
+            close_received_handles(&attached);
+            match result {
+                Ok(object) => {
+                    let mut objects = platform::ipc::IpcObjectHandles::default(); objects.count = 1;
+                    objects.handles[0] = platform::ipc::IpcObjectHandle { handle: object.handle, reserved: 0, rights: object.rights };
+                    let _ = platform::ipc::reply_object_handles(sender, &0i64.to_le_bytes(), &objects);
+                    let _ = platform::handle::close(object.handle);
+                }
+                Err(error) => { let _ = platform::ipc::reply(sender, &(-(error_status(error) as i64)).to_le_bytes()); }
+            }
             continue;
         }
         if opcode == platform::capability::resources::OPCODE {

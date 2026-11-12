@@ -53,6 +53,12 @@ pub(crate) fn capture(handle: u32) -> Result<Vec<u8>, Error> {
 }
 
 pub(crate) fn readonly(bytes: &[u8]) -> Result<p::memory_object::MemoryObject, Error> {
+    readonly_rights(bytes, mochios_posix_protocol::CHECK_EXECUTABLE_RIGHTS)
+}
+pub(crate) fn readonly_duplicable(bytes: &[u8]) -> Result<p::memory_object::MemoryObject, Error> {
+    readonly_rights(bytes, mochios_posix_protocol::CHECK_EXECUTABLE_RIGHTS | mnu_abi::HANDLE_RIGHT_DUPLICATE)
+}
+fn readonly_rights(bytes: &[u8], rights: u64) -> Result<p::memory_object::MemoryObject, Error> {
     let image = p::memory_object::MemoryObject::create_resizable(bytes.len() as u64)?;
     let mut written = 0;
     while written < bytes.len() {
@@ -64,7 +70,7 @@ pub(crate) fn readonly(bytes: &[u8]) -> Result<p::memory_object::MemoryObject, E
     }
     let read = p::handle::duplicate(
         image.handle(),
-        mochios_posix_protocol::CHECK_EXECUTABLE_RIGHTS,
+        rights,
     )?;
     // Only the attenuated reference survives. Native creation captures it again
     // and verifies the approved output digest before installing any mappings.

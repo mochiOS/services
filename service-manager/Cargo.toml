@@ -9,6 +9,9 @@ posix-native-probes = ["dep:libc"]
 # Dedicated development VM: launch the authenticated Unix API fixture after
 # native filesystem/POSIX startup, without starting the desktop or drivers.
 native-unix-extension-probe = []
+# Executable-reference tests also require the ordinary account authority before
+# calling the application launch broker. Never substitute a synthetic session.
+native-executable-reference-probe = ["native-unix-extension-probe"]
 
 [dependencies]
 libc = { git = "https://github.com/mochiOS/libc", rev = "a3c482e222b53700a09d21377633836e2fee07be", optional = true }
