@@ -511,12 +511,13 @@ pub struct Agent {
     next_poll_ms: u64,
     next_consent_check_ms: u64,
     request_id: u64,
+    last_allowed: Option<[bool; 2]>,
 }
 
 #[cfg(target_os = "mochios")]
 impl Agent {
     pub const fn new(start_ms: u64) -> Self {
-        Self { next_poll_ms: start_ms, next_consent_check_ms: start_ms, request_id: 0 }
+        Self { next_poll_ms: start_ms, next_consent_check_ms: start_ms, request_id: 0, last_allowed: None }
     }
     pub const fn next_due_ms(&self) -> u64 {
         if self.next_poll_ms < self.next_consent_check_ms {
@@ -541,6 +542,13 @@ impl Agent {
             current_stamp(DataCategory::UsageDiagnostics).is_some(),
             current_stamp(DataCategory::UpdateResults).is_some(),
         ];
+        if self.last_allowed != Some(allowed) {
+            mochi_user_platform::logln!(
+                "update.service: report permissions usage_diagnostics={} update_results={}",
+                allowed[0], allowed[1],
+            );
+            self.last_allowed = Some(allowed);
+        }
         for (index, category) in [DataCategory::UsageDiagnostics, DataCategory::UpdateResults].into_iter().enumerate() {
             if !allowed[index] {
                 if let Err(error) = purge_queue(category) {
