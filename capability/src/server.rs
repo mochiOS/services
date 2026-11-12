@@ -894,7 +894,7 @@ pub(crate) fn serve_capability_requests(mut state: CapabilityServiceState) -> ! 
                     if attached.count != 0 || !attached.is_user_delivery() {
                         return Err(mochi_user_syscall::SysError::from_raw(-22));
                     }
-                    crate::administrator::Request::account(&requester, slice)?
+                    crate::administrator::Request::managed(&requester, slice)?
                 };
                 let reservation = execution_requests.reserve(sender, source.len())?;
                 let mut authority = crate::execution_frontend::native::Native {

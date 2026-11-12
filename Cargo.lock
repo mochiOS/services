@@ -323,6 +323,7 @@ dependencies = [
  "mnu-abi",
  "mochi-user-platform",
  "mochi-user-syscall",
+ "mochios-device-consent",
  "mochios-elf-signature",
  "mochios-filesystem-protocol",
  "mochios-package-protocol",

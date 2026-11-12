@@ -14,6 +14,7 @@ requires = [
     "process.spawn",
     "process.inspect",
     "system.random.read",
+    "system.time.read",
     "service.register",
     "capabilities.manage",
     "account.authenticate",

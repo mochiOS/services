@@ -40,8 +40,9 @@ enum Operation {
         prepared: crate::package_approval::Prepared,
         approvals: crate::package_approval::Shared,
     },
-    Account {
+    Managed {
         payload: Zeroizing<Vec<u8>>,
+        required: &'static str,
     },
     Run {
         packet: Zeroizing<Vec<u8>>,
@@ -52,22 +53,32 @@ enum Operation {
     },
 }
 impl Request {
-    pub(crate) fn account(peer: &Peer, bytes: &[u8]) -> Result<(Self, Vec<u8>), SysError> {
-        if p::capability::check_thread(peer.instance.endpoint, "account.other.modify") != Ok(1) {
+    pub(crate) fn managed(peer: &Peer, bytes: &[u8]) -> Result<(Self, Vec<u8>), SysError> {
+        let bytes = wire::decode_operation(bytes).map_err(|_| invalid())?;
+        let required = if bytes.starts_with(&wire::DEVICE_PRIVACY) {
+            "settings.write"
+        } else {
+            "account.other.modify"
+        };
+        if p::capability::check_thread(peer.instance.endpoint, required) != Ok(1) {
             return Err(denied());
         }
-        let bytes = wire::decode_operation(bytes).map_err(|_| invalid())?;
-        let description = account_description(bytes)?;
+        let description = if bytes.starts_with(&wire::DEVICE_PRIVACY) {
+            privacy_description(bytes)?
+        } else {
+            account_description(bytes)?
+        };
         let identity = caller_identity(peer)?;
         let source = description.as_bytes().to_vec();
         Ok((
             Self {
                 identity,
-                capabilities: vec!["account.other.modify".into()],
+                capabilities: vec![required.into()],
                 digest: Sha256::digest(&source).into(),
                 username: username(peer),
                 description,
-                action: Operation::Account {
+                action: Operation::Managed {
+                    required,
                     payload: Zeroizing::new(bytes.to_vec()),
                 },
             },
@@ -99,7 +110,7 @@ impl Request {
         match &self.action {
             Operation::Package { prepared, .. } => prepared.capability(),
             Operation::Run { .. } => "process.spawn",
-            Operation::Account { .. } => "account.other.modify",
+            Operation::Managed { required, .. } => required,
         }
     }
     pub(crate) fn run(
@@ -279,7 +290,7 @@ impl Request {
         hash.update(self.digest);
         match &self.action {
             Operation::Run { packet, .. } => hash.update(&packet[..]),
-            Operation::Account { payload } => hash.update(&payload[..]),
+            Operation::Managed { payload, .. } => hash.update(&payload[..]),
             Operation::Package { prepared, .. } => hash.update(&prepared.bytes),
         }
         for capability in &self.capabilities {
@@ -334,8 +345,12 @@ impl Request {
                 prepared.approve(&approvals, peer, binding, deadline, account)?;
                 Ok(0)
             }
-            Operation::Account { payload } => {
-                perform_account(&payload)?;
+            Operation::Managed { payload, .. } => {
+                if payload.starts_with(&wire::DEVICE_PRIVACY) {
+                    perform_privacy(&payload)?;
+                } else {
+                    perform_account(&payload)?;
+                }
                 Ok(0)
             }
             Operation::Run {
@@ -670,4 +685,35 @@ impl crate::execution_approval::Administration for Request {
     ) -> Result<u64, SysError> {
         (*self).complete(source, peer, credentials, deadline, binding, account)
     }
+}
+
+fn privacy_description(bytes: &[u8]) -> Result<String, SysError> {
+    let (choices, legal, _) = wire::decode_device_privacy(bytes).map_err(|_| invalid())?;
+    let label = |value| if value { "Allow" } else { "Don't Allow" };
+    Ok(format!(
+        "Change device data sharing: Usage & Diagnostics: {}; Crash Reports: {}; Update Results: {}.{}",
+        label(choices[0]),
+        label(choices[1]),
+        label(choices[2]),
+        if legal {
+            " Confirm the installed Terms of Use, Privacy Policy, and open source license information."
+        } else {
+            ""
+        }
+    ))
+}
+fn perform_privacy(bytes: &[u8]) -> Result<(), SysError> {
+    use mochios_device_consent::{ConsentStore, documents::Documents};
+    let (choices, legal, expected) = wire::decode_device_privacy(bytes).map_err(|_| invalid())?;
+    let documents = Documents::load(std::path::Path::new("/system/resources/legal")).map_err(io)?;
+    if documents.bundle_hash() != expected {
+        return Err(denied());
+    }
+    let store = ConsentStore::system();
+    let current = store.load().map_err(io)?;
+    let now = p::time::utc_seconds()?;
+    let updated = documents
+        .confirmed_choices(current, choices, legal, now)
+        .map_err(io)?;
+    store.save(&updated).map_err(io)
 }
