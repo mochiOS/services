@@ -6,6 +6,7 @@ mod login;
 mod network_prompt;
 mod permission_server;
 mod portal_prompt;
+mod privacy;
 mod setup;
 mod storage_prompt;
 mod storage_status;

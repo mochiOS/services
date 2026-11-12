@@ -4,7 +4,7 @@ use std::io;
 use std::os::unix::fs::{PermissionsExt, chown};
 use std::path::Path;
 use std::rc::Rc;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use mochi_user_platform::mboot_wifi::{self as wifi, WifiNetwork, WifiStatus};
 use mochios_user_database::{FIRST_REGULAR_UID, UserRecord};
@@ -18,8 +18,6 @@ const CONTENT_WIDTH: f32 = 420.0;
 const QR_IMAGE_SIZE: f32 = 152.0;
 const PRIVACY_QR_PATH: &str = "/system/resources/startup/qr-privacy.png";
 const TERMS_QR_PATH: &str = "/system/resources/startup/qr-terms.png";
-const DIAGNOSTICS_SETTINGS_PATH: &str = "/var/config/diagnostics/settings.conf";
-const INSTALL_DATE_PATH: &str = "/var/lib/diagnostics/install_date";
 const WIFI_STATUS_POLL_INTERVAL: Duration = Duration::from_millis(500);
 const WIFI_CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
 const HOME_DIRECTORIES: [&str; 6] = [
@@ -47,6 +45,7 @@ pub(crate) struct AccountSetup {
     created_display_name: State<String>,
     created_identity: State<Option<mochi_user_platform::service_ready::SessionIdentity>>,
     consent_prompt: State<bool>,
+    privacy_setup: crate::privacy::PrivacySetup,
     privacy_qr: Option<ImageData>,
     terms_qr: Option<ImageData>,
 }
@@ -69,6 +68,7 @@ impl AccountSetup {
             created_display_name: State::new(String::new()),
             created_identity: State::new(None),
             consent_prompt: State::new(false),
+            privacy_setup: crate::privacy::PrivacySetup::new(),
             privacy_qr: ImageData::from_path(PRIVACY_QR_PATH).ok(),
             terms_qr: ImageData::from_path(TERMS_QR_PATH).ok(),
         }
@@ -84,7 +84,9 @@ impl AccountSetup {
             1 => self.terms_page(),
             2 => self.network_page(),
             3 => self.account_page(next_request_id),
-            _ if self.consent_prompt.get() => self.diagnostics_consent_page(),
+            _ if self.consent_prompt.get() && !self.privacy_setup.finished.get() => {
+                self.privacy_setup.body()
+            }
             _ => self.completed_page(login_target),
         }
     }
@@ -176,7 +178,7 @@ impl AccountSetup {
                 )
                 .child(
                     Text::styled(
-                        "Selecting Agree confirms that you have reviewed and accepted both documents.",
+                        "Review these documents. Device privacy choices are confirmed after account creation.",
                         TextRole::Caption,
                     )
                     .alignment(TextAlignment::Center)
@@ -184,7 +186,7 @@ impl AccountSetup {
                     .frame(500.0, 38.0),
                 )
                 .child(
-                    Button::new("Agree and Continue")
+                    Button::new("Continue")
                         .style(ButtonStyle::Accent)
                         .size(ButtonSize::Large)
                         .on_click(move || {
@@ -235,9 +237,7 @@ impl AccountSetup {
                             HStack::new()
                                 .alignment(StackAlignment::Center)
                                 .distribution(StackDistribution::SpaceBetween)
-                                .child(
-                                    Text::styled(network.ssid.clone(), TextRole::Label),
-                                )
+                                .child(Text::styled(network.ssid.clone(), TextRole::Label))
                                 .child(
                                     Text::styled(
                                         format!(
@@ -473,56 +473,6 @@ impl AccountSetup {
         )
     }
 
-    fn diagnostics_consent_page(&self) -> Box<dyn View + 'static> {
-        let allow_prompt = self.consent_prompt.clone();
-        let allow_status = self.status.clone();
-        let decline_prompt = self.consent_prompt.clone();
-        Box::new(
-            Dialog::new()
-                .accessibility_label("Diagnostics sharing consent")
-                .content(
-                    VStack::new()
-                        .alignment(StackAlignment::Center)
-                        .gap(StackGap::Medium)
-                        .child(Text::styled("Share Basic Diagnostics?", TextRole::TitleMedium))
-                        .child(
-                            Text::body(
-                                "Help improve mochiOS by sharing limited device and startup information. No report is sent until you agree. Crash reports always ask separately.",
-                            )
-                            .alignment(TextAlignment::Center)
-                            .tone(TextTone::Secondary),
-                        )
-                        .child(
-                            HStack::new()
-                                .alignment(StackAlignment::Center)
-                                .gap(StackGap::Small)
-                                .child(
-                                    Button::new("Not Now")
-                                        .style(ButtonStyle::Standard)
-                                        .on_click(move || {
-                                            let _ = save_diagnostics_consent(false);
-                                            decline_prompt.set(false);
-                                        }),
-                                )
-                                .child(
-                                    Button::new("Allow Sharing")
-                                        .style(ButtonStyle::Accent)
-                                        .on_click(move || match save_diagnostics_consent(true) {
-                                            Ok(()) => {
-                                                allow_status.set(String::new());
-                                                allow_prompt.set(false);
-                                            }
-                                            Err(_) => allow_status.set(
-                                                "Unable to save diagnostics consent.".to_owned(),
-                                            ),
-                                        }),
-                                ),
-                        )
-                        .child(Text::caption(self.status.get()).tone(TextTone::Secondary)),
-                ),
-        )
-    }
-
     fn completed_page(
         &self,
         login_target: Option<mochi_user_platform::service_ready::Target>,
@@ -754,9 +704,9 @@ fn qr_card(image: Option<ImageData>, title: &'static str, address: &'static str)
             "QR code unavailable. please report this issue to the mochiOS team.",
             TextRole::Caption,
         )
-            .alignment(TextAlignment::Center)
-            .color(Color::from_rgb_hex(0x6e6e73))
-            .frame(QR_IMAGE_SIZE, QR_IMAGE_SIZE),
+        .alignment(TextAlignment::Center)
+        .color(Color::from_rgb_hex(0x6e6e73))
+        .frame(QR_IMAGE_SIZE, QR_IMAGE_SIZE),
     };
     Card::new()
         .color(RectangleColor::Custom(Color::WHITE))
@@ -861,37 +811,6 @@ fn submit_callback(
             }
         }
     }
-}
-
-fn save_diagnostics_consent(consent: bool) -> io::Result<()> {
-    if let Some(date) = current_utc_date() {
-        if let Some(parent) = Path::new(INSTALL_DATE_PATH).parent() {
-            fs::create_dir_all(parent)?;
-        }
-        match fs::OpenOptions::new().write(true).create_new(true).open(INSTALL_DATE_PATH) {
-            Ok(mut file) => {
-                use std::io::Write;
-                file.write_all(date.as_bytes())?;
-                file.write_all(b"\n")?;
-            }
-            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
-            Err(error) => return Err(error),
-        }
-    }
-    if let Some(parent) = Path::new(DIAGNOSTICS_SETTINGS_PATH).parent() {
-        fs::create_dir_all(parent)?;
-    }
-    fs::write(
-        DIAGNOSTICS_SETTINGS_PATH,
-        format!("diagnostics_enabled=true\ndiagnostics_consent={consent}\n"),
-    )
-}
-
-fn current_utc_date() -> Option<String> {
-    let seconds = SystemTime::now().duration_since(UNIX_EPOCH).ok()?.as_secs();
-    let days = i64::try_from(seconds / 86_400).ok()?;
-    let (year, month, day) = crate::clock::civil_date(days)?;
-    (2020..=2100).contains(&year).then(|| format!("{year:04}-{month:02}-{day:02}"))
 }
 
 fn finish_setup(
@@ -999,7 +918,9 @@ fn add_user(service: u64, request_id: u64, encoded: &[u8]) -> Result<(), SetupEr
         request_id,
         encoded_record: encoded,
     };
-    mutate("add-user", service, request_id, |output| request.encode(output))
+    mutate("add-user", service, request_id, |output| {
+        request.encode(output)
+    })
 }
 
 fn set_password(
@@ -1013,12 +934,16 @@ fn set_password(
         name,
         password,
     };
-    mutate_sensitive("set-password", service, request_id, |output| request.encode(output))
+    mutate_sensitive("set-password", service, request_id, |output| {
+        request.encode(output)
+    })
 }
 
 fn remove_user(service: u64, request_id: u64, name: &str) -> Result<(), SetupError> {
     let request = RemoveUser { request_id, name };
-    mutate("remove-user", service, request_id, |output| request.encode(output))
+    mutate("remove-user", service, request_id, |output| {
+        request.encode(output)
+    })
 }
 
 fn mutate(
@@ -1046,28 +971,27 @@ fn mutate_sensitive(
 }
 
 fn call_status(
-	operation: &str,
-	service: u64,
-	request_id: u64,
-	request: &[u8],
+    operation: &str,
+    service: u64,
+    request_id: u64,
+    request: &[u8],
 ) -> Result<(), SetupError> {
-	let mut reply = [0u8; mochios_user_protocol::STATUS_LEN];
-	let reply_len =
-		authentication::call(service, request, &mut reply).map_err(map_authentication_error)?;
-	let status = Status::decode(&reply[..reply_len]).map_err(|_| SetupError::Protocol)?;
-	if status.request_id != request_id {
-		return Err(SetupError::Protocol);
-	}
-	if status.status == 0 {
-		Ok(())
-	} else {
-		eprintln!(
-			"secure-ui: account mutation failed operation={} status={}",
-			operation,
-			status.status
-		);
-		Err(SetupError::Storage(status.status))
-	}
+    let mut reply = [0u8; mochios_user_protocol::STATUS_LEN];
+    let reply_len =
+        authentication::call(service, request, &mut reply).map_err(map_authentication_error)?;
+    let status = Status::decode(&reply[..reply_len]).map_err(|_| SetupError::Protocol)?;
+    if status.request_id != request_id {
+        return Err(SetupError::Protocol);
+    }
+    if status.status == 0 {
+        Ok(())
+    } else {
+        eprintln!(
+            "secure-ui: account mutation failed operation={} status={}",
+            operation, status.status
+        );
+        Err(SetupError::Storage(status.status))
+    }
 }
 
 fn create_home(user: &UserRecord) -> Result<(), SetupError> {

@@ -25,6 +25,11 @@ pub(crate) struct LoginApp {
     account_setup: Option<AccountSetup>,
     auto_login_user: Option<String>,
     auto_login_attempted: Cell<bool>,
+    privacy_setup: crate::privacy::PrivacySetup,
+    privacy_identity: State<Option<mochi_user_platform::service_ready::SessionIdentity>>,
+    needs_privacy: bool,
+    review_privacy: State<bool>,
+    allow_privacy_review: bool,
 }
 
 impl App for LoginApp {
@@ -77,6 +82,11 @@ impl App for LoginApp {
             account_setup,
             auto_login_user,
             auto_login_attempted: Cell::new(false),
+            privacy_setup: crate::privacy::PrivacySetup::new(),
+            privacy_identity: State::new(None),
+            needs_privacy: !is_lock_screen && crate::privacy::PrivacySetup::needed(),
+            review_privacy: State::new(false),
+            allow_privacy_review: !is_lock_screen,
         }
     }
 
@@ -97,11 +107,17 @@ impl App for LoginApp {
                 self.login_target,
             ) {
                 (Ok(identity), Some(target)) => {
-                    match mochi_user_platform::service_ready::notify_session(target, 0, identity) {
-                        Ok(_) => viewkit::request_exit(),
-                        Err(_) => self
-                            .status
-                            .set(format!("Could not start the session for {name}.")),
+                    if self.needs_privacy {
+                        self.privacy_identity.set(Some(identity));
+                    } else {
+                        match mochi_user_platform::service_ready::notify_session(
+                            target, 0, identity,
+                        ) {
+                            Ok(_) => viewkit::request_exit(),
+                            Err(_) => self
+                                .status
+                                .set(format!("Could not start the session for {name}.")),
+                        }
                     }
                 }
                 (Ok(_), None) => self
@@ -118,12 +134,28 @@ impl App for LoginApp {
                 false,
             );
         }
+        if let Some(identity) = self.privacy_identity.get() {
+            if !self.privacy_setup.finished.get() {
+                return self.screen(self.privacy_setup.body(), false);
+            }
+            if let Some(target) = self.login_target {
+                match mochi_user_platform::service_ready::notify_session(target, 0, identity) {
+                    Ok(_) => viewkit::request_exit(),
+                    Err(_) => self
+                        .status
+                        .set("The authenticated session could not start.".into()),
+                }
+            }
+            return self.screen(Box::new(Text::body(self.status.get())), false);
+        }
         let password_submit = submit_callback(
             self.selected_username.clone(),
             self.password.clone(),
             self.status.clone(),
             Rc::clone(&self.next_request_id),
             self.login_target,
+            (self.needs_privacy || self.review_privacy.get())
+                .then(|| self.privacy_identity.clone()),
         );
         let status = self.status.get();
         let selected_username = self.selected_username.get();
@@ -206,11 +238,26 @@ impl App for LoginApp {
                                 self.status.clone(),
                                 Rc::clone(&self.next_request_id),
                                 self.login_target,
+                                (self.needs_privacy || self.review_privacy.get())
+                                    .then(|| self.privacy_identity.clone()),
                             ))
                             .frame(44.0, 44.0),
                     )
                     .frame(FORM_WIDTH, 44.0),
             )
+            .child({
+                let requested = self.review_privacy.clone();
+                let finished = self.privacy_setup.finished.clone();
+                let status = self.status.clone();
+                Button::new("Data Sharing…")
+                    .style(ButtonStyle::Ghost)
+                    .enabled(self.allow_privacy_review)
+                    .on_click(move || {
+                        requested.set(true);
+                        finished.set(false);
+                        status.set("Sign in to review data sharing for this device.".into());
+                    })
+            })
             .child(
                 Text::styled(status, TextRole::Label)
                     .alignment(TextAlignment::Center)
@@ -228,8 +275,12 @@ fn configured_auto_login_user() -> Option<String> {
         use std::os::unix::fs::MetadataExt;
         let parent = fs::symlink_metadata("/var/config/account").ok()?;
         let file = fs::symlink_metadata(SETTINGS_PATH).ok()?;
-        if !parent.is_dir() || !file.is_file() || parent.uid() != 0 || file.uid() != 0
-            || (parent.mode() | file.mode()) & 0o022 != 0 {
+        if !parent.is_dir()
+            || !file.is_file()
+            || parent.uid() != 0
+            || file.uid() != 0
+            || (parent.mode() | file.mode()) & 0o022 != 0
+        {
             return None;
         }
     }
@@ -312,6 +363,7 @@ fn submit_callback(
     status: State<String>,
     next_request_id: Rc<Cell<u64>>,
     login_target: Option<mochi_user_platform::service_ready::Target>,
+    privacy_identity: Option<State<Option<mochi_user_platform::service_ready::SessionIdentity>>>,
 ) -> impl FnMut() {
     move || {
         let name = selected_username.get();
@@ -338,6 +390,10 @@ fn submit_callback(
                     uid: user.uid,
                     gid: user.gid,
                 };
+                if let Some(pending) = &privacy_identity {
+                    pending.set(Some(identity));
+                    return;
+                }
                 match mochi_user_platform::service_ready::notify_session(target, 0, identity) {
                     Ok(_) => viewkit::request_exit(),
                     Err(_) => status.set(format!("Could not start the session for {}.", user.name)),

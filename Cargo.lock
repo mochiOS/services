@@ -3145,6 +3145,7 @@ version = "0.1.0"
 dependencies = [
  "mochi-user-platform",
  "mochi-user-syscall",
+ "mochios-device-consent",
  "mochios-linux-portal-protocol",
  "mochios-permission-prompt-protocol",
  "mochios-posix-client",

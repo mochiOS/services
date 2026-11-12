@@ -5,6 +5,7 @@ edition = "2024"
 publish = false
 
 [dependencies]
+mochios-device-consent = { path = "../../tools/devkit/crates/device-consent" }
 mochios-posix-client = { path = "../../user/crates/posix-client", default-features = false }
 mochi-user-platform = { git = "https://github.com/mochiOS/syscalls", package = "mochi-user-platform", default-features = false, features = ["std", "mboot-wifi"] }
 mochi-user-syscall = { git = "https://github.com/mochiOS/syscalls", package = "mochi-user-syscall" }
