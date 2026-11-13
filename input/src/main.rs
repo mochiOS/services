@@ -620,7 +620,6 @@ fn handle_subscribe_message(
 }
 
 fn main() {
-    eprintln!("input.service: initializing logger");
     let _ = platform::logger::init_from_env();
     platform::logln!("input.service: start");
 
@@ -657,12 +656,16 @@ fn main() {
     let input_preferences = InputPreferences::load();
     let mut subscribers = [0u64; MAX_SUBSCRIBERS];
     let mut consent_input = consent_input::Authority::default();
-    eprintln!("input.service: notifying READY");
+    // Native services log through their inherited logger endpoint, not the
+    // debug-only fallback stdout/stderr descriptors. Logging must not panic.
+    let _ = platform::logger::write_status_fmt(format_args!(
+        "input.service: notifying READY\n"
+    ));
     if platform::service_ready::notify(ready_target, 0).is_err() {
         platform::logln!("input.service: ready notification failed");
         platform::process::exit(1);
     }
-    eprintln!("input.service: READY sent");
+    let _ = platform::logger::write_status_fmt(format_args!("input.service: READY sent\n"));
 
     loop {
         // Endpoint generations retire on exit/exec. Recheck authority again at

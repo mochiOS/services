@@ -29,7 +29,9 @@ impl InputMethod {
     /// Dictionary preparation must not prevent basic input from becoming ready.
     pub fn start_system_dictionary() -> std::io::Result<Self> {
         Self::load_when_requested(|| {
-            eprintln!("input.service: loading IME dictionary");
+            let _ = mochi_user_platform::logger::write_status_fmt(format_args!(
+                "input.service: loading IME dictionary\n"
+            ));
             let started = std::time::Instant::now();
             let engine = Engine::open(DICTIONARY_PATH)
                 .map_err(|error| {
@@ -46,11 +48,11 @@ impl InputMethod {
                     DICTIONARY_PATH
                 );
             }
-            eprintln!(
-                "input.service: IME initialization finished available={} elapsed_ms={}",
+            let _ = mochi_user_platform::logger::write_status_fmt(format_args!(
+                "input.service: IME initialization finished available={} elapsed_ms={}\n",
                 engine.is_some(),
                 started.elapsed().as_millis()
-            );
+            ));
             engine
         })
     }
