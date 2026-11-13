@@ -46,6 +46,9 @@ def assemble(output, native_directory, overlay=None, system_libraries=False, inc
         raise ValueError('This fixture requires the existing development-account configuration')
     install(root / 'scripts/mmake/development-users.db', stage / 'var/lib/accounts/users.db', 0o600)
     (stage / 'var/config/account/settings.conf').write_text('auto_login=true\nauto_login_user=testuser\n')
+    # The real account service rejects group/world-writable autologin settings.
+    # Match the ordinary image builder independently of the host's umask.
+    (stage / 'var/config/account/settings.conf').chmod(0o644)
     owners = []
     for user, uid in [('root', 0), ('testuser', 1000)]:
         for suffix in ('', 'Desktop', 'Documents', 'Downloads', 'Movies', 'Music', 'Pictures'):
