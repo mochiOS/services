@@ -1,4 +1,5 @@
 use mochi_user_platform as platform;
+use mochios_viewkit_gpu_protocol::window_decoration as metrics;
 
 use crate::client::{Client, ClientId};
 use crate::geometry::Rect;
@@ -17,7 +18,6 @@ use crate::window::{
 const DECORATE_CAPABILITY: &str = "window.decorate";
 const DECORATE_COMPAT_CAPABILITY: &str = "window.overlay";
 const SECURE_OVERLAY_CAPABILITY: &str = "window.secure-overlay";
-const DECOR_TITLE_BAR_HEIGHT: u32 = 40;
 
 fn sender_has_decorate_capability(sender: u64) -> bool {
     matches!(
@@ -107,7 +107,7 @@ pub(crate) fn handle_request(
             let scale = read_u32(request, 24).unwrap_or(0);
             if request.len() != 32
                 || mode > 1
-                || !(256..=8192).contains(&scale)
+                || !(metrics::MIN_SCALE..=metrics::MAX_SCALE).contains(&scale)
                 || height > MAX_DIMENSION
             {
                 put_u32(&mut reply, 0, errno_status(mochi_user_syscall::EINVAL));
@@ -142,8 +142,11 @@ pub(crate) fn handle_request(
             windows[index].titlebar_separator = flags & 1 != 0;
             windows[index].resizable = flags & 2 != 0;
             windows[index].integrated = mode == 1;
-            windows[index].titlebar_height = height.max((40 * scale + 1023) / 1024);
-            windows[index].controls_width = (112 * scale + 1023) / 1024;
+            windows[index].decoration_scale = scale;
+            windows[index].titlebar_height =
+                height.max(metrics::physical_pixels(metrics::TITLE_BAR_HEIGHT, scale));
+            windows[index].controls_width =
+                metrics::physical_pixels(metrics::CONTROLS_WIDTH, scale);
             windows[index].titlebar_background = read_u32(request, 20).unwrap_or(0) | 0xff;
             windows[index].insets.top = if mode == 1 {
                 0
@@ -302,7 +305,7 @@ pub(crate) fn handle_request(
             surfaces[index].x = surfaces[content_index].x;
             surfaces[index].y = surfaces[content_index]
                 .y
-                .saturating_sub(DECOR_TITLE_BAR_HEIGHT as i32);
+                .saturating_sub(windows[window_index].titlebar_height as i32);
             surfaces[index].width = width;
             surfaces[index].height = height;
             surfaces[index].z = *next_z;

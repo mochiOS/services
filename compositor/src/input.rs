@@ -1,4 +1,5 @@
 use mochi_user_platform as platform;
+use mochios_viewkit_gpu_protocol::window_decoration as metrics;
 
 use crate::context_menu::ContextMenuBroker;
 use crate::geometry::{Rect, merge_damage};
@@ -1290,7 +1291,10 @@ fn apply_pointer_grab(
                 0
             })
         .clamp(
-            i64::from(window.controls_width.max(112)),
+            i64::from(window.controls_width.max(metrics::physical_pixels(
+                metrics::CONTROLS_WIDTH,
+                window.decoration_scale,
+            ))),
             i64::from(crate::state::MAX_DIMENSION),
         ) as u32;
         let height = (i64::from(grab.height)
@@ -1303,7 +1307,10 @@ fn apply_pointer_grab(
             })
         .clamp(
             i64::from(if window.integrated {
-                window.titlebar_height.max(40)
+                window.titlebar_height.max(metrics::physical_pixels(
+                    metrics::TITLE_BAR_HEIGHT,
+                    window.decoration_scale,
+                ))
             } else {
                 40
             }),
@@ -1436,9 +1443,9 @@ mod integrated_resize_tests {
         apply_pointer_grab(&mut surfaces, &mut windows, &grab, 5000, 5000);
         assert_eq!(
             (windows[0].configured_width, windows[0].configured_height),
-            (112, 44)
+            (94, 44)
         );
-        assert_eq!((surfaces[0].x, surfaces[0].y), (628, 536));
+        assert_eq!((surfaces[0].x, surfaces[0].y), (646, 536));
     }
     #[test]
     fn maximized_integrated_controls_win_over_the_shell_reveal_surface() {

@@ -1,4 +1,5 @@
 use mochi_user_platform as platform;
+use mochios_viewkit_gpu_protocol::window_decoration as metrics;
 
 use crate::client::{Client, ClientId};
 use crate::geometry::{Rect, rounded_rect_contains};
@@ -41,6 +42,7 @@ pub(crate) struct Window {
     pub(crate) integrated: bool,
     pub(crate) titlebar_height: u32,
     pub(crate) controls_width: u32,
+    pub(crate) decoration_scale: u32,
     pub(crate) titlebar_background: u32,
     pub(crate) titlebar_separator: bool,
     pub(crate) metadata_sent: bool,
@@ -86,8 +88,9 @@ impl Window {
             state: WINDOW_STATE_NORMAL,
             resizable: true,
             integrated: false,
-            titlebar_height: 40,
-            controls_width: 112,
+            titlebar_height: metrics::TITLE_BAR_HEIGHT,
+            controls_width: metrics::CONTROLS_WIDTH,
+            decoration_scale: metrics::SCALE_UNIT,
             titlebar_background: 0,
             titlebar_separator: true,
             metadata_sent: false,
@@ -167,7 +170,7 @@ pub(crate) fn send_window_metadata(window: &Window, surfaces: &[Surface], endpoi
     if content_width == 0 || content_height == 0 {
         return;
     }
-    let mut event = [0u8; 132];
+    let mut event = [0u8; 136];
     put_u32(&mut event, 0, DECOR_EVENT_WINDOW);
     put_u64(&mut event, 4, window.token);
     put_u32(&mut event, 12, content_width);
@@ -191,6 +194,7 @@ pub(crate) fn send_window_metadata(window: &Window, surfaces: &[Surface], endpoi
     put_u32(&mut event, 120, window.controls_width);
     put_u32(&mut event, 124, window.titlebar_background);
     put_u32(&mut event, 128, u32::from(window.titlebar_separator));
+    put_u32(&mut event, 132, window.decoration_scale);
     let _ = platform::ipc::send(endpoint, &event);
 }
 
@@ -353,13 +357,9 @@ pub(crate) fn maximized_controls_overlap(
             return false;
         }
         let frame = window_frame_rect(content, window);
-        let width = frame.width.min(if window.integrated {
-            window
-                .controls_width
-                .saturating_add(window.controls_width * 8 / 112)
-        } else {
-            44 * 3
-        });
+        let width = frame.width.min(window.controls_width.saturating_add(
+            metrics::physical_pixels(metrics::CONTROL_REVEAL_MARGIN, window.decoration_scale),
+        ));
         let controls = Rect {
             x: frame
                 .x
