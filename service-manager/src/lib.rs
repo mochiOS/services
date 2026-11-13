@@ -2,6 +2,17 @@
 
 extern crate alloc;
 
+// Native services have no implicit writable stderr. Keep lifecycle/failure
+// diagnostics in Release, using only the inherited logger endpoint. A logging
+// failure must not abort service supervision or process cleanup.
+macro_rules! statusln {
+    ($($arguments:tt)*) => {{
+        let _ = mochi_user_platform::logger::write_status_fmt(format_args!(
+            "{}\n", format_args!($($arguments)*)
+        ));
+    }};
+}
+
 #[cfg(not(test))]
 mod bootstrap;
 mod driver_controller;

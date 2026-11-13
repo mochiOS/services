@@ -257,7 +257,7 @@ fn spawn_native(
     client
         .register_session()
         .inspect_err(|error| {
-            eprintln!("service-manager.service: {label} session registration failed: {error:?}");
+            statusln!("service-manager.service: {label} session registration failed: {error:?}");
         })
         .map_err(client_error)?;
     let image = client
@@ -268,14 +268,14 @@ fn spawn_native(
             spec.path,
         )
         .inspect_err(|error| {
-            eprintln!("service-manager.service: {label} image open failed: {error:?}");
+            statusln!("service-manager.service: {label} image open failed: {error:?}");
         })
         .map_err(client_error)?;
     // The source reference comes only from this IPC attachment, not a PID/FD
     // capture API. Always release it, including authorization/create failure.
     let result = (|| {
         resolve_execution_security(spec.path, spec.execution_class).inspect_err(|error| {
-            eprintln!(
+            statusln!(
                 "service-manager.service: {label} execution authorization failed status={}",
                 error.raw()
             );

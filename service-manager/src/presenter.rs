@@ -55,7 +55,7 @@ impl Drop for Prepared {
 
 impl Prepared {
     fn prepare(kind: Kind, logger: u64) -> Result<Self, PrepareError> {
-        eprintln!(
+        statusln!(
             "service-manager.service: preparing {} presenter",
             kind.name()
         );
@@ -82,7 +82,7 @@ impl Prepared {
             token,
             posix,
         };
-        eprintln!(
+        statusln!(
             "service-manager.service: {} presenter process created",
             kind.name()
         );
@@ -93,7 +93,7 @@ impl Prepared {
             crate::readiness::wait_for_private_endpoint(token, process.watch_target())
                 .map_err(PrepareError::Readiness)?,
         );
-        eprintln!("service-manager.service: {} presenter ready", kind.name());
+        statusln!("service-manager.service: {} presenter ready", kind.name());
         Ok(prepared)
     }
 
@@ -125,7 +125,7 @@ impl Slot {
                 }
                 Ok(Err(error)) => {
                     self.pending = None;
-                    eprintln!(
+                    statusln!(
                         "service-manager.service: {} presenter preparation failed: {error:?}",
                         kind.name()
                     );
@@ -134,7 +134,7 @@ impl Slot {
                 Err(TryRecvError::Empty) => return,
                 Err(TryRecvError::Disconnected) => {
                     self.pending = None;
-                    eprintln!(
+                    statusln!(
                         "service-manager.service: {} presenter preparation disconnected",
                         kind.name()
                     );
@@ -153,7 +153,7 @@ impl Slot {
             match prepared.watch.as_ref().unwrap().exit_status() {
                 Ok(None) => return,
                 Ok(Some(status)) => {
-                    eprintln!(
+                    statusln!(
                         "service-manager.service: {} presenter exited status={status}",
                         kind.name()
                     );
@@ -161,7 +161,7 @@ impl Slot {
                     return;
                 }
                 Err(error) => {
-                    eprintln!(
+                    statusln!(
                         "service-manager.service: {} presenter status failed: {error:?}",
                         kind.name()
                     );
@@ -171,7 +171,7 @@ impl Slot {
         }
         if crate::service_launcher::has_failed_launch_cleanup() {
             if !self.cleanup_blocked {
-                eprintln!(
+                statusln!(
                     "service-manager.service: {} presenter waiting for failed launch cleanup",
                     kind.name()
                 );
@@ -193,7 +193,7 @@ impl Slot {
                 self.pending = Some(receiver);
             }
             Err(error) => {
-                eprintln!(
+                statusln!(
                     "service-manager.service: {} presenter worker failed: {error}",
                     kind.name()
                 );

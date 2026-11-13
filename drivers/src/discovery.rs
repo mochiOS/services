@@ -75,7 +75,7 @@ fn maybe_spawn_bundle(
             platform::logln!("drivers.service: active bundle={}", bundle_root);
             started_drivers.record(manifest.package_id.clone(), process);
         }
-        Err(error) => eprintln!(
+        Err(error) => statusln!(
             "drivers.service: native driver creation failed path={entry_path} errno={}",
             error.errno().unwrap_or(0)
         ),

@@ -133,7 +133,7 @@ pub(crate) fn spawn(
             },
             |handle| rollback(DriverProcess { handle }),
         )?;
-        eprintln!("drivers.service: native driver created path={entry_path} pid={process_id}");
+        statusln!("drivers.service: native driver created path={entry_path} pid={process_id}");
         Ok(DriverProcess { handle })
     })();
     let _ = platform::handle::close(image.handle);

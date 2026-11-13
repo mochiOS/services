@@ -23,7 +23,7 @@ impl NativeProcess {
         let (handle, process_id) = mochios_posix_client::process_creation::create_with_rollback(
             || {
                 platform::process::create_stopped(image, metadata).inspect_err(|error| {
-                    eprintln!(
+                    statusln!(
                         "service-manager.service: native launch create failed status={}",
                         error.raw()
                     );
@@ -31,7 +31,7 @@ impl NativeProcess {
             },
             |handle| {
                 setup(handle).inspect_err(|error| {
-                    eprintln!(
+                    statusln!(
                         "service-manager.service: native launch registration failed status={}",
                         error.raw()
                     );
@@ -41,7 +41,7 @@ impl NativeProcess {
                 let result =
                     platform::process::handle_status(handle).map(|status| status.process_id);
                 result.inspect_err(|error| {
-                    eprintln!(
+                    statusln!(
                         "service-manager.service: native launch identity query failed status={}",
                         error.raw()
                     );
@@ -49,7 +49,7 @@ impl NativeProcess {
             },
             |handle| {
                 platform::process::resume_handle(handle).inspect_err(|error| {
-                    eprintln!(
+                    statusln!(
                         "service-manager.service: native launch resume failed status={}",
                         error.raw()
                     );
