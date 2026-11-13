@@ -1,10 +1,7 @@
-# Run from the mochiOS workspace root. RUST_SDK must contain the new runtime.
+# Compatibility entry point. Run `mmake native-test-services` first.
 ROOT ?= $(CURDIR)
-OUT ?= $(ROOT)/out
-JOBS ?= 2
-include $(ROOT)/build/mmake/toolchain.mk
+SDK_METADATA ?= $(ROOT)/out/newlib-port/sdk/share/app-build.json
+FIXTURE_TARGET ?= $(ROOT)/out/native-fixtures/target
 .PHONY: all
 all:
-	@$(MOCHIOS_CARGO) --manifest-path $(ROOT)/services/Cargo.toml --package capability --package user-service --bins
-	@$(MOCHIOS_CARGO) --manifest-path $(ROOT)/services/Cargo.toml --package service-manager --bin service-manager --features native-executable-reference-probe
-	@$(MOCHIOS_CARGO) --manifest-path $(ROOT)/services/posix/tests/executable-reference/Cargo.toml --bins
+	python3 $(ROOT)/services/posix/tests/executable-reference/build.py --sdk-metadata "$(SDK_METADATA)" --target-directory "$(FIXTURE_TARGET)"
