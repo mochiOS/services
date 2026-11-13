@@ -38,6 +38,11 @@ pub(crate) struct Window {
     pub(crate) insets: Insets,
     pub(crate) state: u32,
     pub(crate) resizable: bool,
+    pub(crate) integrated: bool,
+    pub(crate) titlebar_height: u32,
+    pub(crate) controls_width: u32,
+    pub(crate) titlebar_background: u32,
+    pub(crate) titlebar_separator: bool,
     pub(crate) metadata_sent: bool,
     pub(crate) configured_width: u32,
     pub(crate) configured_height: u32,
@@ -80,6 +85,11 @@ impl Window {
             },
             state: WINDOW_STATE_NORMAL,
             resizable: true,
+            integrated: false,
+            titlebar_height: 40,
+            controls_width: 112,
+            titlebar_background: 0,
+            titlebar_separator: true,
             metadata_sent: false,
             configured_width: 0,
             configured_height: 0,
@@ -157,7 +167,7 @@ pub(crate) fn send_window_metadata(window: &Window, surfaces: &[Surface], endpoi
     if content_width == 0 || content_height == 0 {
         return;
     }
-    let mut event = [0u8; 112];
+    let mut event = [0u8; 132];
     put_u32(&mut event, 0, DECOR_EVENT_WINDOW);
     put_u64(&mut event, 4, window.token);
     put_u32(&mut event, 12, content_width);
@@ -176,6 +186,11 @@ pub(crate) fn send_window_metadata(window: &Window, surfaces: &[Surface], endpoi
     };
     put_u32(&mut event, 44, title.len() as u32);
     event[48..48 + title.len()].copy_from_slice(title);
+    put_u32(&mut event, 112, u32::from(window.integrated));
+    put_u32(&mut event, 116, window.titlebar_height);
+    put_u32(&mut event, 120, window.controls_width);
+    put_u32(&mut event, 124, window.titlebar_background);
+    put_u32(&mut event, 128, u32::from(window.titlebar_separator));
     let _ = platform::ipc::send(endpoint, &event);
 }
 
@@ -206,6 +221,31 @@ pub(crate) fn notify_decorators(
     if surfaces[content_index].role != SurfaceRole::Toplevel {
         return;
     }
+    let mut event = [0u8; 24];
+    put_u32(&mut event, 0, crate::protocol::EVENT_WINDOW_DECORATION);
+    put_u32(
+        &mut event,
+        4,
+        if window.integrated {
+            window.titlebar_height
+        } else {
+            0
+        },
+    );
+    put_u32(
+        &mut event,
+        8,
+        if window.integrated {
+            window.controls_width
+        } else {
+            0
+        },
+    );
+    put_u32(&mut event, 12, window.state);
+    put_u64(&mut event, 16, surfaces[content_index].token);
+    if surfaces[content_index].event_endpoint != 0 {
+        let _ = platform::ipc::send(surfaces[content_index].event_endpoint, &event);
+    }
     for client in clients
         .iter()
         .filter(|client| client.live && client.decoration_endpoint != 0)
@@ -223,6 +263,15 @@ pub(crate) fn reposition_window_surfaces(surfaces: &mut [Surface], window: &Wind
     if let Some(decor_index) = decoration_surface_index_for_window(surfaces, window) {
         surfaces[decor_index].x = content_x.saturating_sub(window.insets.left as i32);
         surfaces[decor_index].y = content_y.saturating_sub(window.insets.top as i32);
+        if window.integrated {
+            let width = if window.configured_width == 0 {
+                surface_extent(&surfaces[content_index]).0
+            } else {
+                window.configured_width
+            };
+            surfaces[decor_index].x =
+                content_x.saturating_add(width.saturating_sub(window.controls_width) as i32);
+        }
     }
 }
 
@@ -249,6 +298,26 @@ pub(crate) fn point_inside_window_frame(
 
 pub(crate) fn window_frame_rect(content: &Surface, window: &Window) -> Rect {
     let (width, height) = surface_extent(content);
+    // The client buffer cannot erase or move protected controls by presenting
+    // a smaller frame or delaying its response to an interactive configure.
+    let (width, height) = if window.integrated {
+        (
+            if window.configured_width != 0 {
+                window.configured_width
+            } else {
+                width
+            }
+            .max(window.controls_width),
+            if window.configured_height != 0 {
+                window.configured_height
+            } else {
+                height
+            }
+            .max(window.titlebar_height),
+        )
+    } else {
+        (width, height)
+    };
     Rect {
         x: content.x.saturating_sub(window.insets.left as i32),
         y: content.y.saturating_sub(window.insets.top as i32),
@@ -284,14 +353,25 @@ pub(crate) fn maximized_controls_overlap(
             return false;
         }
         let frame = window_frame_rect(content, window);
-        let width = frame.width.min(44 * 3);
+        let width = frame.width.min(if window.integrated {
+            window
+                .controls_width
+                .saturating_add(window.controls_width * 8 / 112)
+        } else {
+            44 * 3
+        });
         let controls = Rect {
             x: frame
                 .x
                 .saturating_add(frame.width.saturating_sub(width) as i32),
             y: frame.y,
             width,
-            height: window.insets.top.min(frame.height),
+            height: if window.integrated {
+                window.titlebar_height
+            } else {
+                window.insets.top
+            }
+            .min(frame.height),
         };
         controls.height > 0
             && i64::from(area.x) < i64::from(controls.x) + i64::from(controls.width)
@@ -299,4 +379,25 @@ pub(crate) fn maximized_controls_overlap(
             && i64::from(area.y) < i64::from(controls.y) + i64::from(controls.height)
             && i64::from(controls.y) < i64::from(area.y) + i64::from(area.height)
     })
+}
+
+#[cfg(test)]
+mod integrated_frame_tests {
+    use super::*;
+    #[test]
+    fn client_buffers_cannot_shrink_away_protected_controls() {
+        let mut content = Surface::empty();
+        content.width = 10;
+        content.height = 10;
+        let mut window = Window::empty();
+        window.integrated = true;
+        window.controls_width = 224;
+        window.titlebar_height = 88;
+        let frame = window_frame_rect(&content, &window);
+        assert_eq!((frame.width, frame.height), (224, 88));
+        window.configured_width = 640;
+        window.configured_height = 480;
+        let frame = window_frame_rect(&content, &window);
+        assert_eq!((frame.width, frame.height), (640, 480));
+    }
 }

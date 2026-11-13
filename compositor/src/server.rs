@@ -16,13 +16,13 @@ use crate::input::{
     subscribe_input_events, surface_process, update_keyboard_focus, update_pointer_position,
 };
 use crate::protocol::*;
+use crate::received_buffer::{ReceivedBuffer, ReceivedHandles};
 use crate::renderer::composite_and_present;
 use crate::state::{CompositorState, MAX_MODAL_SESSIONS, ModalSession};
 use crate::surface::{Surface, handle_shared_buffer, send_frame_done};
-use crate::received_buffer::{ReceivedBuffer, ReceivedHandles};
-use platform::memory_object::ReadOnlyOffer;
 use crate::surface::{SurfaceRole, surface_extent};
 use crate::window::Window;
+use platform::memory_object::ReadOnlyOffer;
 
 static mut IPC_BUF: [u8; 4128] = [0; 4128];
 
@@ -122,7 +122,7 @@ fn process_input_event(
 fn finish_coalesced_pointer_motion(state: &mut CompositorState) -> Option<Rect> {
     let mut damage = finish_pointer_motion(
         &mut state.surfaces,
-        &state.windows,
+        &mut state.windows,
         &state.pointer_grab,
         &state.modal_sessions,
         state.pointer_x,
@@ -295,7 +295,8 @@ fn handle_request(
                 present_damage,
             );
         }
-        OP_DECOR_SUBSCRIBE
+        OP_SET_DECORATION
+        | OP_DECOR_SUBSCRIBE
         | OP_DECOR_CREATE_SURFACE
         | OP_DECOR_ATTACH
         | OP_DECOR_DETACH
@@ -499,7 +500,8 @@ fn handle_request(
 
 fn present(state: &mut CompositorState, damage: Option<Rect>) -> u32 {
     let mut damage = damage;
-    if state.boot_scene.is_some() && crate::boot_scene::BootScene::has_client_frame(&state.surfaces) {
+    if state.boot_scene.is_some() && crate::boot_scene::BootScene::has_client_frame(&state.surfaces)
+    {
         state.boot_scene = None;
         damage = None;
     }
@@ -651,10 +653,7 @@ pub(crate) fn run() -> ! {
                 Ok(Some(damage)) => frame.queue(Some(damage), false),
                 Ok(None) => {}
                 Err(status) => {
-                    platform::logln!(
-                        "compositor.service: loading tick failed status={}",
-                        status
-                    );
+                    platform::logln!("compositor.service: loading tick failed status={}", status);
                     platform::process::exit(u64::from(status));
                 }
             }
@@ -674,7 +673,8 @@ pub(crate) fn run() -> ! {
                 frame.flush(&mut state);
             } else if pending_msg.is_none() {
                 match platform::ipc::try_wait_object_handles(
-                    &mut pending_buf, &mut pending_handles.0,
+                    &mut pending_buf,
+                    &mut pending_handles.0,
                 ) {
                     Ok(msg) => pending_msg = Some(msg),
                     Err(_) => frame.flush(&mut state),
@@ -747,15 +747,17 @@ pub(crate) fn run() -> ! {
             }
         }
         if len <= buf.len() && buf[..len].starts_with(&ReadOnlyOffer::MAGIC) {
-            let client = client_id_for_sender(
-                &mut state.clients, sender, &mut state.next_client_id,
-            );
-            let awaiting = client != ClientId(0) && state.surfaces.iter().any(|surface| {
-                surface.live && surface.owner == client && surface.awaiting_buffer
-            });
+            let client =
+                client_id_for_sender(&mut state.clients, sender, &mut state.next_client_id);
+            let awaiting = client != ClientId(0)
+                && state.surfaces.iter().any(|surface| {
+                    surface.live && surface.owner == client && surface.awaiting_buffer
+                });
             let result = if awaiting {
                 ReceivedBuffer::receive(
-                    &buf[..len], &mut handles, crate::state::MAX_SHARED_BYTES as u64,
+                    &buf[..len],
+                    &mut handles,
+                    crate::state::MAX_SHARED_BYTES as u64,
                 )
             } else {
                 Err(platform::syscall::SysError::from_raw(
@@ -766,14 +768,20 @@ pub(crate) fn run() -> ! {
                 Ok(mapping) => {
                     let (address, length) = mapping.view();
                     handle_shared_buffer(
-                        &mut state.surfaces, client, address, length, Some(mapping),
+                        &mut state.surfaces,
+                        client,
+                        address,
+                        length,
+                        Some(mapping),
                     );
                 }
                 Err(error) => {
                     let mut reply = [0u8; 16];
-                    put_u32(&mut reply, 0, errno_status(
-                        error.errno().unwrap_or(mochi_user_syscall::EIO),
-                    ));
+                    put_u32(
+                        &mut reply,
+                        0,
+                        errno_status(error.errno().unwrap_or(mochi_user_syscall::EIO)),
+                    );
                     let _ = platform::ipc::reply(sender, &reply);
                 }
             }
@@ -802,9 +810,9 @@ pub(crate) fn run() -> ! {
                 );
                 for _ in 0..32 {
                     let mut next_handles = ReceivedHandles::default();
-                    let Ok(next_msg) = platform::ipc::try_wait_object_handles(
-                        buf, &mut next_handles.0,
-                    ) else {
+                    let Ok(next_msg) =
+                        platform::ipc::try_wait_object_handles(buf, &mut next_handles.0)
+                    else {
                         break;
                     };
                     let next_len = (next_msg & 0xffff_ffff) as usize;

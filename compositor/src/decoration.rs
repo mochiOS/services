@@ -100,6 +100,91 @@ pub(crate) fn handle_request(
         return reply;
     };
     match opcode {
+        OP_SET_DECORATION => {
+            let surface_token = read_u64(request, 4).unwrap_or(0);
+            let mode = read_u32(request, 12).unwrap_or(u32::MAX);
+            let height = read_u32(request, 16).unwrap_or(0);
+            let scale = read_u32(request, 24).unwrap_or(0);
+            if request.len() != 32
+                || mode > 1
+                || !(256..=8192).contains(&scale)
+                || height > MAX_DIMENSION
+            {
+                put_u32(&mut reply, 0, errno_status(mochi_user_syscall::EINVAL));
+                return reply;
+            }
+            let Some(content_index) = surface_index_for(
+                surfaces,
+                client,
+                SurfaceHandle(surface_token),
+                SurfaceRights::COMMIT,
+            ) else {
+                put_u32(&mut reply, 0, errno_status(mochi_user_syscall::EACCES));
+                return reply;
+            };
+            if surfaces[content_index].is_decoration
+                || surfaces[content_index].role != SurfaceRole::Toplevel
+            {
+                put_u32(&mut reply, 0, errno_status(mochi_user_syscall::EACCES));
+                return reply;
+            }
+            let Some(index) =
+                crate::window::window_index_by_id(windows, surfaces[content_index].window)
+            else {
+                put_u32(&mut reply, 0, errno_status(mochi_user_syscall::EACCES));
+                return reply;
+            };
+            let flags = read_u32(request, 28).unwrap_or(u32::MAX);
+            if flags & !3 != 0 {
+                put_u32(&mut reply, 0, errno_status(mochi_user_syscall::EINVAL));
+                return reply;
+            }
+            windows[index].titlebar_separator = flags & 1 != 0;
+            windows[index].resizable = flags & 2 != 0;
+            windows[index].integrated = mode == 1;
+            windows[index].titlebar_height = height.max((40 * scale + 1023) / 1024);
+            windows[index].controls_width = (112 * scale + 1023) / 1024;
+            windows[index].titlebar_background = read_u32(request, 20).unwrap_or(0) | 0xff;
+            windows[index].insets.top = if mode == 1 {
+                0
+            } else {
+                windows[index].titlebar_height
+            };
+            let (width, height) = crate::surface::surface_extent(&surfaces[content_index]);
+            let next_width = width.max(windows[index].controls_width);
+            let next_height = height.max(windows[index].titlebar_height);
+            if mode == 1
+                && (width != next_width || height != next_height)
+                && width != 0
+                && height != 0
+            {
+                windows[index].configured_width = next_width;
+                windows[index].configured_height = next_height;
+                send_window_configure(&surfaces[content_index], next_width, next_height);
+            }
+            reposition_window_surfaces(surfaces, &windows[index]);
+            notify_decorators(clients, windows, surfaces, index);
+            *needs_present = true;
+            put_u32(
+                &mut reply,
+                4,
+                if mode == 1 {
+                    windows[index].titlebar_height
+                } else {
+                    0
+                },
+            );
+            put_u32(
+                &mut reply,
+                8,
+                if mode == 1 {
+                    windows[index].controls_width
+                } else {
+                    0
+                },
+            );
+            put_u32(&mut reply, 12, windows[index].state);
+        }
         OP_DECOR_QUERY_OVERLAP | OP_DECOR_SAMPLE_BACKGROUND => {
             if !sender_has_decorate_capability(sender) {
                 put_u32(&mut reply, 0, errno_status(mochi_user_syscall::EACCES));
@@ -297,6 +382,9 @@ pub(crate) fn handle_request(
             *needs_present = true;
             windows[window_index].decorator_endpoint = surfaces[decoration_index].event_endpoint;
             windows[window_index].insets = insets;
+            if windows[window_index].integrated {
+                windows[window_index].insets = Insets::default();
+            }
             if let Some(content_index) =
                 content_surface_index_for_window(surfaces, &windows[window_index])
             {
@@ -360,52 +448,89 @@ pub(crate) fn handle_request(
                 right: read_u32(request, 20).unwrap_or(0).min(MAX_DIMENSION),
                 bottom: read_u32(request, 24).unwrap_or(0).min(MAX_DIMENSION),
             };
+            if windows[window_index].integrated {
+                windows[window_index].insets = Insets::default();
+            }
             reposition_window_surfaces(surfaces, &windows[window_index]);
             put_u32(&mut reply, 0, 0);
         }
         OP_DECOR_BEGIN_MOVE | OP_DECOR_BEGIN_RESIZE => {
-            if !sender_has_decorate_capability(sender) {
-                put_u32(&mut reply, 0, errno_status(mochi_user_syscall::EACCES));
+            if request.len() != 28 {
+                put_u32(&mut reply, 0, errno_status(mochi_user_syscall::EINVAL));
                 return reply;
             }
-            let window_token = read_u64(request, 4).unwrap_or(0);
+            let token = read_u64(request, 4).unwrap_or(0);
             let serial = read_u64(request, 12).unwrap_or(0);
-            let dx = read_u32(request, 20).unwrap_or(0) as i32;
-            let dy = read_u32(request, 24).unwrap_or(0) as i32;
-            let Some(window_index) = window_index_by_token(windows, window_token) else {
+            let owner_surface = surface_index_for(
+                surfaces,
+                client,
+                SurfaceHandle(token),
+                SurfaceRights::COMMIT,
+            )
+            .filter(|&i| !surfaces[i].is_decoration && surfaces[i].role == SurfaceRole::Toplevel);
+            let index = owner_surface
+                .and_then(|i| crate::window::window_index_by_id(windows, surfaces[i].window))
+                .or_else(|| {
+                    window_index_by_token(windows, token).filter(|&i| {
+                        windows[i].decorator == client && sender_has_decorate_capability(sender)
+                    })
+                });
+            let Some(index) = index else {
                 put_u32(&mut reply, 0, errno_status(mochi_user_syscall::EACCES));
                 return reply;
             };
-            if windows[window_index].decorator != client {
-                put_u32(&mut reply, 0, errno_status(mochi_user_syscall::EACCES));
-                return reply;
-            }
-            let Some(serial_index) = pointer_serials.iter().position(|record| {
-                record.serial == serial
-                    && record.window == windows[window_index].id
-                    && !record.used
-                    && Some(record.decoration) == windows[window_index].decoration
+            let expected = owner_surface
+                .map(|i| surfaces[i].handle)
+                .or(windows[index].decoration);
+            let Some(serial_index) = pointer_serials.iter().position(|r| {
+                serial != 0
+                    && r.serial == serial
+                    && r.window == windows[index].id
+                    && !r.used
+                    && Some(r.decoration) == expected
             }) else {
                 put_u32(&mut reply, 0, errno_status(mochi_user_syscall::EACCES));
                 return reply;
             };
-            pointer_serials[serial_index].used = true;
-            if opcode == OP_DECOR_BEGIN_MOVE {
-                if let Some(content_index) =
-                    content_surface_index_for_window(surfaces, &windows[window_index])
-                {
-                    *pointer_grab = Some(PointerGrab {
-                        window: windows[window_index].id,
-                        pointer_x: pointer_x.saturating_sub(dx),
-                        pointer_y: pointer_y.saturating_sub(dy),
-                        content_x: surfaces[content_index].x,
-                        content_y: surfaces[content_index].y,
-                    });
-                }
-                put_u32(&mut reply, 0, 0);
+            let edges = if opcode == OP_DECOR_BEGIN_RESIZE {
+                read_u32(request, 20).unwrap_or(0)
             } else {
-                put_u32(&mut reply, 0, 0);
+                0
+            };
+            if opcode == OP_DECOR_BEGIN_RESIZE
+                && (!windows[index].resizable || !matches!(edges, 1 | 2 | 4 | 8 | 5 | 6 | 9 | 10))
+            {
+                put_u32(&mut reply, 0, errno_status(mochi_user_syscall::EINVAL));
+                return reply;
             }
+            if windows[index].state != WINDOW_STATE_NORMAL {
+                put_u32(&mut reply, 0, errno_status(mochi_user_syscall::EINVAL));
+                return reply;
+            }
+            let Some(content) = content_surface_index_for_window(surfaces, &windows[index]) else {
+                put_u32(&mut reply, 0, errno_status(mochi_user_syscall::EACCES));
+                return reply;
+            };
+            pointer_serials[serial_index].used = true;
+            let (width, height) = crate::surface::surface_extent(&surfaces[content]);
+            let (dx, dy) = if owner_surface.is_none() && opcode == OP_DECOR_BEGIN_MOVE {
+                (
+                    read_u32(request, 20).unwrap_or(0) as i32,
+                    read_u32(request, 24).unwrap_or(0) as i32,
+                )
+            } else {
+                (0, 0)
+            };
+            *pointer_grab = Some(PointerGrab {
+                window: windows[index].id,
+                pointer_x: pointer_x.saturating_sub(dx),
+                pointer_y: pointer_y.saturating_sub(dy),
+                content_x: surfaces[content].x,
+                content_y: surfaces[content].y,
+                resize_edges: edges,
+                width,
+                height,
+            });
         }
         OP_DECOR_MINIMIZE | OP_DECOR_TOGGLE_MAXIMIZE => {
             if !sender_has_decorate_capability(sender) {
@@ -510,3 +635,7 @@ pub(crate) fn handle_request(
     }
     reply
 }
+
+#[cfg(test)]
+#[path = "decoration_tests.rs"]
+mod integrated_tests;

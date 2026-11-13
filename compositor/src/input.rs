@@ -37,6 +37,9 @@ pub(crate) struct PointerGrab {
     pub(crate) pointer_y: i32,
     pub(crate) content_x: i32,
     pub(crate) content_y: i32,
+    pub(crate) resize_edges: u32,
+    pub(crate) width: u32,
+    pub(crate) height: u32,
 }
 
 fn find_service(name: &str) -> Option<u64> {
@@ -676,7 +679,13 @@ pub(crate) fn handle_input_event(
                 let surface = &surfaces[index];
                 let detail = (u32::from(event.flags) << 16) | u32::from(event.detail);
                 let mut serial = 0;
-                if event.flags & platform::input::FLAG_PRESS != 0 && surface.is_decoration {
+                if event.flags & platform::input::FLAG_PRESS != 0
+                    && event.detail == 1
+                    && surface.window != WindowId(0)
+                {
+                    for previous in pointer_serials.iter_mut() {
+                        previous.used = true;
+                    }
                     *next_pointer_serial = next_pointer_serial.wrapping_add(1).max(1);
                     serial = *next_pointer_serial;
                     if let Some(slot) = pointer_serials
@@ -704,18 +713,21 @@ pub(crate) fn handle_input_event(
                         serial,
                     );
                 } else {
-                    send_event(
-                        surface.event_endpoint,
-                        surface.token,
-                        EVENT_POINTER_BUTTON,
-                        *pointer_x - surface.x,
-                        *pointer_y - surface.y,
-                        detail,
-                    );
+                    let mut wire = [0u8; 32];
+                    put_u32(&mut wire, 0, EVENT_POINTER_BUTTON);
+                    put_i32(&mut wire, 4, *pointer_x - surface.x);
+                    put_i32(&mut wire, 8, *pointer_y - surface.y);
+                    put_u32(&mut wire, 12, detail);
+                    put_u64(&mut wire, 16, surface.token);
+                    put_u64(&mut wire, 24, serial);
+                    let _ = platform::ipc::send(surface.event_endpoint, &wire);
                 }
             }
-            if event.flags & platform::input::FLAG_RELEASE != 0 {
+            if event.flags & platform::input::FLAG_RELEASE != 0 && event.detail == 1 {
                 *pointer_grab = None;
+                for record in pointer_serials.iter_mut() {
+                    record.used = true;
+                }
             }
             needs_window_redraw.then_some(Rect::full(display_width, display_height))
         }
@@ -921,7 +933,7 @@ mod tests {
         window.content = content.handle;
         window.decoration = Some(decoration.handle);
         window.insets.top = 40;
-        let windows = [window];
+        let mut windows = [window];
         let mut surfaces = [content, decoration];
         let grab = Some(super::PointerGrab {
             window: WindowId(7),
@@ -929,10 +941,13 @@ mod tests {
             pointer_y: 120,
             content_x: 100,
             content_y: 140,
+            resize_edges: 0,
+            width: 0,
+            height: 0,
         });
 
         for (x, y, frame_x, frame_y) in [(120, 20, 100, 0), (0, 0, -20, -20)] {
-            let damage = super::apply_pointer_grab(&mut surfaces, &windows, &grab, x, y);
+            let damage = super::apply_pointer_grab(&mut surfaces, &mut windows, &grab, x, y);
             assert!(damage.is_some());
             let frame = crate::window::window_frame_rect(&surfaces[0], &windows[0]);
             assert_eq!((frame.x, frame.y), (frame_x, frame_y));
@@ -1199,7 +1214,7 @@ pub(crate) fn update_pointer_position(
 
 pub(crate) fn finish_pointer_motion(
     surfaces: &mut [Surface],
-    windows: &[Window],
+    windows: &mut [Window],
     pointer_grab: &Option<PointerGrab>,
     modal_sessions: &[ModalSession],
     pointer_x: i32,
@@ -1243,7 +1258,7 @@ pub(crate) fn raise_window(
 
 fn apply_pointer_grab(
     surfaces: &mut [Surface],
-    windows: &[Window],
+    windows: &mut [Window],
     pointer_grab: &Option<PointerGrab>,
     pointer_x: i32,
     pointer_y: i32,
@@ -1258,7 +1273,67 @@ fn apply_pointer_grab(
     else {
         return None;
     };
-    let window = &windows[window_index];
+    let window = &mut windows[window_index];
+    if grab.resize_edges != 0 {
+        let dx = pointer_x.saturating_sub(grab.pointer_x);
+        let dy = pointer_y.saturating_sub(grab.pointer_y);
+        let left = grab.resize_edges & 1 != 0;
+        let right = grab.resize_edges & 2 != 0;
+        let top = grab.resize_edges & 4 != 0;
+        let bottom = grab.resize_edges & 8 != 0;
+        let width = (i64::from(grab.width)
+            + if left {
+                -i64::from(dx)
+            } else if right {
+                i64::from(dx)
+            } else {
+                0
+            })
+        .clamp(
+            i64::from(window.controls_width.max(112)),
+            i64::from(crate::state::MAX_DIMENSION),
+        ) as u32;
+        let height = (i64::from(grab.height)
+            + if top {
+                -i64::from(dy)
+            } else if bottom {
+                i64::from(dy)
+            } else {
+                0
+            })
+        .clamp(
+            i64::from(if window.integrated {
+                window.titlebar_height.max(40)
+            } else {
+                40
+            }),
+            i64::from(crate::state::MAX_DIMENSION),
+        ) as u32;
+        if window.configured_width == width && window.configured_height == height {
+            return None;
+        }
+        let old =
+            window_frame_rect(&surfaces[content_index], window).expanded(WINDOW_SHADOW_MARGIN);
+        window.configured_width = width;
+        window.configured_height = height;
+        if left {
+            surfaces[content_index].x = grab
+                .content_x
+                .saturating_add(grab.width as i32 - width as i32);
+        }
+        if top {
+            surfaces[content_index].y = grab
+                .content_y
+                .saturating_add(grab.height as i32 - height as i32);
+        }
+        crate::window::reposition_window_surfaces(surfaces, window);
+        crate::window::send_window_configure(&surfaces[content_index], width, height);
+        crate::window::send_window_metadata(window, surfaces, window.decorator_endpoint);
+        return merge_damage(
+            Some(old),
+            window_frame_rect(&surfaces[content_index], window).expanded(WINDOW_SHADOW_MARGIN),
+        );
+    }
     let next_x = grab
         .content_x
         .saturating_add(pointer_x.saturating_sub(grab.pointer_x));
@@ -1276,4 +1351,137 @@ fn apply_pointer_grab(
     let new_frame =
         window_frame_rect(&surfaces[content_index], window).expanded(WINDOW_SHADOW_MARGIN);
     merge_damage(Some(old_frame), new_frame)
+}
+
+#[cfg(test)]
+mod integrated_decoration_tests {
+    use super::*;
+    #[test]
+    fn reserved_control_strip_receives_input_instead_of_client_content() {
+        let mut content = Surface::empty();
+        content.live = true;
+        content.visible = true;
+        content.role = SurfaceRole::Toplevel;
+        content.handle = SurfaceHandle(1);
+        content.token = 1;
+        content.window = WindowId(7);
+        content.width = 640;
+        content.height = 480;
+        content.z = 1;
+        let mut control = Surface::empty();
+        control.live = true;
+        control.visible = true;
+        control.is_decoration = true;
+        control.handle = SurfaceHandle(2);
+        control.token = 2;
+        control.window = WindowId(7);
+        control.x = 528;
+        control.width = 112;
+        control.height = 44;
+        control.z = 2;
+        let mut window = Window::empty();
+        window.live = true;
+        window.id = WindowId(7);
+        window.integrated = true;
+        window.content = content.handle;
+        window.decoration = Some(control.handle);
+        window.titlebar_height = 44;
+        window.controls_width = 112;
+        let surfaces = [content, control];
+        assert_eq!(hit_test(&surfaces, &[window], 600, 20), Some(1));
+        assert_eq!(hit_test(&surfaces, &[window], 500, 20), Some(0));
+        assert_eq!(hit_test(&surfaces, &[window], 600, 60), Some(0));
+    }
+}
+
+#[cfg(test)]
+mod integrated_resize_tests {
+    use super::*;
+    #[test]
+    fn interactive_resize_preserves_opposite_edges_and_system_minimum_dimensions() {
+        let mut content = Surface::empty();
+        content.live = true;
+        content.visible = true;
+        content.handle = SurfaceHandle(1);
+        content.token = 1;
+        content.window = WindowId(7);
+        content.width = 640;
+        content.height = 480;
+        content.x = 100;
+        content.y = 100;
+        let mut window = Window::empty();
+        window.live = true;
+        window.id = WindowId(7);
+        window.content = content.handle;
+        window.integrated = true;
+        window.titlebar_height = 44;
+        let mut surfaces = [content];
+        let mut windows = [window];
+        let grab = Some(PointerGrab {
+            window: WindowId(7),
+            pointer_x: 100,
+            pointer_y: 100,
+            content_x: 100,
+            content_y: 100,
+            resize_edges: 5,
+            width: 640,
+            height: 480,
+        });
+        assert!(apply_pointer_grab(&mut surfaces, &mut windows, &grab, 200, 200).is_some());
+        assert_eq!(
+            (windows[0].configured_width, windows[0].configured_height),
+            (540, 380)
+        );
+        assert_eq!((surfaces[0].x, surfaces[0].y), (200, 200));
+        apply_pointer_grab(&mut surfaces, &mut windows, &grab, 5000, 5000);
+        assert_eq!(
+            (windows[0].configured_width, windows[0].configured_height),
+            (112, 44)
+        );
+        assert_eq!((surfaces[0].x, surfaces[0].y), (628, 536));
+    }
+    #[test]
+    fn maximized_integrated_controls_win_over_the_shell_reveal_surface() {
+        let mut content = Surface::empty();
+        content.live = true;
+        content.visible = true;
+        content.role = SurfaceRole::Toplevel;
+        content.handle = SurfaceHandle(1);
+        content.token = 1;
+        content.window = WindowId(7);
+        content.width = 640;
+        content.height = 480;
+        content.z = 1;
+        let mut control = Surface::empty();
+        control.live = true;
+        control.visible = true;
+        control.is_decoration = true;
+        control.handle = SurfaceHandle(2);
+        control.token = 2;
+        control.window = WindowId(7);
+        control.x = 528;
+        control.width = 112;
+        control.height = 44;
+        control.z = 2;
+        let mut panel = Surface::empty();
+        panel.live = true;
+        panel.visible = true;
+        panel.role = SurfaceRole::Panel;
+        panel.handle = SurfaceHandle(3);
+        panel.token = 3;
+        panel.width = 640;
+        panel.height = 480;
+        panel.z = 3;
+        let mut window = Window::empty();
+        window.live = true;
+        window.id = WindowId(7);
+        window.content = content.handle;
+        window.decoration = Some(control.handle);
+        window.integrated = true;
+        window.titlebar_height = 44;
+        window.state = crate::protocol::WINDOW_STATE_MAXIMIZED;
+        let surfaces = [content, control, panel];
+        assert_eq!(hit_test(&surfaces, &[window], 600, 0), Some(1));
+        assert_eq!(hit_test(&surfaces, &[window], 500, 0), Some(2));
+    }
 }

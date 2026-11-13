@@ -1561,7 +1561,7 @@ pub(crate) fn handle_request(
             if !surfaces[index].is_decoration {
                 let window_id = surfaces[index].window;
                 if let Some(window_index) = window_index_by_id(windows, window_id) {
-                    if !windows[window_index].metadata_sent {
+                    if !windows[window_index].metadata_sent || old_bounds.is_some() {
                         windows[window_index].metadata_sent = true;
                         notify_decorators(clients, windows, surfaces, window_index);
                     }
