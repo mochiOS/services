@@ -1498,4 +1498,16 @@ fn relocation_run_merge_preserves_unsorted_and_overlap_checks() {
             assert!(matches!(Pie::parse(&fixture(&bad)), Err(Error::Invalid)));
         }
     }
+    // Force the windowed path, then check intersections across both a bitmap
+    // word and a 64KiB window. Large BSS gaps must not be scanned page by page.
+    for base in [0x1fffcu64, 0x1_0001_fffc] {
+        for (delta, valid) in [(4, false), (8, true), (16, true)] {
+            let mut targets: Vec<_> = (0..130).rev().map(|i| 0x12000 + i * 16).collect();
+            targets.extend([base, base + delta]);
+            let mut bytes = fixture(&targets);
+            w64(&mut bytes, 64 + 56 + 40, 0x1_0002_0000);
+            assert_eq!(Pie::parse(&bytes).is_ok(), valid);
+        }
+    }
+
 }
