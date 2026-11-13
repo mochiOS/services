@@ -13,4 +13,6 @@ requires = [
     "fs.read.all",
     "ipc.client",
     "ipc.server",
+    # Validate subscription endpoint ownership.
+    "process.inspect",
 ]
