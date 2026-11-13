@@ -1460,3 +1460,42 @@ fn resident_external_imports_are_explicit_bounded_and_cannot_override_group_defi
         }
     }
 }
+
+// Compare many orderings, including more runs than the bounded merge handles.
+#[test]
+fn relocation_run_merge_preserves_unsorted_and_overlap_checks() {
+    fn fixture(targets: &[u64]) -> Vec<u8> {
+        let mut bytes = image();
+        bytes.resize(0x1100 + targets.len() * 24, 0);
+        let length = bytes.len() as u64 - 0x1000;
+        segment(&mut bytes, 1, 1, 6, 0x1000, 0x1000, length, 0x20000);
+        w64(&mut bytes, 0x1008, 0x1100);
+        w64(&mut bytes, 0x1018, targets.len() as u64 * 24);
+        for (index, target) in targets.iter().enumerate() {
+            let offset = 0x1100 + index * 24;
+            w64(&mut bytes, offset, *target);
+            w64(&mut bytes, offset + 8, 8);
+            w64(&mut bytes, offset + 16, 0x180);
+        }
+        bytes
+    }
+    let mut seed = 17u64;
+    for count in [2usize, 8, 63, 64, 65, 130] {
+        let mut targets: Vec<_> = (0..count).map(|i| 0x12000 + i as u64 * 16).collect();
+        for permutation in 0..20 {
+            if permutation == 1 { targets.reverse(); }
+            if permutation > 1 {
+                for i in (1..count).rev() {
+                    seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+                    targets.swap(i, seed as usize % (i + 1));
+                }
+            }
+            assert!(Pie::parse(&fixture(&targets)).is_ok());
+            let mut bad = targets.clone();
+            bad[count - 1] = bad[0];
+            assert!(matches!(Pie::parse(&fixture(&bad)), Err(Error::Invalid)));
+            bad[count - 1] = bad[0] + 4;
+            assert!(matches!(Pie::parse(&fixture(&bad)), Err(Error::Invalid)));
+        }
+    }
+}
