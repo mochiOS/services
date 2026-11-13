@@ -1670,7 +1670,6 @@ dependencies = [
  "mochios-posix-client",
  "mochios-posix-protocol",
  "mochios-workspace-protocol",
- "serde_json",
  "toml 1.1.6+spec-1.1.0",
  "zeroize",
 ]
@@ -4893,9 +4892,9 @@ dependencies = [
 ]
 
 [[patch.unused]]
-name = "mnu"
+name = "mochi-user-runtime"
 version = "0.1.0"
 
 [[patch.unused]]
-name = "mochi-user-runtime"
+name = "mnu"
 version = "0.1.0"

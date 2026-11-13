@@ -39,7 +39,10 @@ static int native_sender(uint64_t service, const char *path, uint32_t *sender) {
   return 0;
 }
 
-int main(void) {
+#ifndef RECVMSG_TEST_ENTRY
+#define RECVMSG_TEST_ENTRY main
+#endif
+int RECVMSG_TEST_ENTRY(void) {
   uint64_t key;
   memcpy(&key, "POSXCTRL", 8);
   uint64_t service = native(628, key, 0, 0, 0, 0, 0);
@@ -96,10 +99,13 @@ int main(void) {
     }
     CHECK(ancillary[capacity] == 0xa5);
   }
-  // Unsupported peek cannot consume the queued record or its references.
+  // Peek duplicates the visible references without consuming the queued record.
   CHECK(send_refs(endpoint, sender, memory, 1) == 0);
   message = (struct msghdr){NULL, 0, vectors, 1, ancillary, sizeof(ancillary), 0};
-  CHECK(recvmsg(receiver, &message, MSG_PEEK) == -1 && errno == EOPNOTSUPP);
+  CHECK(recvmsg(receiver, &message, MSG_PEEK) == 3 && message.msg_flags == MSG_TRUNC);
+  header = CMSG_FIRSTHDR(&message);
+  CHECK(header && close(*(int *)CMSG_DATA(header)) == 0);
+  message = (struct msghdr){NULL, 0, vectors, 1, ancillary, sizeof(ancillary), 0};
   CHECK(recvmsg(receiver, &message, 0) == 3 && message.msg_flags == MSG_TRUNC);
   header = CMSG_FIRSTHDR(&message);
   CHECK(header && close(*(int *)CMSG_DATA(header)) == 0);
