@@ -224,7 +224,12 @@ pub(crate) fn request(
         if limit > 128 * 1024 * 1024 {
             return Err(error(-27));
         }
-        let bytes = read_asset(&file.path, limit)?;
+        let bytes = read_asset(&file.path, limit).map_err(|error| {
+            let _ = p::logger::write_status_fmt(format_args!(
+                "capability.service: resource capture failed raw={}\n", error.raw()
+            ));
+            error
+        })?;
         // Use the retained snapshot, never a later package-index lookup.
         if bytes.len() != limit
             || !file
@@ -240,7 +245,12 @@ pub(crate) fn request(
     if request.operation == wire::OPEN && count != 1 {
         return Err(error(-2));
     }
-    let ram = crate::app_image::readonly(&tree)?;
+    let ram = crate::app_image::readonly(&tree).map_err(|error| {
+        let _ = p::logger::write_status_fmt(format_args!(
+            "capability.service: resource backing failed raw={}\n", error.raw()
+        ));
+        error
+    })?;
     let root = crate::persistent_grant::with_client(|client| {
         client.create_readonly_tree(
             ObjectHandleAttachment {
@@ -249,6 +259,11 @@ pub(crate) fn request(
             },
             tree.len(),
         )
+    }).map_err(|error| {
+        let _ = p::logger::write_status_fmt(format_args!(
+            "capability.service: resource directory import failed raw={}\n", error.raw()
+        ));
+        error
     })?;
     struct Reference(u32);
     impl Drop for Reference {

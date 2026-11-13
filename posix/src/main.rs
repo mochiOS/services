@@ -467,9 +467,17 @@ fn main() {
                 && bytes.len() == mochios_filesystem_protocol::readonly_tree::REQUEST_LEN;
             let result = if valid { platform::ipc::call_object_handles(filesystem_endpoint, bytes, &mut reply, &mut forwarded) }
                 else { Err(platform::syscall::SysError::from_raw(-22)) };
-            if result == Ok(8) && forwarded.delivery_flags == 0 {
+            // Native IPC packs the reply peer in the high word. Only the low
+            // word is the byte count, just as in EndpointTransport.
+            if result.is_ok_and(|message| message & 0xffff_ffff == 8)
+                && forwarded.delivery_flags == 0
+            {
                 let _ = platform::ipc::reply_object_handles(sender, &reply, &forwarded);
             } else {
+                let _ = platform::logger::write_status_fmt(format_args!(
+                    "posix.service: readonly tree forwarding failed result={result:?} flags={} count={}\n",
+                    forwarded.delivery_flags, forwarded.count
+                ));
                 let _ = platform::ipc::reply(sender, &(-5i64).to_le_bytes());
             }
             for object in incoming.handles.iter().take(incoming.count as usize) { let _ = platform::handle::close(object.handle); }

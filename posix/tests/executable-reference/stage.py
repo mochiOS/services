@@ -15,6 +15,8 @@ bundle = stage/'system/applications/ExecRefTest.app'
 bundle.mkdir(parents=True, exist_ok=True)
 probe = native/'executable-reference-probe'
 shutil.copyfile(probe,bundle/'entry.elf');(bundle/'entry.elf').chmod(0o755)
+resource = bundle/'message.txt'
+resource.write_bytes(b'owned-resource\n');resource.chmod(0o644)
 (stage/'system/bin').mkdir(parents=True,exist_ok=True)
 source = Path(__file__).with_name('worker.c')
 for name,message in [('worker','owned-helper\\n'),('external','external-helper\\n'),('forbidden','forbidden-helper\\n')]:
@@ -40,7 +42,9 @@ entry="entry.elf"
 resources=[]
 '''
 text+=file_record('parent','/system/applications/ExecRefTest.app/entry.elf',bundle/'entry.elf')
-text+='\n[[binary]]\npath="/system/applications/ExecRefTest.app/entry.elf"\nfile="parent"\nkind="application"\nrequires='+json.dumps(caps)+'\nexecutable_exports=["worker","forbidden"]\nexecutable_dependencies=["external-worker","bad-abi"]\n'
+text+='\n[[binary]]\npath="/system/applications/ExecRefTest.app/entry.elf"\nfile="parent"\nkind="application"\nrequires='+json.dumps(caps)+'\nresource_exports=["fixture-data"]\nexecutable_exports=["worker","forbidden"]\nexecutable_dependencies=["external-worker","bad-abi"]\n'
+text+='\n[[file]]\nid="message"\npath="/system/applications/ExecRefTest.app/message.txt"\ndigest="sha256:'+hashlib.sha256(resource.read_bytes()).hexdigest()+'"\nsize='+str(resource.stat().st_size)+'\nmode="0644"\n'
+text+='\n[[resource_export]]\nname="fixture-data"\n[resource_export.files]\n"message.txt"="message"\n'
 for name in ['worker','forbidden']:
     path='/system/bin/exe-'+name
     text+=file_record(name,path,stage/'system/bin'/('exe-'+name))

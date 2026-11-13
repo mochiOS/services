@@ -23,6 +23,20 @@ fn main() {
     };
     p::logln!("EXE-API BEGIN");
     let run = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> std::io::Result<()> {
+        // Exercise both native immutable-tree publication paths without
+        // fs.read.all. A successful CHECK alone does not test the IPC reply.
+        let bundle = appcore::bundle::Bundle::main()?;
+        let mut resource = String::new();
+        bundle.open("fixture-data/message.txt")?.read_to_string(&mut resource)?;
+        assert_eq!(resource, "owned-resource\n");
+        let directory = bundle.directory()?;
+        let path = directory.path().join("fixture-data/message.txt");
+        assert_eq!(std::fs::read_to_string(&path)?, resource);
+        assert!(OpenOptions::new().write(true).open(&path).is_err());
+        assert!(bundle.open("fixture-data/../message.txt").is_err());
+        drop(directory);
+        assert!(std::fs::read(&path).is_err());
+        writeln!(result, "BUNDLE immutable file + directory PASS")?;
         assert!(Executable::main("/bin/sh").is_err());
         assert!(Executable::main("missing").is_err());
         assert!(Executable::main("forbidden").is_err());

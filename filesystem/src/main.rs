@@ -130,7 +130,10 @@ fn main() {
                     let _ = platform::ipc::reply_object_handles(sender, &0i64.to_le_bytes(), &outgoing);
                     let _ = platform::handle::close(object.handle);
                 }
-                Err(error) => { let _ = platform::ipc::reply(sender, &(-i64::from(error)).to_le_bytes()); }
+                Err(error) => {
+                    let _ = platform::logger::write_status_fmt(format_args!("filesystem.service: readonly tree import failed errno={error}\n"));
+                    let _ = platform::ipc::reply(sender, &(-i64::from(error)).to_le_bytes());
+                }
             }
             continue;
         }
