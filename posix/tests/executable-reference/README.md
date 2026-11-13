@@ -103,6 +103,8 @@ result, with optional `--required-line` evidence for additional integration
 fixtures. This is a mechanism test, not visual or startup-performance approval.
 
 The VM exposes a debugger only through its private local `gdb.sock` Unix socket.
+Acquire an exclusive `flock` on the VM directory's `capture.lock` while using
+the debugger, so disk observation cannot resume the guest during inspection.
 Attach after UEFI has finished and the kernel has started; this host QEMU build
 can abort when GDB accesses CPU state during firmware SMM initialization.
 
@@ -116,4 +118,6 @@ out/native-fixtures/launcher-config-test
 ```
 
 The observer test checks extraction against a real qcow2 file with different
-neighbouring contents, including qemu-img's input-count-before-skip semantics.
+neighbouring contents. A bounded raw view over qcow2 preserves the exact
+partition range; sparse output avoids rewriting the entire mostly empty Data
+partition at every observation.

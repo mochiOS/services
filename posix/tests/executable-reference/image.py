@@ -30,10 +30,13 @@ def assemble(output, native_directory, overlay=None, system_libraries=False):
         target.chmod(mode)
 
     for directory in ('bin', 'applications', 'libraries', 'home', 'var/lib/accounts',
-                      'var/lib/packages', 'var/lib/security', 'var/log/services',
+                      'var/lib/packages', 'var/lib/security', 'var/lib/diagnostics',
+                      'var/lib/keychain', 'var/lib/certificate', 'var/log/services',
                       'var/config/account', 'system/services', 'system/packages', 'tmp'):
         (stage / directory).mkdir(parents=True, exist_ok=True)
     (stage / 'tmp').chmod(0o1777)
+    for private in ('var/lib/diagnostics', 'var/lib/keychain'):
+        (stage / private).chmod(0o700)
     shutil.copytree(root / 'resources/system', stage / 'system', dirs_exist_ok=True)
     shutil.copytree(root / 'resources/libraries', stage / 'system/libraries', dirs_exist_ok=True)
     shutil.rmtree(stage / 'system/users')

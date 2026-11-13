@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Observe a native signed fixture from coherent snapshots of a private KVM disk."""
 import argparse
+import fcntl
 import hashlib
 import json
 import os
@@ -21,11 +22,13 @@ def copy_partition(source, output, partition):
     start, size = partition['start'], partition['size']
     if start < 0 or size <= 0 or start % 2048 or size % 2048:
         raise ValueError('Expected a nonempty MiB-aligned partition')
-    # qemu-img dd limits input blocks before applying skip, unlike POSIX dd.
-    subprocess.run(['qemu-img', 'dd', '-U', '-f', 'qcow2', 'bs=1048576',
-                    'skip=' + str(start // 2048),
-                    'count=' + str((start + size) // 2048),
-                    'if=' + str(source), 'of=' + str(output)],
+    # A bounded raw view preserves exact partition boundaries. Sparse output
+    # avoids writing all 128 MiB of mostly empty Data at every observation.
+    view = {'driver': 'raw', 'offset': start * 512, 'size': size * 512,
+            'file': {'driver': 'qcow2',
+                     'file': {'driver': 'file', 'filename': str(source.resolve())}}}
+    subprocess.run(['qemu-img', 'convert', '-U', '-O', 'raw', '-S', '4096',
+                    'json:' + json.dumps(view), str(output)],
                    check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
     if output.stat().st_size != size * 512:
         raise RuntimeError('Partition capture has the wrong extent')
@@ -94,24 +97,26 @@ def run(image, directory, result_path, passed, failed, required, timeout):
             while time.monotonic() - started < timeout:
                 if process.poll() is not None:
                     raise RuntimeError('QEMU exited before a verified result')
-                qmp.command('stop')
-                try:
-                    if qmp.command('query-status')['status'] != 'paused':
-                        raise RuntimeError('Could not pause VM for coherent capture')
-                    flush = qmp.command('human-monitor-command', {'command-line': 'qemu-io osdisk "flush"'})
-                    if flush.strip():
-                        raise RuntimeError('Disk flush failed: ' + flush)
-                    copy_partition(Path('disk.qcow2'), Path('data.snapshot.img'), data)
-                    response = subprocess.run(['debugfs', '-R', 'cat ' + result_path,
-                                               'data.snapshot.img'], capture_output=True)
-                    diagnostic = response.stderr.decode('utf-8', errors='replace')
-                    errors = '\n'.join(line for line in diagnostic.splitlines()
-                                       if not line.startswith('debugfs ')).strip()
-                    if response.returncode or (errors and 'File not found by ext2_lookup' not in errors):
-                        raise RuntimeError('Cannot inspect guest result: ' + errors)
-                    text = response.stdout.decode('utf-8', errors='strict')
-                finally:
-                    qmp.command('cont')
+                with open('capture.lock', 'a+b') as guard:
+                    fcntl.flock(guard, fcntl.LOCK_EX)
+                    qmp.command('stop')
+                    try:
+                        if qmp.command('query-status')['status'] != 'paused':
+                            raise RuntimeError('Could not pause VM for coherent capture')
+                        flush = qmp.command('human-monitor-command', {'command-line': 'qemu-io osdisk "flush"'})
+                        if flush.strip():
+                            raise RuntimeError('Disk flush failed: ' + flush)
+                        copy_partition(Path('disk.qcow2'), Path('data.snapshot.img'), data)
+                        response = subprocess.run(['debugfs', '-R', 'cat ' + result_path,
+                                                   'data.snapshot.img'], capture_output=True)
+                        diagnostic = response.stderr.decode('utf-8', errors='replace')
+                        errors = '\n'.join(line for line in diagnostic.splitlines()
+                                           if not line.startswith('debugfs ')).strip()
+                        if response.returncode or (errors and 'File not found by ext2_lookup' not in errors):
+                            raise RuntimeError('Cannot inspect guest result: ' + errors)
+                        text = response.stdout.decode('utf-8', errors='strict')
+                    finally:
+                        qmp.command('cont')
                 if '\0' in text:
                     raise RuntimeError('Incoherent guest result contains NUL bytes')
                 Path('guest-result.log').write_text(text)
