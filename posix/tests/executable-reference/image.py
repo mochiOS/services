@@ -7,7 +7,7 @@ import subprocess
 import sys
 
 
-def assemble(output, native_directory, overlay=None, system_libraries=False):
+def assemble(output, native_directory, overlay=None, system_libraries=False, include_probe_apps=True):
     """Create a fresh file-backed A/B image; never modify normal images or disks."""
     root = Path(__file__).resolve().parents[4]
     output = output.resolve()
@@ -94,9 +94,10 @@ def assemble(output, native_directory, overlay=None, system_libraries=False):
             '--rootfs', stage, '--output', bound / 'manifest.toml')
         run(msign, 'package', 'built-in-record', bound / 'manifest.toml',
             '--output', bound / 'verification.bin')
-    run(sys.executable, Path(__file__).with_name('stage.py'), '--stage', stage,
-        '--sdk', root / 'out/newlib-port/sdk', '--native-directory', native_directory,
-        '--msign', msign)
+    if include_probe_apps:
+        run(sys.executable, Path(__file__).with_name('stage.py'), '--stage', stage,
+            '--sdk', root / 'out/newlib-port/sdk', '--native-directory', native_directory,
+            '--msign', msign)
     if system_libraries:
         run(sys.executable, root / 'scripts/mmake/stage-system-libraries.py',
             '--root', root, '--catalog', root / 'build/system-libraries.toml',
@@ -127,5 +128,8 @@ if __name__ == '__main__':
     parser.add_argument('--native-directory', type=Path, required=True)
     parser.add_argument('--overlay', type=Path)
     parser.add_argument('--system-libraries', action='store_true')
+    parser.add_argument('--without-probe-apps', action='store_true',
+                        help='Use a normal desktop overlay without the headless test applications')
     args = parser.parse_args()
-    assemble(args.output, args.native_directory.resolve(), args.overlay, args.system_libraries)
+    assemble(args.output, args.native_directory.resolve(), args.overlay, args.system_libraries,
+             not args.without_probe_apps)

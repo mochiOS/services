@@ -121,3 +121,9 @@ The observer test checks extraction against a real qcow2 file with different
 neighbouring contents. A bounded raw view over qcow2 preserves the exact
 partition range; sparse output avoids rewriting the entire mostly empty Data
 partition at every observation.
+
+For an ordinary desktop overlay, `--without-probe-apps` omits the signed test
+applications and helpers. Supply the normal service directory and a desktop
+overlay; do not use the headless fixture service-manager in this mode. Existing
+System package verification, required trusted-role images and signing still
+apply. This mode provides a manual development image, not an automated pass.
