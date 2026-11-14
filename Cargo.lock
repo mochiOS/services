@@ -1685,7 +1685,6 @@ version = "0.1.0"
 [[package]]
 name = "mochios-certificate"
 version = "0.1.0"
-source = "git+https://github.com/mochiOS/syscalls#38b10ca1d8b95d8ad638e24a2f83adae6aa17034"
 dependencies = [
  "ed25519-dalek",
  "sha2",
@@ -1694,14 +1693,6 @@ dependencies = [
 [[package]]
 name = "mochios-certificate-database"
 version = "0.1.0"
-dependencies = [
- "sha2",
-]
-
-[[package]]
-name = "mochios-certificate-database"
-version = "0.1.0"
-source = "git+https://github.com/mochiOS/syscalls#38b10ca1d8b95d8ad638e24a2f83adae6aa17034"
 dependencies = [
  "sha2",
 ]
@@ -1729,7 +1720,6 @@ dependencies = [
 [[package]]
 name = "mochios-driver-control-protocol"
 version = "0.1.0"
-source = "git+https://github.com/mochiOS/syscalls#38b10ca1d8b95d8ad638e24a2f83adae6aa17034"
 
 [[package]]
 name = "mochios-elf-signature"
@@ -1759,7 +1749,6 @@ dependencies = [
 [[package]]
 name = "mochios-http-client"
 version = "0.1.0"
-source = "git+https://github.com/mochiOS/syscalls#38b10ca1d8b95d8ad638e24a2f83adae6aa17034"
 
 [[package]]
 name = "mochios-keychain-protocol"
@@ -2650,7 +2639,7 @@ dependencies = [
  "mochi-user-platform",
  "mochi-user-syscall",
  "mochios-capability-protocol",
- "mochios-certificate-database 0.1.0",
+ "mochios-certificate-database",
  "mochios-elf-signature",
  "mochios-file-publication",
  "mochios-filesystem-protocol",
@@ -3274,7 +3263,7 @@ dependencies = [
  "mochi-user-platform",
  "mochi-user-syscall",
  "mochios-certificate",
- "mochios-certificate-database 0.1.0 (git+https://github.com/mochiOS/syscalls)",
+ "mochios-certificate-database",
  "mochios-developer-ca-trust",
  "mochios-posix-client",
  "mochios-posix-protocol",
@@ -3827,7 +3816,7 @@ dependencies = [
  "ed25519-dalek",
  "mochi-user-platform",
  "mochios-boot-selection",
- "mochios-certificate-database 0.1.0 (git+https://github.com/mochiOS/syscalls)",
+ "mochios-certificate-database",
  "mochios-developer-ca-trust",
  "mochios-device-consent",
  "mochios-http-client",
@@ -4892,7 +4881,23 @@ dependencies = [
 ]
 
 [[patch.unused]]
+name = "mochi-user-newlib-runtime"
+version = "0.1.0"
+
+[[patch.unused]]
 name = "mochi-user-runtime"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "mochios-package-client"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "mochios-test-support"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "mochios-tls-stream-ffi"
 version = "0.1.0"
 
 [[patch.unused]]
