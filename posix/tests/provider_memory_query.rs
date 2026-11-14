@@ -52,9 +52,9 @@ struct ProviderObject{{
 }
 mod syscall{pub mod ipc{
     #[derive(Debug,PartialEq)]pub struct IpcEndpoint{pub thread_id:u64,pub slot:u16,pub generation:u64}
-    pub fn call_provider_from_kernel(endpoint:IpcEndpoint,request:&[u8],reply:&mut[u8])->Result<usize,u64>{
+    pub fn call_provider_from_kernel(target:IpcEndpoint,request:&[u8],reply:&mut[u8])->Result<usize,u64>{
         use crate::*;
-        assert_eq!(endpoint,IpcEndpoint{thread_id:17,slot:2,generation:3});
+        assert_eq!(target,IpcEndpoint{thread_id:17,slot:2,generation:3});
         CALLS.set(CALLS.get()+1);
         let (request,data)=provider::RequestHeader::decode(request).unwrap();
         assert_eq!((request.opcode,request.object_id),(provider::OP_MEMORY_OBJECT,41));assert!(data.is_empty());
@@ -69,16 +69,32 @@ mod syscall{pub mod ipc{
 }}
 "#);
     let source = include_str!("../../../core/src/syscall/handle.rs");
-    program.push_str(probe::between(
-        source,
-        "fn provider_endpoint(",
-        "/// Reads from a provider object",
-    ));
-    program.push_str(probe::between(
-        source,
-        "pub(crate) fn provider_memory_object(",
-        "/// The caller retains its backing I/O guard",
-    ));
+    program.push_str(
+        &[
+            probe::definition(
+                include_str!("../../../core/src/ipc/provider.rs"),
+                "fn endpoint(",
+            ),
+            probe::definition(
+                include_str!("../../../core/src/ipc/provider.rs"),
+                "fn call(",
+            ),
+        ]
+        .join("\n"),
+    );
+    program.push_str(
+        &[
+            probe::definition(
+                include_str!("../../../core/src/ipc/provider.rs"),
+                "fn memory_object(",
+            ),
+            probe::definition(
+                include_str!("../../../core/src/syscall/handle/provider_io.rs"),
+                "fn provider_cache_identity(",
+            ),
+        ]
+        .join("\n"),
+    );
     program.push_str(r#"
 fn object()->ProviderObject{ProviderObject{endpoint_thread_id:17,endpoint_slot:2,endpoint_generation:3,object_id:41,
     memory_identity:AtomicU64::new(0),memory_features:AtomicU64::new(0),memory_identity_unavailable:AtomicBool::new(false)}}
@@ -86,7 +102,7 @@ fn main(){
     for identity in [0,1,u64::MAX]{
         let owner=object();IDENTITY.set(identity);let before=CALLS.get();
         for _ in 0..3{
-            assert_eq!(provider_memory_object(&owner),Ok(identity));
+            assert_eq!(memory_object(&owner).map_err(OperationError::into_raw),Ok(identity));
             assert_eq!(provider_cache_identity(&owner),Ok((identity!=0).then_some(identity)));
         }
         assert_eq!(CALLS.get(),before+1);
@@ -96,13 +112,13 @@ fn main(){
     let owner=object();IDENTITY.set(77);FEATURES.set(Some(provider::MEMORY_FEATURE_READ_AT_SHARED));
     let before=CALLS.get();assert_eq!(provider_cache_identity(&owner),Ok(Some(77)));
     assert_eq!(owner.memory_features(),provider::MEMORY_FEATURE_READ_AT_SHARED);
-    FEATURES.set(Some(0));assert_eq!(provider_memory_object(&owner),Ok(77));
+    FEATURES.set(Some(0));assert_eq!(memory_object(&owner).map_err(OperationError::into_raw),Ok(77));
     assert_eq!(owner.memory_features(),provider::MEMORY_FEATURE_READ_AT_SHARED);assert_eq!(CALLS.get(),before+1);
     FEATURES.set(None);
     for status in [-95,-38,-13,-11,-4095]{
         let owner=object();STATUS.set(status);let before=CALLS.get();
         assert_eq!(provider_cache_identity(&owner),Err(status as u64));
-        assert_eq!(provider_memory_object(&owner),Err(status as u64));
+        assert_eq!(memory_object(&owner).map_err(OperationError::into_raw),Err(status as u64));
         assert_eq!(CALLS.get(),before+2);assert!(!owner.memory_identity_unavailable());assert_eq!(owner.memory_identity(),None);
     }
     STATUS.set(0);
@@ -117,5 +133,9 @@ fn main(){
     MALFORMED.set(false);IDENTITY.set(77);assert_eq!(provider_cache_identity(&owner),Ok(Some(77)));
 }
 "#);
+    program.push_str(&probe::operation_error());
+    program.push_str(probe::operation_scope());
+    program.push_str("\nmod ipc { pub(crate) use crate::syscall::ipc::*; }\n");
+    program.push_str("use memory_object as provider_memory_object;\n");
     probe::run(&program);
 }

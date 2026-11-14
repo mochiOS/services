@@ -8,7 +8,7 @@ fn empty_provider_writes_delegate_once_and_validate_the_owner_reply() {
         .join("../..")
         .canonicalize()
         .unwrap();
-    let source = include_str!("../../../core/src/syscall/handle.rs");
+    let source = include_str!("../../../core/src/syscall/handle/provider_io.rs");
     let function = source.find("fn provider_write(").unwrap();
     let start = source[function..].find("if length == 0 {").unwrap() + function;
     let mut depth = 0;
@@ -28,7 +28,7 @@ fn empty_provider_writes_delegate_once_and_validate_the_owner_reply() {
     let branch = &source[start..end.unwrap()];
     // Compile the actual kernel branch against a controlled Provider transport.
     // No socket/POSIX concepts are supplied to that branch.
-    let program = format!(
+    let mut program = format!(
         r#"
 extern crate self as mnu_abi;
 #[path={abi_path:?}]mod abi;
@@ -36,7 +36,7 @@ pub use abi::*;
 const SUCCESS:u64=0;
 struct ProviderObject{{object_id:u64}}
 thread_local!{{static MODE:std::cell::Cell<u8>=const{{std::cell::Cell::new(0)}};static CALLS:std::cell::Cell<u8>=const{{std::cell::Cell::new(0)}};static BOUND:std::cell::Cell<Option<u64>>=const{{std::cell::Cell::new(None)}};}}
-fn provider_call(owner:&ProviderObject,request:provider::RequestHeader,data:&[u8],reply:&mut[u8])->Result<(provider::ResponseHeader,usize),u64>{{
+fn provider_call_raw(owner:&ProviderObject,request:provider::RequestHeader,data:&[u8],reply:&mut[u8])->Result<(provider::ResponseHeader,usize),u64>{{
 let bound=BOUND.get();
 assert_eq!(owner.object_id,17);assert_eq!(request.object_id,17);
 assert_eq!(request.opcode,if bound.is_some(){{provider::OP_WRITE_BOUNDED}}else{{provider::OP_WRITE}});
@@ -59,5 +59,11 @@ CALLS.with(|n|assert_eq!(n.get(),1));}}}}}}
 "#,
         abi_path = root.join("core/crates/abi/src/lib.rs"),
     );
+    program.push_str(&probe::operation_error());
+    program.push_str(r#"
+fn provider_call(owner:&ProviderObject,request:provider::RequestHeader,data:&[u8],reply:&mut[u8])->Result<(provider::ResponseHeader,usize),OperationError>{
+ provider_call_raw(owner,request,data,reply).map_err(OperationError::from_wire)
+}
+"#);
     probe::run(&program);
 }

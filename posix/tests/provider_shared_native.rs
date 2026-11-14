@@ -131,11 +131,39 @@ mod syscall{{
             "HANDLE_SEEK_END",
         ],
     );
-    program.push_str(probe::between(
-        include_str!("../../../core/src/syscall/handle.rs"),
-        "struct TemporaryMemoryHandle(",
-        "fn provider_write(provider:",
-    ));
+    program.push_str(
+        &[
+            probe::definition(
+                include_str!("../../../core/src/syscall/handle/provider_io.rs"),
+                "impl Drop for TemporaryMemoryHandle {",
+            ),
+            probe::definition(
+                include_str!("../../../core/src/syscall/handle/provider_io.rs"),
+                "fn provider_read_shared(",
+            ),
+            probe::definition(
+                include_str!("../../../core/src/syscall/handle/provider_io.rs"),
+                "fn provider_read_shared_at(",
+            ),
+            probe::definition(
+                include_str!("../../../core/src/syscall/handle/provider_io.rs"),
+                "struct ProviderReadTransfer",
+            ),
+            probe::definition(
+                include_str!("../../../core/src/syscall/handle/provider_io.rs"),
+                "impl ProviderReadTransfer {",
+            ),
+            probe::definition(
+                include_str!("../../../core/src/syscall/handle/provider_io.rs"),
+                "fn provider_read_shared_impl(",
+            ),
+            probe::definition(
+                include_str!("../../../core/src/syscall/handle/provider_io.rs"),
+                "fn provider_read(",
+            ),
+        ]
+        .join("\n"),
+    );
     program.push_str(r#"
 fn reset(){assert!(!LIVE.get());assert!(!LOCKED.get());CLOSES.set(0);CALLS.set(0);COPIES.set(0);INLINE_CALLS.set(0);
     POSITION.set(None);
@@ -204,5 +232,10 @@ fn main(){
     assert_eq!((CALLS.get(),CLOSES.get(),COPIES.get()),(0,0,0));assert!(!LIVE.get());
 }
 "#);
+    program.push_str(&probe::definition(
+        include_str!("../../../core/src/syscall/handle/provider_io.rs"),
+        "struct TemporaryMemoryHandle",
+    ));
+    program.push_str("mod ipc {pub use crate::syscall::ipc::*;}\n");
     probe::run(&program);
 }

@@ -74,7 +74,7 @@ mod task {
         crate::WOKEN.lock().unwrap().push(id.0);
     }
 }
-#[path = "../../../core/src/syscall/ipc/lifetime.rs"]
+#[path = "../../../core/src/ipc/lifetime.rs"]
 mod lifetime;
 
 fn endpoint(id: u64, generation: u64) -> IpcEndpoint {

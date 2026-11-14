@@ -37,9 +37,9 @@ unsafe impl std::alloc::GlobalAlloc for Allocator{{
 struct ProviderObject{{endpoint_thread_id:u64,endpoint_slot:u16,endpoint_generation:u64,object_id:u64}}
 mod syscall{{pub mod ipc{{
     #[derive(Debug,PartialEq)]pub struct IpcEndpoint{{pub thread_id:u64,pub slot:u16,pub generation:u64}}
-    pub fn call_provider_from_kernel(endpoint:IpcEndpoint,request:&[u8],reply:&mut[u8])->Result<usize,u64>{{
+    pub fn call_provider_from_kernel(target:IpcEndpoint,request:&[u8],reply:&mut[u8])->Result<usize,u64>{{
         use crate::*;
-        assert_eq!(endpoint,IpcEndpoint{{thread_id:99,slot:7,generation:123}});
+        assert_eq!(target,IpcEndpoint{{thread_id:99,slot:7,generation:123}});
         CALLS.set(CALLS.get()+1);
         let (request,data)=provider::RequestHeader::decode(request).unwrap();
         assert_eq!(request.object_id,17);assert_eq!(request.opcode,OP.get());
@@ -76,25 +76,49 @@ mod syscall{{pub mod ipc{{
     probe::constants(
         &mut program,
         include_str!("../../../core/crates/abi/src/lib.rs"),
-        &["HANDLE_SEEK_START", "HANDLE_SEEK_CURRENT", "HANDLE_SEEK_END"],
+        &[
+            "HANDLE_SEEK_START",
+            "HANDLE_SEEK_CURRENT",
+            "HANDLE_SEEK_END",
+        ],
     );
-    program.push_str(probe::between(
-        include_str!("../../../core/src/syscall/handle.rs"),
-        "fn provider_endpoint(",
-        "pub(crate) fn provider_memory_object(",
-    ));
+    program.push_str(
+        &[
+            probe::definition(
+                include_str!("../../../core/src/ipc/provider.rs"),
+                "fn endpoint(",
+            ),
+            probe::definition(
+                include_str!("../../../core/src/ipc/provider.rs"),
+                "fn call(",
+            ),
+            probe::definition(
+                include_str!("../../../core/src/ipc/provider.rs"),
+                "fn read_at(",
+            ),
+            probe::definition(
+                include_str!("../../../core/src/ipc/provider.rs"),
+                "fn write_at(",
+            ),
+            probe::definition(
+                include_str!("../../../core/src/ipc/provider.rs"),
+                "fn sync(",
+            ),
+        ]
+        .join("\n"),
+    );
     program.push_str(r#"
 fn invoke(owner:&ProviderObject,opcode:u16)->Result<usize,u64>{
     OP.set(opcode);
     match opcode{
         provider::OP_READ_AT=>{
-            let mut output=[0x71;16];let result=provider_read_at(owner,8192,&mut output);
+            let mut output=[0x71;16];let result=read_at(owner,8192,&mut output);
             if result.is_err(){assert_eq!(output,[0x71;16]);}
             else{assert_eq!(&output[..3],b"abc");assert_eq!(&output[3..],&[0x71;13]);}
-            result
+            result.map_err(OperationError::into_raw)
         }
-        provider::OP_WRITE_AT=>provider_write_at(owner,8192,&[0x5a;17]),
-        provider::OP_SYNC=>provider_sync(owner).map(|()|0),
+        provider::OP_WRITE_AT=>write_at(owner,8192,&[0x5a;17]).map_err(OperationError::into_raw),
+        provider::OP_SYNC=>sync(owner).map(|()|0).map_err(OperationError::into_raw),
         _=>unreachable!(),
     }
 }
@@ -123,14 +147,17 @@ fn main(){
     MODE.set(9);assert_eq!(invoke(&owner,provider::OP_WRITE_AT),Err(Error::BackingFailure.into_raw()));
     MODE.set(0);let before=CALLS.get();
     let large=[0u8;provider::MAX_DATA_LEN+1];
-    assert_eq!(provider_write_at(&owner,8192,&large),Err(Error::LimitExceeded.into_raw()));
-    let mut output=large;assert_eq!(provider_read_at(&owner,8192,&mut output),Err(Error::LimitExceeded.into_raw()));
+    assert_eq!(write_at(&owner,8192,&large).map_err(OperationError::into_raw),Err(Error::LimitExceeded.into_raw()));
+    let mut output=large;assert_eq!(read_at(&owner,8192,&mut output).map_err(OperationError::into_raw),Err(Error::LimitExceeded.into_raw()));
     let request=provider::RequestHeader{opcode:provider::OP_WRITE_AT,object_id:17,argument:0,basis:8192,length:1,data_length:1};
     let mut reply=[0u8;provider::RESPONSE_HEADER_LEN];
-    assert_eq!(provider_call(&owner,request,&large,&mut reply),Err(Error::LimitExceeded.into_raw()));
-    assert_eq!(provider_call(&owner,request,&[],&mut reply),Err(Error::InvalidArgument.into_raw()));
+    assert_eq!(call(&owner,request,&large,&mut reply).map_err(OperationError::into_raw),Err(Error::LimitExceeded.into_raw()));
+    assert_eq!(call(&owner,request,&[],&mut reply).map_err(OperationError::into_raw),Err(Error::InvalidArgument.into_raw()));
     assert_eq!(CALLS.get(),before);
 }
 "#);
+    program.push_str(&probe::operation_error());
+    program.push_str(probe::operation_scope());
+    program.push_str("\nmod ipc { pub(crate) use crate::syscall::ipc::*; }\n");
     probe::run(&program);
 }

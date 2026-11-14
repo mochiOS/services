@@ -14,10 +14,8 @@ fn production_release_owner_queue_and_retry_survive_allocation_denial() {
         .find("#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]")
         .unwrap();
     let table = &table[..end];
-    let handle = include_str!("../../../core/src/syscall/handle.rs");
-    let begin = handle
-        .find("pub(crate) fn flush_provider_releases()")
-        .unwrap();
+    let handle = include_str!("../../../core/src/ipc/provider.rs");
+    let begin = handle.find("pub(crate) fn flush_releases()").unwrap();
     let end = handle[begin..].find("\n}\n").unwrap() + begin + 3;
     let mut program = String::from(
         r#"
@@ -116,6 +114,7 @@ mod task {
         }
     }
 }
+mod ipc {pub use crate::syscall::ipc::*;}
 mod syscall {pub const ENOMEM:u64=(-12i64) as u64;pub mod ipc {
     use crate::{AtomicBool,AtomicUsize,Ordering};
     #[derive(Clone,Copy)] pub struct IpcEndpoint {pub thread_id:u64,pub slot:u16,pub generation:u64}
@@ -203,12 +202,12 @@ fn main(){
     drop(first);
     assert!(h::take_provider_releases().pop().is_none());
     drop(alias);
-    flush::flush_provider_releases(); // Backpressure: keep the reserved node.
-    flush::flush_provider_releases(); // Retry must neither allocate nor lose it.
+    flush::flush_releases(); // Backpressure: keep the reserved node.
+    flush::flush_releases(); // Retry must neither allocate nor lose it.
     assert_eq!(ATTEMPTS.load(Ordering::Relaxed),0);
     syscall::ipc::BLOCK.store(false,Ordering::Relaxed);
-    flush::flush_provider_releases();
-    flush::flush_provider_releases();
+    flush::flush_releases();
+    flush::flush_releases();
     assert_eq!(syscall::ipc::SENT.load(Ordering::Relaxed),1);
     assert_eq!(ATTEMPTS.load(Ordering::Relaxed),0);
     DENY.store(false,Ordering::Relaxed);
@@ -222,7 +221,7 @@ fn main(){
     assert!(!h::register_provider_object(&duplicate));
     DENY.store(true,Ordering::Relaxed); drop(duplicate);
     assert!(h::take_provider_releases().pop().is_none());
-    drop(owner); flush::flush_provider_releases();
+    drop(owner); flush::flush_releases();
     DENY.store(false,Ordering::Relaxed);
     let old=make(20000); drop(old);
     let mut detached=h::take_provider_releases();
@@ -239,14 +238,14 @@ fn main(){
     for id in 3..10003 {objects.push(make(id));}
     DENY.store(true,Ordering::Relaxed);
     for object in objects {drop(object);}
-    flush::flush_provider_releases();
+    flush::flush_releases();
     assert_eq!(syscall::ipc::SENT.load(Ordering::Relaxed),10002);
     assert_eq!(ATTEMPTS.load(Ordering::Relaxed),0);
     DENY.store(false,Ordering::Relaxed);
     let dead=make(10003);
     DENY.store(true,Ordering::Relaxed);
     drop(dead); syscall::ipc::INVALID.store(true,Ordering::Relaxed);
-    flush::flush_provider_releases();
+    flush::flush_releases();
     assert!(h::take_provider_releases().pop().is_none());
     assert_eq!(ATTEMPTS.load(Ordering::Relaxed),0);
     DENY.store(false,Ordering::Relaxed);
@@ -341,7 +340,7 @@ fn cleanup_reuses_reserved_nodes_and_does_not_register_sender_endpoints() {
         .unwrap();
     assert!(drop.contains("self.release_ticket.take()"));
     assert!(!drop.contains("ProviderRelease {"));
-    let ipc = include_str!("../../../core/src/syscall/ipc.rs");
+    let ipc = include_str!("../../../core/src/ipc/mod.rs");
     let send = ipc
         .split("pub(crate) fn send_provider_from_kernel(")
         .nth(1)

@@ -34,7 +34,7 @@ fn object_native(raw:u64,right:HandleRights)->Result<KernelObject,Error>{{
         2=>Ok(KernelObject::Other),_=>Err(Error::InvalidArgument)}}
 }}
 mod syscall{{pub mod fs{{pub enum SeekBasis{{Start,Current,End}}}}}}
-fn provider_call(owner:&ProviderObject,request:provider::RequestHeader,input:&[u8],output:&mut[u8])
+fn provider_call_raw(owner:&ProviderObject,request:provider::RequestHeader,input:&[u8],output:&mut[u8])
     ->Result<(provider::ResponseHeader,usize),u64>{{
     assert_eq!(owner.object_id,17);assert_eq!(request.opcode,provider::OP_SEEK);
     assert_eq!(request.object_id,17);assert_eq!(request.argument,OFFSET.get());
@@ -59,11 +59,19 @@ fn provider_call(owner:&ProviderObject,request:provider::RequestHeader,input:&[u
     );
     let source = include_str!("../../../core/src/syscall/handle.rs");
     program.push_str(probe::between(source, "pub fn seek(", "pub fn read_at("));
-    program.push_str(probe::between(
-        source,
-        "fn provider_seek_result(",
-        "/// Reads one positional object",
-    ));
+    program.push_str(
+        &[
+            probe::definition(
+                include_str!("../../../core/src/syscall/handle/provider_io.rs"),
+                "fn provider_seek_result(",
+            ),
+            probe::definition(
+                include_str!("../../../core/src/syscall/handle/provider_io.rs"),
+                "fn provider_seek(",
+            ),
+        ]
+        .join("\n"),
+    );
     program.push_str(r#"
 fn main(){
     for basis in [HANDLE_SEEK_START,HANDLE_SEEK_CURRENT,HANDLE_SEEK_END]{
@@ -91,6 +99,13 @@ fn main(){
         ADMISSION.set(Some(error));assert_eq!(seek(1,0,HANDLE_SEEK_START),error.into_raw());
     }
     assert_eq!(CALLS.get(),before);
+}
+"#);
+    program.push_str(&probe::operation_error());
+    program.push_str(r#"
+fn provider_call(owner:&ProviderObject,request:mnu_abi::provider::RequestHeader,input:&[u8],output:&mut[u8])
+ ->Result<(mnu_abi::provider::ResponseHeader,usize),OperationError>{
+    provider_call_raw(owner,request,input,output).map_err(OperationError::from_wire)
 }
 "#);
     probe::run(&program);

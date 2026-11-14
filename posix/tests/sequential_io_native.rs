@@ -52,6 +52,7 @@ fn main(){
     let before=CALLS.get();assert_eq!(invoke(2,1),Error::InvalidArgument.into_raw());assert_eq!(CALLS.get(),before);
 }
 "#);
+    program.push_str(probe::operation_scope());
     probe::run(&program);
 }
 
@@ -109,7 +110,7 @@ mod syscall{{pub fn copy_to_user_native(pointer:u64,bytes:&[u8])->Result<(),crat
     if count>=FAIL_AFTER.get(){{if let Some(error)=COPY_ERROR.get(){{return Err(error);}}}}
     assert!(bytes.iter().all(|byte|*byte==0x6b));Ok(())
 }}}}
-fn provider_call(owner:&ProviderObject,request:provider::RequestHeader,input:&[u8],storage:&mut[u8])
+fn provider_call_raw(owner:&ProviderObject,request:provider::RequestHeader,input:&[u8],storage:&mut[u8])
     ->Result<(provider::ResponseHeader,usize),u64>{{
     assert_eq!(owner.object_id,17);assert_eq!(request.object_id,17);assert!(input.is_empty());
     assert_eq!(LOCKED.get(),IDENTITY.get());
@@ -139,15 +140,13 @@ fn provider_call(owner:&ProviderObject,request:provider::RequestHeader,input:&[u
         ],
     );
     let source = include_str!("../../../core/src/syscall/handle.rs");
-    program.push_str(probe::between(
-        source,
-        "fn provider_read_chunk<'a>(",
-        "struct TemporaryMemoryHandle",
+    program.push_str(&probe::definition(
+        include_str!("../../../core/src/syscall/handle/provider_io.rs"),
+        "fn provider_read_chunk(",
     ));
-    program.push_str(probe::between(
-        source,
-        "fn provider_read(provider:",
-        "fn provider_write(provider:",
+    program.push_str(&probe::definition(
+        include_str!("../../../core/src/syscall/handle/provider_io.rs"),
+        "fn provider_read(",
     ));
     program.push_str(r#"
 fn reset(identity:bool){assert!(!LOCKED.get());IDENTITY.set(identity);CALLS.set(0);COPIES.set(0);MODE.set(0);
@@ -173,6 +172,13 @@ fn main(){
     }
     reset(false);assert_eq!(provider_read(&ProviderObject{object_id:17},u64::MAX-4095,8192),4096);
     reset(false);assert_eq!(run(u64::MAX),Error::LimitExceeded.into_raw());assert_eq!(CALLS.get(),0);
+}
+"#);
+    program.push_str(&probe::operation_error());
+    program.push_str(r#"
+fn provider_call(owner:&ProviderObject,request:mnu_abi::provider::RequestHeader,input:&[u8],output:&mut[u8])
+ ->Result<(mnu_abi::provider::ResponseHeader,usize),OperationError>{
+    provider_call_raw(owner,request,input,output).map_err(OperationError::from_wire)
 }
 "#);
     probe::run(&program);

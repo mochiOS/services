@@ -77,10 +77,10 @@ impl Snapshot{{fn read_at(&self,p:u64,out:&mut[u8])->usize{{out.fill(0x6b);backe
 fn provider_cache_identity(_: &ProviderObject)->Result<Option<u64>,u64>{{
     if CACHE_ERROR.get()!=0{{Err(CACHE_ERROR.get())}}else{{Ok(IDENTITY.get().then_some(99))}}
 }}
-fn provider_read_at(_: &ProviderObject,p:u64,out:&mut[u8])->Result<usize,u64>{{
+fn provider_read_at_raw(_: &ProviderObject,p:u64,out:&mut[u8])->Result<usize,u64>{{
     assert_eq!(LOCKED.get(),IDENTITY.get());out.fill(0x6b);backend(p,out.len())
 }}
-fn provider_write_at(_: &ProviderObject,p:u64,data:&[u8])->Result<usize,u64>{{
+fn provider_write_at_raw(_: &ProviderObject,p:u64,data:&[u8])->Result<usize,u64>{{
     assert_eq!(LOCKED.get(),IDENTITY.get());assert!(data.iter().all(|b|*b==0x5a));backend(p,data.len())
 }}
 mod mem{{pub mod vm_object{{
@@ -189,5 +189,16 @@ fn main(){
     reset(true);assert_eq!(invoke(5,1,8,0),Error::InvalidArgument.into_raw());
 }
 "#);
+    program.push_str(&probe::operation_error());
+    program.push_str(
+        r#"
+fn provider_read_at(owner:&ProviderObject,offset:u64,bytes:&mut[u8])->Result<usize,OperationError>{
+ provider_read_at_raw(owner,offset,bytes).map_err(OperationError::from_wire)
+}
+fn provider_write_at(owner:&ProviderObject,offset:u64,bytes:&[u8])->Result<usize,OperationError>{
+ provider_write_at_raw(owner,offset,bytes).map_err(OperationError::from_wire)
+}
+"#,
+    );
     probe::run(&program);
 }

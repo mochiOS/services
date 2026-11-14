@@ -68,9 +68,9 @@ mod syscall{{
     }}
     pub mod ipc{{
         #[derive(Debug,PartialEq)]pub struct IpcEndpoint{{pub thread_id:u64,pub slot:u16,pub generation:u64}}
-        pub fn call_provider_from_kernel(endpoint:IpcEndpoint,request:&[u8],reply:&mut[u8])->Result<usize,u64>{{
+        pub fn call_provider_from_kernel(target:IpcEndpoint,request:&[u8],reply:&mut[u8])->Result<usize,u64>{{
             use crate::*;
-            assert_eq!(endpoint,IpcEndpoint{{thread_id:99,slot:7,generation:123}});
+            assert_eq!(target,IpcEndpoint{{thread_id:99,slot:7,generation:123}});
             CALLS.set(CALLS.get()+1);
             let (header,data)=provider::RequestHeader::decode(request).unwrap();
             assert_eq!((header.opcode,header.object_id,header.basis),(if QUERY.get(){{provider::OP_QUERY}}else{{provider::OP_CONTROL}},17,CODE.get()));
@@ -92,7 +92,11 @@ mod syscall{{
     probe::constants(
         &mut program,
         include_str!("../../../core/crates/abi/src/lib.rs"),
-        &["HANDLE_SEEK_START", "HANDLE_SEEK_CURRENT", "HANDLE_SEEK_END"],
+        &[
+            "HANDLE_SEEK_START",
+            "HANDLE_SEEK_CURRENT",
+            "HANDLE_SEEK_END",
+        ],
     );
     let source = include_str!("../../../core/src/syscall/handle.rs");
     program.push_str(probe::between(
@@ -100,11 +104,19 @@ mod syscall{{
         "pub fn control(",
         "pub fn options_get(",
     ));
-    program.push_str(probe::between(
-        source,
-        "fn provider_endpoint(",
-        "/// Reads from a provider object",
-    ));
+    program.push_str(
+        &[
+            probe::definition(
+                include_str!("../../../core/src/ipc/provider.rs"),
+                "fn endpoint(",
+            ),
+            probe::definition(
+                include_str!("../../../core/src/ipc/provider.rs"),
+                "fn call(",
+            ),
+        ]
+        .join("\n"),
+    );
     program.push_str(r#"
 fn invoke()->u64{if QUERY.get(){query(7,CODE.get(),11,2,12,3)}else{control(7,CODE.get(),11,2,12,3)}}
 fn main(){
@@ -146,5 +158,9 @@ fn main(){
  }
 }
 "#);
+    program.push_str(&probe::operation_error());
+    program.push_str(probe::operation_scope());
+    program.push_str("\nmod ipc { pub(crate) use crate::syscall::ipc::*; }\n");
+    program.push_str("use call as provider_call;\n");
     probe::run(&program);
 }

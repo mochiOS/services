@@ -124,7 +124,7 @@ mod mem {pub mod vm_object {
     }
 }}
 fn provider_cache_identity(_:&Provider)->Result<Option<u64>,u64> {Ok(IDENTITY.get())}
-fn provider_call(provider:&Provider,request:mnu_abi::provider::RequestHeader,input:&[u8],storage:&mut [u8])
+fn provider_call_raw(provider:&Provider,request:mnu_abi::provider::RequestHeader,input:&[u8],storage:&mut [u8])
     ->Result<(mnu_abi::provider::ResponseHeader,usize),u64>{
     use mnu_abi::provider as wire;
     assert_eq!(provider.object_id,91);
@@ -149,7 +149,7 @@ fn provider_read_chunk<'a>(_:&Provider,identity:Option<u64>,length:usize,storage
     READS.set(READS.get()+1);let count=if SHORT.get(){0}else{length.min(2)};
     storage[..count].fill(b'x');Ok(&storage[..count])
 }
-fn provider_read_at(_: &Provider,offset:u64,bytes:&mut [u8])->Result<usize,u64> {
+fn provider_read_at_raw(_: &Provider,offset:u64,bytes:&mut [u8])->Result<usize,u64> {
     assert_eq!(LOCKS.get()-UNLOCKS.get(),usize::from(IDENTITY.get().is_some()));
     READS.set(READS.get()+1);
     if let Some(error)=BACKEND_ERROR.get(){return Err(error);}
@@ -159,10 +159,9 @@ fn provider_read_at(_: &Provider,offset:u64,bytes:&mut [u8])->Result<usize,u64> 
 }
 "#,
     );
-    program.push_str(probe::between(
-        include_str!("../../../core/src/syscall/handle.rs"),
-        "pub(crate) fn read_all(",
-        "pub fn provider_object_create(",
+    program.push_str(&probe::definition(
+        include_str!("../../../core/src/syscall/handle/provider_io.rs"),
+        "fn read_all(",
     ));
     program.push_str(
         r#"
@@ -248,6 +247,20 @@ fn main() {
     reset(1);EXTENT_ERROR.set(Some(Error::PeerClosed.into_raw()));error(Error::PeerClosed.into_raw());
     assert_eq!(READS.get(),0);assert_eq!(EXTENT_QUERIES.get(),1);
     for mode in [2,3] {reset(mode);error(Error::InvalidArgument.into_raw());assert_eq!(READS.get(),0);assert_eq!(SEEKS.get(),0);}
+}
+"#,
+    );
+    program.push_str(&probe::operation_error());
+    program.push_str(r#"
+fn provider_call(owner:&Provider,request:mnu_abi::provider::RequestHeader,input:&[u8],output:&mut[u8])
+ ->Result<(mnu_abi::provider::ResponseHeader,usize),OperationError>{
+    provider_call_raw(owner,request,input,output).map_err(OperationError::from_wire)
+}
+"#);
+    program.push_str(
+        r#"
+fn provider_read_at(owner:&Provider,offset:u64,bytes:&mut[u8])->Result<usize,OperationError>{
+    provider_read_at_raw(owner,offset,bytes).map_err(OperationError::from_wire)
 }
 "#,
     );

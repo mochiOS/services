@@ -59,6 +59,9 @@ mod syscall {
         }
     }
 }
+mod ipc {
+    pub(crate) use crate::syscall::ipc::*;
+}
 #[path = "../../../core/src/syscall/handle/provider_reference.rs"]
 mod production;
 fn register(thread: u64, generation: u64, id: u64) -> Arc<()> {

@@ -104,6 +104,8 @@ fn main() {
 }
 "#,
     );
+
+    program.push_str("mod ipc {pub use crate::syscall::ipc::*;}\n");
     probe::run(&program);
 }
 
@@ -133,5 +135,6 @@ fn main() {
 }
 "#,
     );
+
     probe::run(&program);
 }

@@ -1,3 +1,6 @@
+#[allow(dead_code)]
+#[path = "support/native_error_probe.rs"]
+mod probe;
 use mnu_abi::provider as wire;
 use std::io::Write;
 use std::process::{Command, Stdio};
@@ -81,11 +84,11 @@ fn function<'a>(source: &'a str, name: &str) -> &'a str {
 
 #[test]
 fn actual_kernel_write_loop_checks_bounds_partial_progress_and_copy_lock_order() {
-    let source = include_str!("../../../core/src/syscall/handle.rs");
+    let source = include_str!("../../../core/src/syscall/handle/provider_io.rs");
     let implementation = function(source, "fn provider_write_impl(");
     let native_status = include_str!("../../../core/crates/abi/src/status.rs");
     let native_storage = include_str!("../../../core/src/util/object_snapshot.rs");
-    let program = format!(
+    let mut program = format!(
         r#"
 extern crate alloc;
 extern crate self as mnu_abi;
@@ -136,7 +139,7 @@ if s.mode==6 && address>=4096 {{return Err(status::Error::InvalidAddress)}}
 bytes.fill(0x7a);Ok(())
 }}
 }}
-fn provider_call(owner:&ProviderObject,request:provider::RequestHeader,data:&[u8],reply:&mut[u8])->Result<(provider::ResponseHeader,usize),u64>{{
+fn provider_call_raw(owner:&ProviderObject,request:provider::RequestHeader,data:&[u8],reply:&mut[u8])->Result<(provider::ResponseHeader,usize),u64>{{
 assert_eq!(owner.object_id,17);assert_eq!(request.object_id,17);assert_eq!(request.argument,0);
 assert_eq!((request.length as usize,request.data_length as usize),(data.len(),data.len()));
 assert!(data.len()<=4096);if !data.is_empty(){{assert!(LOCKED.load(Ordering::SeqCst));}}
@@ -185,6 +188,12 @@ assert_eq!(STATE.lock().unwrap().calls,0);
         std::env::temp_dir().join(format!("mochios-bounded-write-{}", std::process::id()));
     std::fs::create_dir(&directory).unwrap();
     let executable = directory.join("probe");
+    program.push_str(&probe::operation_error());
+    program.push_str(r#"
+fn provider_call(owner:&ProviderObject,request:provider::RequestHeader,data:&[u8],reply:&mut[u8])->Result<(provider::ResponseHeader,usize),OperationError>{
+ provider_call_raw(owner,request,data,reply).map_err(OperationError::from_wire)
+}
+"#);
     let mut compiler = Command::new("rustc")
         .args([
             "--edition=2021",
