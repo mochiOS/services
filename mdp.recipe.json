@@ -1,0 +1,328 @@
+{
+  "format": 1,
+  "steps": [
+    "$(MOCHIOS_CARGO) --config \"patch.\\\"https://github.com/mochiOS/syscalls\\\".mochios-filesystem-protocol.path='$(ROOT)/user/crates/filesystem-protocol'\" --config \"patch.\\\"https://github.com/mochiOS/syscalls\\\".mochios-workspace-protocol.path='$(ROOT)/user/crates/workspace-protocol'\" --manifest-path $(PROJECT)/Cargo.toml --workspace"
+  ],
+  "package": {
+    "name": "services",
+    "version": "0.1.0",
+    "target": "x86_64-mochios",
+    "abi": "mochios-1"
+  },
+  "artifact": "out/mdp/services.tar.mdp",
+  "exports": [
+    {
+      "source": "$(RUST_TARGET_DIR)/x86_64-unknown-mochios/release/core",
+      "area": "initfs",
+      "destination": "init",
+      "mode": 493
+    },
+    {
+      "source": "$(RUST_TARGET_DIR)/x86_64-unknown-mochios/release/capability",
+      "area": "system",
+      "destination": "services/capability.service",
+      "mode": 493
+    },
+    {
+      "source": "capability/manifest.toml",
+      "area": "manifests",
+      "destination": "capability.toml"
+    },
+    {
+      "source": "$(RUST_TARGET_DIR)/x86_64-unknown-mochios/release/display",
+      "area": "system",
+      "destination": "services/display.driver",
+      "mode": 493
+    },
+    {
+      "source": "display/manifest.toml",
+      "area": "manifests",
+      "destination": "display.toml"
+    },
+    {
+      "source": "$(RUST_TARGET_DIR)/x86_64-unknown-mochios/release/compositor",
+      "area": "system",
+      "destination": "services/compositor.service",
+      "mode": 493
+    },
+    {
+      "source": "compositor/manifest.toml",
+      "area": "manifests",
+      "destination": "compositor.toml"
+    },
+    {
+      "source": "$(RUST_TARGET_DIR)/x86_64-unknown-mochios/release/drivers",
+      "area": "system",
+      "destination": "services/drivers.service",
+      "mode": 493
+    },
+    {
+      "source": "drivers/manifest.toml",
+      "area": "manifests",
+      "destination": "drivers.toml"
+    },
+    {
+      "source": "$(RUST_TARGET_DIR)/x86_64-unknown-mochios/release/filesystem-service",
+      "area": "system",
+      "destination": "services/filesystem.service",
+      "mode": 493
+    },
+    {
+      "source": "filesystem/manifest.toml",
+      "area": "manifests",
+      "destination": "filesystem.toml"
+    },
+    {
+      "source": "$(RUST_TARGET_DIR)/x86_64-unknown-mochios/release/logger",
+      "area": "system",
+      "destination": "services/logger.service",
+      "mode": 493
+    },
+    {
+      "source": "logger/manifest.toml",
+      "area": "manifests",
+      "destination": "logger.toml"
+    },
+    {
+      "source": "$(RUST_TARGET_DIR)/x86_64-unknown-mochios/release/input",
+      "area": "system",
+      "destination": "services/input.service",
+      "mode": 493
+    },
+    {
+      "source": "input/manifest.toml",
+      "area": "manifests",
+      "destination": "input.toml"
+    },
+    {
+      "source": "$(RUST_TARGET_DIR)/x86_64-unknown-mochios/release/linux",
+      "area": "system",
+      "destination": "services/linux.service",
+      "mode": 493
+    },
+    {
+      "source": "linux/manifest.toml",
+      "area": "manifests",
+      "destination": "linux.toml"
+    },
+    {
+      "source": "$(RUST_TARGET_DIR)/x86_64-unknown-mochios/release/network",
+      "area": "system",
+      "destination": "services/network.service",
+      "mode": 493
+    },
+    {
+      "source": "network/manifest.toml",
+      "area": "manifests",
+      "destination": "network.toml"
+    },
+    {
+      "source": "$(RUST_TARGET_DIR)/x86_64-unknown-mochios/release/package",
+      "area": "system",
+      "destination": "services/package.service",
+      "mode": 493
+    },
+    {
+      "source": "package/manifest.toml",
+      "area": "manifests",
+      "destination": "package.toml"
+    },
+    {
+      "source": "$(RUST_TARGET_DIR)/x86_64-unknown-mochios/release/posix-service",
+      "area": "system",
+      "destination": "services/posix.service",
+      "mode": 493
+    },
+    {
+      "source": "posix/manifest.toml",
+      "area": "manifests",
+      "destination": "posix.toml"
+    },
+    {
+      "source": "$(RUST_TARGET_DIR)/x86_64-unknown-mochios/release/signature",
+      "area": "system",
+      "destination": "services/signature.service",
+      "mode": 493
+    },
+    {
+      "source": "signature/manifest.toml",
+      "area": "manifests",
+      "destination": "signature.toml"
+    },
+    {
+      "source": "$(RUST_TARGET_DIR)/x86_64-unknown-mochios/release/tty",
+      "area": "system",
+      "destination": "services/tty.service",
+      "mode": 493
+    },
+    {
+      "source": "tty/manifest.toml",
+      "area": "manifests",
+      "destination": "tty.toml"
+    },
+    {
+      "source": "$(RUST_TARGET_DIR)/x86_64-unknown-mochios/release/user-service",
+      "area": "system",
+      "destination": "services/user.service",
+      "mode": 493
+    },
+    {
+      "source": "user/manifest.toml",
+      "area": "manifests",
+      "destination": "user.toml"
+    },
+    {
+      "source": "$(RUST_TARGET_DIR)/x86_64-unknown-mochios/release/keychain-service",
+      "area": "system",
+      "destination": "services/keychain.service",
+      "mode": 493
+    },
+    {
+      "source": "keychain/manifest.toml",
+      "area": "manifests",
+      "destination": "keychain.toml"
+    },
+    {
+      "source": "$(RUST_TARGET_DIR)/x86_64-unknown-mochios/release/service-manager",
+      "area": "system",
+      "destination": "services/service-manager.service",
+      "mode": 493
+    },
+    {
+      "source": "service-manager/manifest.toml",
+      "area": "manifests",
+      "destination": "service-manager.toml"
+    },
+    {
+      "source": "$(RUST_TARGET_DIR)/x86_64-unknown-mochios/release/mboot-agent",
+      "area": "system",
+      "destination": "services/mboot-agent.service",
+      "mode": 493
+    },
+    {
+      "source": "mboot-agent/manifest.toml",
+      "area": "manifests",
+      "destination": "mboot-agent.toml"
+    },
+    {
+      "source": "$(RUST_TARGET_DIR)/x86_64-unknown-mochios/release/secure-ui",
+      "area": "system",
+      "destination": "services/secure-ui.service",
+      "mode": 493
+    },
+    {
+      "source": "secure-ui/manifest.toml",
+      "area": "manifests",
+      "destination": "secure-ui.toml"
+    },
+    {
+      "source": "$(RUST_TARGET_DIR)/x86_64-unknown-mochios/release/update",
+      "area": "system",
+      "destination": "services/update.service",
+      "mode": 493
+    },
+    {
+      "source": "update/manifest.toml",
+      "area": "manifests",
+      "destination": "update.toml"
+    },
+    {
+      "source": "$(RUST_TARGET_DIR)/x86_64-unknown-mochios/release/workspace-service",
+      "area": "system",
+      "destination": "services/workspace.service",
+      "mode": 493
+    },
+    {
+      "source": "workspace/manifest.toml",
+      "area": "manifests",
+      "destination": "workspace.toml"
+    }
+  ],
+  "metadata": {
+    "builtins": [
+      {
+        "manifest": "capability.toml",
+        "directory": "capability"
+      },
+      {
+        "manifest": "display.toml",
+        "directory": "display"
+      },
+      {
+        "manifest": "compositor.toml",
+        "directory": "compositor"
+      },
+      {
+        "manifest": "drivers.toml",
+        "directory": "drivers"
+      },
+      {
+        "manifest": "filesystem.toml",
+        "directory": "filesystem"
+      },
+      {
+        "manifest": "logger.toml",
+        "directory": "logger"
+      },
+      {
+        "manifest": "input.toml",
+        "directory": "input"
+      },
+      {
+        "manifest": "linux.toml",
+        "directory": "linux"
+      },
+      {
+        "manifest": "network.toml",
+        "directory": "network"
+      },
+      {
+        "manifest": "package.toml",
+        "directory": "package"
+      },
+      {
+        "manifest": "posix.toml",
+        "directory": "posix"
+      },
+      {
+        "manifest": "signature.toml",
+        "directory": "signature"
+      },
+      {
+        "manifest": "tty.toml",
+        "directory": "tty"
+      },
+      {
+        "manifest": "user.toml",
+        "directory": "user"
+      },
+      {
+        "manifest": "keychain.toml",
+        "directory": "keychain"
+      },
+      {
+        "manifest": "service-manager.toml",
+        "directory": "service-manager"
+      },
+      {
+        "manifest": "mboot-agent.toml",
+        "directory": "mboot-agent"
+      },
+      {
+        "manifest": "secure-ui.toml",
+        "directory": "secure-ui"
+      },
+      {
+        "manifest": "update.toml",
+        "directory": "update"
+      },
+      {
+        "manifest": "workspace.toml",
+        "directory": "workspace"
+      }
+    ]
+  },
+  "bindings": {
+    "SOURCE_SERVICES": "$(PROJECT)"
+  }
+}
