@@ -51,16 +51,10 @@ fn production_thread_rotation_preserves_native_identity_and_slot_lifetime_but_cl
 use std::sync::Mutex;
 type ThreadId=u64;
 #[derive(PartialEq)]enum ThreadState{Ready,Terminated}
-const FAST_IPC_MAX_BYTES:usize=256;
 "#,
     );
-    program.push_str(probe::between(
-        thread,
-        "pub struct IpcFastState {",
-        "/// スレッド終了時に呼ばれるハンドラ",
-    ));
     program.push_str(r#"
-struct Thread{state:ThreadState,ipc_generation:u64,fast_ipc:IpcFastState,pending_wakeup:bool,native_object:std::sync::Arc<u64>}
+struct Thread{state:ThreadState,ipc_generation:u64,pending_wakeup:bool,native_object:std::sync::Arc<u64>}
 impl Thread{fn state(&self)->ThreadState{match self.state{ThreadState::Ready=>ThreadState::Ready,_=>ThreadState::Terminated}}}
 struct Queue{threads:[Option<Thread>;1],slot_generation:u64}
 impl Queue {
@@ -88,15 +82,15 @@ mod production {use super::*;
 }
 fn main(){
  let object=std::sync::Arc::new(37);
- let mut fast=IpcFastState::new();fast.set_waiting(true);fast.set_wait_cpu(Some(3));fast.set_awaiting_reply(true);fast.set_reply_ready(true);fast.set_reply_result_len(17);
- THREAD_QUEUE.lock().threads[0]=Some(Thread{state:ThreadState::Ready,ipc_generation:71,fast_ipc:fast,pending_wakeup:true,native_object:object.clone()});
+
+ THREAD_QUEUE.lock().threads[0]=Some(Thread{state:ThreadState::Ready,ipc_generation:71,pending_wakeup:true,native_object:object.clone()});
  assert_eq!(production::live_ipc_slot_index_and_generation_by_u64(7),Some((0,71)));
  assert_eq!(production::replace_ipc_generation(7,72),Some((0,71)));
  assert_eq!(production::live_ipc_slot_index_and_generation_by_u64(7),Some((0,72)));
  {
  let mut queue=THREAD_QUEUE.lock();assert_eq!(queue.slot_generation,19);
  let thread=queue.threads[0].as_mut().unwrap();assert!(std::sync::Arc::ptr_eq(&thread.native_object,&object));
- assert!(!thread.pending_wakeup);assert!(!thread.fast_ipc.waiting());assert!(!thread.fast_ipc.awaiting_reply());assert!(!thread.fast_ipc.reply_ready());assert_eq!(thread.fast_ipc.wait_cpu(),None);assert_eq!(thread.fast_ipc.take_reply_result_len(),0);
+ assert!(!thread.pending_wakeup);
  thread.state=ThreadState::Terminated;
  }
  assert_eq!(production::live_ipc_slot_index_and_generation_by_u64(7),None);
