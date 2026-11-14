@@ -5,10 +5,10 @@ edition="2024"
 [workspace]
 [dependencies]
 libc = "0.2"
-mochi-user-platform={path="../../../../user/crates/platform",default-features=false,features=["std"]}
-mochios-posix-client={path="../../../../user/crates/posix-client",default-features=false,features=["syscall-endpoint"]}
-mochios-posix-protocol={path="../../../../user/crates/posix-protocol"}
-appcore={package="mochios-appcore",path="../../../../tools/devkit/crates/appcore",default-features=false}
+mochi-user-platform={git = "https://github.com/mochiOS/syscalls",default-features=false,features=["std"]}
+mochios-posix-client={git = "https://github.com/mochiOS/syscalls",default-features=false,features=["syscall-endpoint"]}
+mochios-posix-protocol={git = "https://github.com/mochiOS/syscalls"}
+appcore={package="mochios-appcore",git = "https://github.com/mochiOS/devkit",default-features=false}
 
 [[bin]]
 name="executable-reference-probe"

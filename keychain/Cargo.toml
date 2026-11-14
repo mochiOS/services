@@ -3,15 +3,15 @@ name = "keychain-service"
 version = "0.1.0"
 edition = "2024"
 [dependencies]
-mochios-keychain-protocol = { path = "../../user/crates/keychain-protocol" }
+mochios-keychain-protocol = { git = "https://github.com/mochiOS/syscalls" }
 argon2 = { version = "0.5.3", default-features = false, features = ["alloc", "zeroize"] }
 chacha20poly1305 = { version = "0.10.1", default-features = false, features = ["alloc"] }
 zeroize = { version = "1.8", features = ["alloc"] }
 sha2 = { version = "0.10", default-features = false }
 libc = "0.2"
 [target.'cfg(target_os = "mochios")'.dependencies]
-mochi-user-platform = { path = "../../user/crates/platform", default-features = false, features = ["std"] }
-mochios-posix-client = { path = "../../user/crates/posix-client", default-features = false, features = ["syscall-endpoint"] }
+mochi-user-platform = { git = "https://github.com/mochiOS/syscalls", default-features = false, features = ["std"] }
+mochios-posix-client = { git = "https://github.com/mochiOS/syscalls", default-features = false, features = ["syscall-endpoint"] }
 [target.'cfg(target_os = "linux")'.dependencies]
 getrandom = "0.2"
 [lib]
@@ -23,6 +23,6 @@ path = "src/main.rs"
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_os, values("mochios"))'] }
 
 [dev-dependencies]
-appcore = { package = "mochios-appcore", path = "../../tools/devkit/crates/appcore", default-features = false }
-mochi-user-platform = { path = "../../user/crates/platform", default-features = false, features = ["std"] }
-mochios-posix-client = { path = "../../user/crates/posix-client", default-features = false, features = ["syscall-endpoint"] }
+appcore = { package = "mochios-appcore", git = "https://github.com/mochiOS/devkit", default-features = false }
+mochi-user-platform = { git = "https://github.com/mochiOS/syscalls", default-features = false, features = ["std"] }
+mochios-posix-client = { git = "https://github.com/mochiOS/syscalls", default-features = false, features = ["syscall-endpoint"] }

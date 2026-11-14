@@ -12,7 +12,7 @@ development-system-key = []
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_os, values("mochios"))'] }
 
 [dependencies]
-mochios-device-consent = { path = "../../tools/devkit/crates/device-consent" }
+mochios-device-consent = { git = "https://github.com/mochiOS/devkit" }
 mochios-certificate-database = { git = "https://github.com/mochiOS/syscalls", package = "mochios-certificate-database", features = ["std"] }
 mochios-developer-ca-trust = { git = "https://github.com/mochiOS/DeveloperCA", rev = "71f9487a3abe29046e827784502516c9a296c509", package = "mochios-developer-ca-trust" }
 mochios-http-client = { git = "https://github.com/mochiOS/syscalls", package = "mochios-http-client" }
@@ -22,8 +22,8 @@ serde_json = "1"
 base64 = "0.22"
 ed25519-dalek = "2"
 sha2 = "0.10"
-mochios-boot-selection = { path = "../../boot/crates/boot-selection" }
-mochios-system-image = { path = "../../boot/crates/system-image" }
+mochios-boot-selection = { git = "https://github.com/mochiOS/boot" }
+mochios-system-image = { git = "https://github.com/mochiOS/boot" }
 
 [target.'cfg(target_os = "mochios")'.dependencies]
 mochi-user-platform = { git = "https://github.com/mochiOS/syscalls", package = "mochi-user-platform", default-features = false, features = ["std"] }

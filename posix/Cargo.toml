@@ -13,7 +13,7 @@ mnu-abi = { git = "https://github.com/mochiOS/mnu", package = "mnu-abi" }
 mochi-user-platform = { git = "https://github.com/mochiOS/syscalls", package = "mochi-user-platform", default-features = false, features = ["std"] }
 mochios-filesystem-protocol = { git = "https://github.com/mochiOS/syscalls", package = "mochios-filesystem-protocol" }
 mochios-posix-protocol = { git = "https://github.com/mochiOS/syscalls", package = "mochios-posix-protocol" }
-mochios-user-protocol = { path = "../../user/crates/user-protocol" }
+mochios-user-protocol = { git = "https://github.com/mochiOS/syscalls" }
 
 
 [target.'cfg(target_os = "mochios")'.dependencies]
@@ -24,27 +24,27 @@ zeroize = { version = "1.8", features = ["alloc"] }
 vt100 = "=0.18.1"
 serde = { version = "1", features = ["derive"] }
 toml = "1"
-mochios-package-manifest = { path = "../../user/crates/package-manifest" }
-mochios-elf-signature = { path = "../../user/crates/elf-signature" }
+mochios-package-manifest = { git = "https://github.com/mochiOS/syscalls" }
+mochios-elf-signature = { git = "https://github.com/mochiOS/syscalls" }
 anyhow = { version = "1", default-features = false }
 ed25519-dalek = { version = "2", default-features = false, features = ["alloc"] }
-mochios-file-publication = { path = "../../tools/devkit/crates/file-publication" }
-mochios-linker-driver = { path = "../../tools/devkit/crates/linker-driver" }
-mochios-user-database = { path = "../../user/crates/user-database" }
-mochi-user-syscall = { path = "../../user/crates/syscall" }
-mochios-network-stack = { path = "../../user/crates/network-stack" }
-mochios-linux-gui-protocol = { path = "../../user/crates/linux-gui-protocol" }
+mochios-file-publication = { git = "https://github.com/mochiOS/devkit" }
+mochios-linker-driver = { git = "https://github.com/mochiOS/devkit" }
+mochios-user-database = { git = "https://github.com/mochiOS/syscalls" }
+mochi-user-syscall = { git = "https://github.com/mochiOS/syscalls" }
+mochios-network-stack = { git = "https://github.com/mochiOS/syscalls" }
+mochios-linux-gui-protocol = { git = "https://github.com/mochiOS/syscalls" }
 tiny-skia = "0.12.0"
 libc = { git = "https://github.com/mochiOS/libc", rev = "a3c482e222b53700a09d21377633836e2fee07be" }
 async-trait = "0.1"
-mochios-capability-protocol = { path = "../../user/crates/capability-protocol" }
-mochios-viewkit-gpu-protocol = { path = "../../user/crates/viewkit-gpu-protocol" }
-mochios-workspace-protocol = { path = "../../user/crates/workspace-protocol" }
+mochios-capability-protocol = { git = "https://github.com/mochiOS/syscalls" }
+mochios-viewkit-gpu-protocol = { git = "https://github.com/mochiOS/syscalls" }
+mochios-workspace-protocol = { git = "https://github.com/mochiOS/syscalls" }
 mboot-protocol = { path = "../mboot-protocol" }
 sha2 = { version = "0.10", default-features = false }
 mochios-signature-protocol = { git = "https://github.com/mochiOS/syscalls", package = "mochios-signature-protocol" }
 mochios-posix-client = { git = "https://github.com/mochiOS/syscalls", package = "mochios-posix-client", default-features = false, features = ["fd-table", "endpoint", "launch-arguments", "syscall-endpoint", "getrandom02"] }
-mochios-certificate-database = { path = "../../user/crates/certificate-database", features = ["std"] }
+mochios-certificate-database = { git = "https://github.com/mochiOS/syscalls", features = ["std"] }
 filesystem-service = { path = "../filesystem" }
 ext4plus = { git = "https://github.com/arihant2math/ext4plus", rev = "382b9e0a65a4b5155015992aee74ff2a798764f8", default-features = false, features = [
     "multi-threaded",

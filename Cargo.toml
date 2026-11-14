@@ -27,25 +27,10 @@ members = [
 ]
 
 [patch.crates-io]
-mochios-mdriver-protocol = { path = "../boot/crates/mdriver-protocol" }
+mochios-mdriver-protocol = { git = "https://github.com/mochiOS/boot" }
 
 [patch."https://github.com/mochiOS/mBoot"]
 mboot-protocol = { path = "mboot-protocol" }
-
-[patch."https://github.com/mochiOS/mnu"]
-mnu-abi = { path = "../core/crates/abi" }
-plugkit = { path = "../core/crates/PlugKit/plugkit" }
-
-[patch."https://github.com/mochiOS/syscalls"]
-mochi-user-platform = { path = "../user/crates/platform" }
-mochi-user-syscall = { path = "../user/crates/syscall" }
-mochios-capability-protocol = { path = "../user/crates/capability-protocol" }
-mochios-filesystem-protocol = { path = "../user/crates/filesystem-protocol" }
-mochios-workspace-protocol = { path = "../user/crates/workspace-protocol" }
-mochios-posix-protocol = { path = "../user/crates/posix-protocol" }
-mochios-posix-client = { path = "../user/crates/posix-client" }
-mochios-network-stack = { path = "../user/crates/network-stack" }
-mochios-net-device-protocol = { path = "../user/crates/net-device-protocol" }
 
 [patch."https://github.com/arihant2math/ext4plus"]
 ext4plus = { path = "third_party/ext4plus" }
