@@ -40,14 +40,19 @@ fn try_stream_operations_are_native_resource_options_not_posix_flags() {
 #[test]
 fn legacy_blocking_streams_release_their_waiter_before_upcall_delivery() {
     let fs = include_str!("../../../core/src/syscall/fs.rs");
+    let waiter = fs.split("fn wait_for_stream(").nth(1).unwrap();
+    let check = waiter
+        .find("upcall::current_has_deliverable_upcall()")
+        .unwrap();
+    assert!(
+        waiter[check..]
+            .find("remove_stream_waiter(stream, current)")
+            .unwrap()
+            < waiter[check..].find("return Err(Error::NotReady)").unwrap()
+    );
     for name in ["fn read_pipe(", "fn write_pipe("] {
         let function = fs.split(name).nth(1).unwrap().split("\n}").next().unwrap();
-        let check = function.find("upcall::current_has_deliverable_upcall()").unwrap();
-        assert!(function[..check].contains("drop(table);"));
-        let release = function[check..]
-            .find("remove_stream_waiter(pipe_id, current)")
-            .unwrap();
-        assert!(release < function[check..].find("return Error::NotReady.into_raw()").unwrap());
+        assert!(function.contains("wait_for_stream(pipe_id, current)"));
     }
 }
 

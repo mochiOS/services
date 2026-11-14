@@ -2,7 +2,7 @@ use std::process::Command;
 
 #[test]
 fn production_stream_readiness_waits_for_the_requested_capacity() {
-    let source = include_str!("../../../core/src/syscall/fs.rs");
+    let source = include_str!("../../../core/src/task/stream.rs");
     let state = source
         .split("struct PipeState {")
         .nth(1)
@@ -65,7 +65,7 @@ fn capacity_conditions_keep_wait_rights_and_reject_wrong_resource_kinds() {
         std::mem::offset_of!(mnu_abi::HandleWaitItem, minimum_write_bytes),
         4
     );
-    let source = include_str!("../../../core/src/syscall/handle.rs");
+    let source = include_str!("../../../core/src/syscall/handle/wait.rs");
     let wait = source
         .split("fn wait_item_signal(")
         .nth(1)

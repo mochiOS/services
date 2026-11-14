@@ -86,11 +86,23 @@ mod syscall{
         pub fn force_waiter(waiter:u64){MAILBOXES.lock().unwrap()[0].waiter=waiter;}
         pub fn waiter()->u64{MAILBOXES.lock().unwrap()[0].waiter}
 "#);
-    program.push_str(probe::between(
-        include_str!("../../../core/src/syscall/ipc.rs"),
-        "pub(crate) fn endpoint_wait_ready(",
-        "fn process_local_endpoint(",
-    ));
+    program.push_str(
+        &[
+            probe::definition(
+                include_str!("../../../core/src/ipc/mod.rs"),
+                "fn endpoint_wait_ready(",
+            ),
+            probe::definition(
+                include_str!("../../../core/src/ipc/mod.rs"),
+                "fn register_endpoint_waiter(",
+            ),
+            probe::definition(
+                include_str!("../../../core/src/ipc/mod.rs"),
+                "fn remove_endpoint_waiter(",
+            ),
+        ]
+        .join("\n"),
+    );
     program.push_str("}}\n");
     program.push_str(probe::between(
         include_str!("../../../core/src/task/handle_table.rs"),
@@ -98,11 +110,25 @@ mod syscall{
         "impl core::fmt::Debug for KernelObject",
     ));
     program.push_str(
-        &probe::between(
-            handle,
-            "#[derive(Clone)]\nenum WaitTarget",
-            "fn remove_endpoint_waiters(",
-        )
+        &[
+            probe::definition(
+                include_str!("../../../core/src/syscall/handle/wait.rs"),
+                "enum WaitTarget",
+            ),
+            probe::definition(
+                include_str!("../../../core/src/syscall/handle/wait.rs"),
+                "enum WaitSource",
+            ),
+            probe::definition(
+                include_str!("../../../core/src/syscall/handle/wait.rs"),
+                "impl WaitSource {",
+            ),
+            probe::definition(
+                include_str!("../../../core/src/syscall/handle/wait.rs"),
+                "fn wait_item_signal(",
+            ),
+        ]
+        .join("\n")
         .replace("fn wait_item_signal(", "fn production_wait_item_signal("),
     );
     program.push_str(r#"
@@ -234,5 +260,6 @@ fn main(){
     VALID.set(false);failure(query,None,Error::NotFound);
 }
 "#);
+    program.push_str("\nmod ipc { pub(crate) use crate::syscall::ipc::*; }\n");
     probe::run(&program);
 }

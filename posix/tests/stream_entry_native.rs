@@ -69,5 +69,6 @@ fn main(){
     }
 }
 "#);
+    program.push_str(probe::operation_scope());
     probe::run(&program);
 }

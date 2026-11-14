@@ -178,5 +178,8 @@ fn main(){
 }
 "#,
     );
+    program.push_str(
+        "\nmod stream { pub(crate) use crate::syscall::fs::close_pipe_endpoint_from_kernel; }\n",
+    );
     probe::run_with_toolchain(&program, "nightly-2026-07-16");
 }

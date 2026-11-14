@@ -181,6 +181,7 @@ pub fn operation_scope() -> &'static str {
 mod task { pub mod operation {
     pub struct Scope<T>(Vec<T>);
     impl<T> Scope<T> {
+        pub fn with<R>(value:T,body:impl FnOnce(&T)->R)->Result<R,crate::mnu_abi::status::Error>{let held=Self::new(value)?;Ok(body(&held))}
         pub fn new(value:T)->Result<Self,crate::mnu_abi::status::Error>{
             let mut values=Vec::new();
             values.try_reserve_exact(1).map_err(|_|crate::mnu_abi::status::Error::ResourceUnavailable)?;

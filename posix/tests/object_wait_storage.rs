@@ -95,7 +95,7 @@ fn object_native(raw:u64,_:HandleRights)->Result<KernelObject,Error> {
 }
 fn provider_endpoint(_: &ProviderObject)->syscall::ipc::IpcEndpoint{syscall::ipc::IpcEndpoint(4)}
 mod mem {pub mod vm_object{pub struct ProviderAdmission;}}
-mod task {
+mod task {pub(crate) use crate::modeled_task::operation;
     pub mod owned_executor {
         #[derive(Clone)]pub struct Receipt;
         pub struct Subscription(u64);
@@ -114,7 +114,7 @@ mod task {
     pub fn sleep_thread_unless_woken(_:u64)->bool{crate::SLEEPS.set(crate::SLEEPS.get()+1);true}
     pub fn yield_now(){crate::READY.set(true);if crate::REUSE_MODE.get()==1{crate::REUSED.set(true);}}
 }
-mod syscall {
+mod syscall {pub(crate) use crate::{address_wait,upcall};
     pub fn copy_from_user_native(pointer:u64,bytes:&mut[u8])->Result<(),crate::Error> {
         if pointer==2 { crate::GUARD_COPIES.set(crate::GUARD_COPIES.get()+1); }
         if let Some(error)=crate::READ_ERROR.get(){return Err(error);}
@@ -169,7 +169,7 @@ mod syscall {
         }
     }
 }
-mod address_wait {
+pub(crate) mod address_wait {pub type GuardWaiter=usize;
     pub fn read_guard_value(address:u64)->Result<u64,u64>{
         assert_eq!(address,8);crate::GUARD_READS.set(crate::GUARD_READS.get()+1);
         // A user may edit its descriptor after it was copied. Later predicate
@@ -178,7 +178,7 @@ mod address_wait {
     }
     pub fn register_guard(_:u64,_:u64,_:u64)->Result<usize,u64>{Ok(0)}
 }
-mod upcall{pub fn current_has_deliverable_upcall()->bool{crate::UPCALL.get()}}
+pub(crate) mod upcall{pub fn current_has_deliverable_upcall()->bool{crate::UPCALL.get()}}
 mod memory_update {
     pub fn admission_endpoint(_: &crate::mem::vm_object::ProviderAdmission)->crate::syscall::ipc::IpcEndpoint{crate::syscall::ipc::IpcEndpoint(5)}
     pub struct AdmissionWaiter(u64);
@@ -194,11 +194,23 @@ use crate::*;
 trait ThreadNumber{fn as_u64(self)->u64;}
 impl ThreadNumber for u64{fn as_u64(self)->u64{self}}
 "#);
-    program.push_str(probe::between(
-        handle,
-        "#[derive(Clone)]\nenum WaitTarget",
-        "fn wait_item_signal(",
-    ));
+    program.push_str(
+        &[
+            probe::definition(
+                include_str!("../../../core/src/syscall/handle/wait.rs"),
+                "enum WaitTarget",
+            ),
+            probe::definition(
+                include_str!("../../../core/src/syscall/handle/wait.rs"),
+                "enum WaitSource",
+            ),
+            probe::definition(
+                include_str!("../../../core/src/syscall/handle/wait.rs"),
+                "impl WaitSource {",
+            ),
+        ]
+        .join("\n"),
+    );
     program.push_str(r#"
 fn wait_item_signal(item:&mut HandleWaitItem,source:&WaitSource)->Result<(WaitTarget,bool),u64>{
     if !source.matches(&object_native(u64::from(item.handle),HandleRights::WAIT).map_err(Error::into_raw)?){return Err(Error::InvalidArgument.into_raw());}
@@ -213,11 +225,43 @@ fn wait_item_signal(item:&mut HandleWaitItem,source:&WaitSource)->Result<(WaitTa
     item.observed=u64::from(READY.get());Ok((target,READY.get()))
 }
 "#);
-    program.push_str(probe::between(
-        handle,
-        "fn remove_endpoint_waiters(",
-        "pub fn process_resume(",
-    ));
+    program.push_str(
+        &[
+            probe::definition(
+                include_str!("../../../core/src/syscall/handle/wait.rs"),
+                "fn remove_endpoint_waiters(",
+            ),
+            probe::definition(
+                include_str!("../../../core/src/syscall/handle/wait.rs"),
+                "fn remove_stream_waiters(",
+            ),
+            probe::definition(
+                include_str!("../../../core/src/syscall/handle/wait.rs"),
+                "fn remove_provider_waiters(",
+            ),
+            probe::definition(
+                include_str!("../../../core/src/syscall/handle/wait.rs"),
+                "struct ObjectWaitState",
+            ),
+            probe::definition(
+                include_str!("../../../core/src/syscall/handle/wait.rs"),
+                "struct ObjectWaitRegistrations",
+            ),
+            probe::definition(
+                include_str!("../../../core/src/syscall/handle/wait.rs"),
+                "impl Drop for ObjectWaitRegistrations {",
+            ),
+            probe::definition(
+                include_str!("../../../core/src/syscall/handle/wait.rs"),
+                "fn copy_wait_items_to_user(",
+            ),
+            probe::definition(
+                include_str!("../../../core/src/syscall/handle/wait.rs"),
+                "fn wait_many(",
+            ),
+        ]
+        .join("\n"),
+    );
     program.push_str(r#"
 }
 fn clean(){
@@ -237,8 +281,8 @@ fn reset(){
 fn main(){
     ADMISSION.set(Arc::new(mem::vm_object::ProviderAdmission)).ok().unwrap();
     FILE.set(Arc::new(task::FileHandle)).ok().unwrap();PROVIDER.set(Arc::new(ProviderObject)).ok().unwrap();
-    // Nine allocation sites, including nonzero-sized completion guards.
-    for index in 0..9 {
+    // Ten allocation sites, including nonzero-sized completion guards.
+    for index in 0..10 {
         reset();FAIL.store(index,Ordering::Relaxed);
         let result=handle::wait_many(1,5,100,0);
         FAIL.store(-1,Ordering::Relaxed);
@@ -255,7 +299,7 @@ fn main(){
     reset();FAIL_SCAN.set(6);assert_eq!(handle::wait_many(1,5,100,0),EINVAL);clean();
     reset();let before=ALLOCS.load(Ordering::Relaxed);
     assert_eq!(handle::wait_many(1,5,100,0),0);
-    assert_eq!(ALLOCS.load(Ordering::Relaxed)-before,9,"retry must reuse reserved storage");
+    assert_eq!(ALLOCS.load(Ordering::Relaxed)-before,10,"retry must reuse reserved storage");
     assert_eq!(SLEEPS.get(),1);clean();
     reset();COPY_FAILURE.set(true);assert_eq!(handle::wait_many(1,5,100,0),Error::InvalidAddress.into_raw());clean();
     reset();UPCALL.set(true);assert_eq!(handle::wait_many(1,5,100,0),Error::NotReady.into_raw());clean();
@@ -310,5 +354,7 @@ fn main(){
     assert_eq!(handle::wait_many(3,1,100,0),Error::InvalidAddress.into_raw());clean();
 }
 "#);
+    program.push_str("\nmod ipc { pub(crate) use crate::syscall::ipc::*; }\n");
+    program.push_str(&probe::operation_scope().replace("mod task {", "mod modeled_task {"));
     probe::run(&program);
 }

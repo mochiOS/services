@@ -145,7 +145,7 @@ mod implementation {
     use super::*;
 "#,
     );
-    let start = thread.find("pub fn remove_thread(").unwrap();
+    let start = thread.find("pub(super) unsafe fn remove_thread(").unwrap();
     let end = thread.find("/// 次に実行すべきスレッドIDを取得").unwrap();
     program.push_str(&thread[start..end].replace("id.as_u64()", "id"));
     let start = thread
@@ -166,7 +166,7 @@ fn main() {
     for id in 100..164 { assert!(arm_thread_deadline(id,u64::MAX-1)); }
     assert!(!arm_thread_deadline(164,u64::MAX-1));
     add(120,ThreadState::Terminated);
-    assert!(implementation::remove_thread(120).is_some());
+    assert!(unsafe { implementation::remove_thread(120) }.is_some());
     assert!(arm_thread_deadline(164,u64::MAX-1));
     assert!(!arm_thread_deadline(165,u64::MAX-1));
     for id in 100..165 { disarm_thread_deadline(id); }
@@ -179,9 +179,9 @@ fn main() {
         add(id,ThreadState::Terminated);
         assert!(arm_thread_deadline(id,u64::MAX-1));
         process::register(id);
-        if id%2==0 { assert!(implementation::remove_thread(id).is_some()); }
+        if id%2==0 { assert!(unsafe { implementation::remove_thread(id) }.is_some()); }
         else { assert!(implementation::remove_quiescent_terminated_thread(id).is_some()); }
-        assert!(implementation::remove_thread(id).is_none());
+        assert!(unsafe { implementation::remove_thread(id) }.is_none());
     }
     assert_eq!(process::released(),400);
     // A live thread's registrations survive an unsuccessful reap.
@@ -202,6 +202,7 @@ fn main() {
     ));
     std::fs::create_dir(&directory).unwrap();
     let binary = directory.join("probe");
+    program.push_str("\nmod ipc { pub(crate) use crate::syscall::ipc::*; }\n");
     let mut compiler = Command::new("rustc")
         .args(["--edition=2021", "-Awarnings", "-"])
         .arg("-o")

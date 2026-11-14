@@ -14,7 +14,7 @@ fn wait_guard_layout_and_native_entry_are_explicit() {
 
 #[test]
 fn kernel_checks_only_readable_aligned_values_after_waiter_cleanup() {
-    let source = include_str!("../../../core/src/syscall/handle.rs");
+    let source = include_str!("../../../core/src/syscall/handle/wait.rs");
     let wait = source
         .split("pub fn wait_many(")
         .nth(1)

@@ -70,7 +70,7 @@ impl ProviderObject {
         "    pub(crate) fn io_options(",
         "    pub(crate) fn memory_identity(",
     ));
-    program.push_str("}\nmod task {\n");
+    program.push_str("}\nmod task { pub mod stream {pub use crate::syscall::fs::close_pipe_endpoint_from_kernel;}\n");
     program.push_str(&format!(
         "#[path={:?}]pub mod fd_table;\n",
         root.join("core/src/task/fd_table.rs")
@@ -132,11 +132,19 @@ mod syscall {
         "pub(crate) fn object_native(",
         "pub fn read(",
     ));
-    program.push_str(probe::between(
-        syscall,
-        "pub fn options_get(",
-        "fn provider_endpoint(",
-    ));
+    program.push_str(
+        &[
+            probe::definition(
+                include_str!("../../../core/src/syscall/handle.rs"),
+                "fn options_get(",
+            ),
+            probe::definition(
+                include_str!("../../../core/src/syscall/handle.rs"),
+                "fn options_set(",
+            ),
+        ]
+        .join("\n"),
+    );
     program.push_str(r#"
 fn get(raw:u64)->u64 {
     DENY.store(true,Ordering::Relaxed);let result=options_get(raw);DENY.store(false,Ordering::Relaxed);
@@ -203,5 +211,8 @@ fn main(){
     assert_eq!(get(1),Error::InvalidArgument.into_raw());assert_eq!(get(3),1);
 }
 "#);
+    program.push_str(
+        "\nmod stream { pub(crate) use crate::syscall::fs::close_pipe_endpoint_from_kernel; }\n",
+    );
     probe::run_with_toolchain(&program, "nightly-2026-07-16");
 }

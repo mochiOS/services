@@ -22,14 +22,16 @@ fn actual_stream_writer_handles_peer_closure_and_allocation_failure_without_muta
         "#[derive(Clone, Copy, Debug",
     ));
     program.push_str("use alloc::vec::Vec;\n");
-    program.push_str(probe::between(
-        source,
-        "struct PipeState {",
-        "impl PipeState {",
+    program.push_str(&probe::definition(
+        include_str!("../../../core/src/task/stream.rs"),
+        "struct PipeState",
     ));
     program.push_str(
-        &probe::between(source, "impl PipeState {", "static PIPE_TABLE:")
-            .replace("mnu_abi::HANDLE_", "HANDLE_"),
+        &&probe::definition(
+            include_str!("../../../core/src/task/stream.rs"),
+            "impl PipeState {",
+        )
+        .replace("mnu_abi::HANDLE_", "HANDLE_"),
     );
     program.push_str(
         r#"
@@ -68,7 +70,7 @@ mod interrupt {pub mod spinlock {
         pub fn lock(&self)->std::sync::MutexGuard<'_,T>{self.0.lock().unwrap()}
     }
 }}
-mod task {
+mod task {pub(crate) use crate::modeled_task::operation;pub(crate) mod stream {pub(crate) use crate::{read_ready,consume,write_ready};}
     pub type ThreadId=u64;
     pub fn current_thread_id()->Option<u64>{crate::CURRENT.get()}
     pub fn wake_registered_waiter(tid:u64){crate::WOKEN.lock().unwrap().push(tid);}
@@ -104,30 +106,58 @@ mod upcall {pub fn current_has_deliverable_upcall()->bool{crate::UPCALL.get()}}
 "#,
     );
     program.push_str(probe::between(
-        source,
+        include_str!("../../../core/src/task/stream.rs"),
         "static PIPE_TABLE:",
         "pub(crate) fn alloc_stream_state(",
     ));
-    program.push_str(probe::between(
-        source,
-        "pub fn close_pipe_endpoint_from_kernel(",
-        "pub(crate) fn stream_signals(",
+    program.push_str(
+        &[
+            probe::definition(
+                include_str!("../../../core/src/task/stream.rs"),
+                "fn close_pipe_endpoint_from_kernel(",
+            ),
+            probe::definition(
+                include_str!("../../../core/src/task/stream.rs"),
+                "fn wake_stream_waiters(",
+            ),
+        ]
+        .join("\n"),
+    );
+    program.push_str(
+        &[
+            probe::definition(
+                include_str!("../../../core/src/task/stream.rs"),
+                "fn stream_signals(",
+            ),
+            probe::definition(
+                include_str!("../../../core/src/task/stream.rs"),
+                "fn stream_signals_for_capacity(",
+            ),
+        ]
+        .join("\n"),
+    );
+    program.push_str(&probe::definition(
+        include_str!("../../../core/src/task/stream.rs"),
+        "fn register_stream_waiter(",
     ));
-    program.push_str(probe::between(
-        source,
-        "pub(crate) fn stream_signals(",
-        "pub(crate) fn register_stream_waiter(",
+    program.push_str(&probe::definition(
+        include_str!("../../../core/src/task/stream.rs"),
+        "fn remove_stream_waiter(",
     ));
-    program.push_str(probe::between(
-        source,
-        "pub(crate) fn register_stream_waiter(",
-        "pub(crate) fn remove_stream_waiter(",
-    ));
-    program.push_str(probe::between(
-        source,
-        "pub(crate) fn remove_stream_waiter(",
-        "pub(crate) fn file_handle_options(",
-    ));
+    program.push_str("use crate::task::ThreadId;\n");
+    for declaration in [
+        "struct Completed",
+        "impl Completed {",
+        "fn read_ready(",
+        "fn consume(",
+        "fn write_ready(",
+        "fn register(",
+    ] {
+        program.push_str(&probe::definition(
+            include_str!("../../../core/src/task/stream.rs"),
+            declaration,
+        ));
+    }
     program.push_str("mod io {use crate::*;\n");
     program.push_str(
         &probe::between(source, "fn read_pipe(", "pub(crate) fn write_file_handle(")
@@ -137,13 +167,20 @@ mod upcall {pub fn current_has_deliverable_upcall()->bool{crate::UPCALL.get()}}
                 "HANDLE_OPTION_NONBLOCKING",
             ),
     );
+    program.push_str(&probe::definition(
+        include_str!("../../../core/src/syscall/fs.rs"),
+        "fn wait_for_stream(",
+    ));
     program.push_str(
-        &probe::between(source, "fn write_pipe(", "#[cfg(test)]")
-            .replace("fn write_pipe(", "pub fn write_pipe(")
-            .replace(
-                "mnu_abi::HANDLE_OPTION_NONBLOCKING",
-                "HANDLE_OPTION_NONBLOCKING",
-            ),
+        &probe::definition(
+            include_str!("../../../core/src/syscall/fs.rs"),
+            "fn write_pipe(",
+        )
+        .replace("fn write_pipe(", "pub fn write_pipe(")
+        .replace(
+            "mnu_abi::HANDLE_OPTION_NONBLOCKING",
+            "HANDLE_OPTION_NONBLOCKING",
+        ),
     );
     program.push_str(
         r#"
@@ -170,7 +207,7 @@ fn main(){
     assert_eq!(PIPE_TABLE.lock()[1].as_ref().unwrap().data,b"new");
     assert_eq!(*WOKEN.lock().unwrap(),vec![9,8]);
     // Fail the temporary buffer and then backing growth independently.
-    for allocation in [0,1] {
+    for allocation in 0..3 {
         PIPE_TABLE.lock()[2]=Some(PipeState{data:Vec::new(),readers:1,writers:1,waiters:vec![9]});
         FAIL_AFTER.set(Some(allocation));
         let result=io::write_pipe(2,0,input.as_ptr() as u64,3,true);
@@ -248,6 +285,12 @@ fn main(){
 }
 "#,
     );
+    probe::constants(
+        &mut program,
+        include_str!("../../../core/src/task/stream.rs"),
+        &["MAX_PIPES", "PIPE_BUFFER_CAP"],
+    );
+    program.push_str(&probe::operation_scope().replace("mod task {", "mod modeled_task {"));
     probe::run(&program);
 }
 

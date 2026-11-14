@@ -126,8 +126,18 @@ fn main() {
     ));
     std::fs::create_dir(&directory).unwrap();
     let executable = directory.join("probe");
+    program.push_str(
+        "\nmod stream { pub(crate) use crate::syscall::fs::close_pipe_endpoint_from_kernel; }\n",
+    );
     let mut compiler = Command::new("rustup")
-        .args(["run", "nightly-2026-07-16", "rustc", "--edition=2024", "-Awarnings", "-"])
+        .args([
+            "run",
+            "nightly-2026-07-16",
+            "rustc",
+            "--edition=2024",
+            "-Awarnings",
+            "-",
+        ])
         .arg("-o")
         .arg(&executable)
         .stdin(Stdio::piped())

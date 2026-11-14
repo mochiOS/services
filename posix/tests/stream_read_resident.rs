@@ -28,7 +28,7 @@ thread_local!{{
     static OUTPUT:RefCell<Vec<u8>>=const{{RefCell::new(Vec::new())}};
 }}
 fn unlocked(){{assert!(!PROC.get());assert!(!PIPE.get());}}
-mod task{{
+mod task{{ pub mod stream{{pub(crate) use crate::syscall::fs::{{read_ready,consume}};}}
     pub type ThreadId=u64;
     pub fn current_thread_id()->Option<u64>{{Some(7)}}
     pub struct Process;
@@ -99,6 +99,23 @@ mod syscall{{
         status = root.join("core/crates/abi/src/status.rs"),
         output = root.join("core/src/syscall/user_output.rs")
     );
+    for declaration in [
+        "struct Completed",
+        "impl Completed {",
+        "fn read_ready(",
+        "fn consume(",
+        "fn register(",
+    ] {
+        program.push_str(&probe::definition(
+            include_str!("../../../core/src/task/stream.rs"),
+            declaration,
+        ));
+    }
+    program.push_str("use crate::task::ThreadId;\n");
+    program.push_str(&probe::definition(
+        include_str!("../../../core/src/syscall/fs.rs"),
+        "fn wait_for_stream(",
+    ));
     program.push_str(probe::between(
         include_str!("../../../core/src/syscall/fs.rs"),
         "fn read_pipe(",
