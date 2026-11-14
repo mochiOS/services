@@ -8,17 +8,33 @@ mod probe;
 fn endpoint_identity_requires_inspection_and_a_live_matching_generation() {
     let source = include_str!("../../../core/src/syscall/ipc.rs");
     let mut program = probe::program();
+    program.push_str(&probe::definition(
+        include_str!("../../../core/src/ipc/mod.rs"),
+        "struct EndpointRights",
+    ));
     program.push_str("#[repr(C)]\n#[derive(Debug,Clone,Copy,PartialEq,Eq)]\n");
     program.push_str(probe::between(
         include_str!("../../../core/crates/abi/src/lib.rs"),
         "pub struct ExecutionIdentity {",
         "/// Native execution domains",
     ));
-    program.push_str(probe::between(
-        source,
-        "#[derive(Debug, Clone, Copy, PartialEq, Eq)]\npub struct IpcEndpoint",
-        "// Endpoint handles and legacy",
-    ));
+    program.push_str(
+        &[
+            probe::definition(
+                include_str!("../../../core/src/ipc/mod.rs"),
+                "struct IpcEndpoint",
+            ),
+            probe::definition(
+                include_str!("../../../core/src/ipc/mod.rs"),
+                "impl EndpointRights {",
+            ),
+            probe::definition(
+                include_str!("../../../core/src/ipc/mod.rs"),
+                "struct EndpointRecord",
+            ),
+        ]
+        .join("\n"),
+    );
     program.push_str(
         r#"
 use std::collections::BTreeMap;
@@ -64,16 +80,23 @@ fn with_endpoints_mut<T>(operation:impl FnOnce(&mut BTreeMap<u64,EndpointRecord>
 }
 "#,
     );
-    program.push_str(probe::between(
-        source,
-        "pub fn endpoint_is_valid(",
-        "pub fn endpoint_rights_for_process(",
+    program.push_str(&probe::definition(
+        include_str!("../../../core/src/ipc/mod.rs"),
+        "fn endpoint_is_valid(",
     ));
-    program.push_str(probe::between(
-        source,
-        "fn endpoint_record_is_valid(",
-        "pub fn endpoint_alive(",
-    ));
+    program.push_str(
+        &[
+            probe::definition(
+                include_str!("../../../core/src/ipc/mod.rs"),
+                "fn endpoint_record_is_valid(",
+            ),
+            probe::definition(
+                include_str!("../../../core/src/ipc/mod.rs"),
+                "fn endpoint_record_from_handle(",
+            ),
+        ]
+        .join("\n"),
+    );
     program.push_str(
         &probe::between(
             source,

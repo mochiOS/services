@@ -6,6 +6,10 @@ mod probe;
 fn receive_admission_is_native_and_missing_endpoint_authority_fails_closed() {
     let source = include_str!("../../../core/src/syscall/ipc.rs");
     let mut program = probe::program();
+    program.push_str(&probe::definition(
+        include_str!("../../../core/src/ipc/mod.rs"),
+        "struct EndpointRights",
+    ));
     program.push_str(r#"
 use std::cell::Cell;
 use mnu_abi::status::Error;
@@ -32,10 +36,9 @@ mod task{
 }
 fn ensure_endpoint_for_thread(id:u64)->Option<u64>{assert_eq!(id,7);REGISTRATIONS.set(REGISTRATIONS.get()+1);REGISTER.get().then_some(5001)}
 "#);
-    program.push_str(probe::between(
-        source,
-        "#[derive(Debug, Clone, Copy, PartialEq, Eq)]\npub struct EndpointRights",
-        "#[derive(Clone, Copy, Debug)]\nstruct EndpointRecord",
+    program.push_str(&probe::definition(
+        include_str!("../../../core/src/ipc/mod.rs"),
+        "impl EndpointRights {",
     ));
     program.push_str(r#"
 struct EndpointRecord{rights:EndpointRights}
@@ -65,11 +68,16 @@ fn finish_user_receive(receiver:u64,message:UserReceive,handles:Option<u64>)->Re
     let error=FINISH_ERROR.get();if error!=0{return Err(error);}Ok((message.from,message.copy_len,false))
 }
 "#);
-    program.push_str(probe::between(
-        source,
-        "fn current_receiver(",
-        "#[inline]\nfn ipc_mailbox_cap(",
-    ));
+    program.push_str(
+        &[
+            probe::definition(
+                include_str!("../../../core/src/syscall/ipc.rs"),
+                "fn current_receiver(",
+            ),
+            probe::definition(include_str!("../../../core/src/syscall/ipc.rs"), "fn wait("),
+        ]
+        .join("\n"),
+    );
     program.push_str(&source[source.find("fn recv_from_thread_nonblocking(").unwrap()..]);
     program.push_str(r#"
 fn reset(mode:u8){

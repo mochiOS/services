@@ -49,7 +49,7 @@ unsafe impl std::alloc::GlobalAlloc for TestAllocator{{
     unsafe fn dealloc(&self,pointer:*mut u8,layout:std::alloc::Layout){{unsafe{{std::alloc::System.dealloc(pointer,layout)}}}}
 }}
 #[global_allocator]static TEST_ALLOCATOR:TestAllocator=TestAllocator;
-mod task{{
+mod task{{ pub use crate::syscall::security::current_process_id;
     pub mod handle_table{{
         use alloc::{{boxed::Box,vec::Vec,sync::Arc}};
         pub const PROCESS_MAX_OBJECT_HANDLES:usize=4096;
@@ -179,30 +179,25 @@ fn call_endpoint_with_attachments_from_kernel(
 }}
 "#, snapshot=root.join("core/src/task/handle_snapshot.rs")));
     let ipc = include_str!("../../../core/src/syscall/ipc.rs");
-    program.push_str(probe::between(
-        ipc,
+    program.push_str(&probe::definition(
+        include_str!("../../../core/src/syscall/ipc.rs"),
         "fn decode_outgoing_object_handles(",
+    ));
+    program.push_str(&probe::definition(
+        include_str!("../../../core/src/ipc/mod.rs"),
         "fn export_object_handle(",
     ));
-    program.push_str(probe::between(
-        ipc,
-        "fn export_object_handle(",
+    program.push_str(&probe::definition(
+        include_str!("../../../core/src/syscall/ipc.rs"),
         "fn install_received_object_handles(",
     ));
-    program.push_str(probe::between(
-        ipc,
-        "fn install_received_object_handles(",
-        "#[derive(Debug)]\nstruct ObjectHandleAttachments",
+    program.push_str(&probe::definition(
+        include_str!("../../../core/src/ipc/mod.rs"),
+        "fn call_provider_from_kernel(",
     ));
-    program.push_str(probe::between(
-        ipc,
-        "pub(crate) fn call_provider_from_kernel(",
-        "/// Attach only handles from the authenticated caller's own table, through the",
-    ));
-    program.push_str(probe::between(
-        ipc,
-        "pub(crate) fn call_provider_with_handle_from_kernel(",
-        "fn call_endpoint_with_attachments_from_kernel(",
+    program.push_str(&probe::definition(
+        include_str!("../../../core/src/ipc/mod.rs"),
+        "fn call_provider_with_handle_from_kernel(",
     ));
     program.push_str(r#"
 #[derive(Clone,Copy)]struct ThreadId(u64);impl ThreadId{fn as_u64(self)->u64{self.0}}
@@ -423,5 +418,10 @@ fn main(){
     }
 }
 "#);
+    program.push_str("mod ipc {pub use crate::syscall::ipc::*;}\n");
+    program.push_str(&probe::definition(
+        include_str!("../../../core/src/syscall/ipc.rs"),
+        "fn cancel_received_reservations(",
+    ));
     probe::run(&program);
 }

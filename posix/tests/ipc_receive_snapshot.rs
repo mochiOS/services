@@ -4,7 +4,7 @@ mod probe;
 
 #[test]
 fn snapshot_usercopy_runs_unlocked_and_commit_rejects_retirement_and_slot_reuse() {
-    let source = include_str!("../../../core/src/syscall/ipc.rs");
+    let source = include_str!("../../../core/src/ipc/mod.rs");
     let mut program = probe::program();
     program.push_str(r#"
 use std::{cell::{Cell,RefCell},collections::VecDeque,ops::{Deref,DerefMut},sync::{Arc,Weak,Mutex,atomic::{AtomicU64,Ordering}}};
@@ -53,8 +53,8 @@ fn record_ipc_copy(_:usize){}
 "#);
     program.push_str(probe::between(
         source,
-        "#[derive(Debug)]\nstruct ObjectHandleAttachments",
-        "    fn push_message(",
+        "#[derive(Debug)]\npub(crate) struct ObjectHandleAttachments",
+        "    pub(crate) fn push_message(",
     ));
     program.push_str(r#"
 }

@@ -3,16 +3,19 @@ use std::process::{Command, Stdio};
 
 #[test]
 fn production_message_wiping_releases_owned_attachments_before_cache_reuse() {
-    let source = include_str!("../../../core/src/syscall/ipc.rs");
+    let source = include_str!("../../../core/src/ipc/mod.rs");
     let start = source
-        .find("#[derive(Debug)]\nstruct ObjectHandleAttachments")
+        .find("#[derive(Debug)]\npub(crate) struct ObjectHandleAttachments")
         .unwrap();
     let end = source[start..]
         .find("#[derive(Clone, Copy, Debug, PartialEq, Eq)]")
         .unwrap()
         + start;
     let cache = source.find("struct MessageCache {").unwrap();
-    let cache_end = source[cache..].find("fn allocate_message(").unwrap() + cache;
+    let cache_end = source[cache..]
+        .find("pub(crate) fn allocate_message(")
+        .unwrap()
+        + cache;
     let mut program = String::from(
         r#"
 use std::sync::{Arc,Mutex,atomic::{AtomicUsize,Ordering}};

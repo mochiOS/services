@@ -75,15 +75,22 @@ mod task{{
 use task::handle_table::{{KernelObject,ObjectHandleEntry,HandleRights}};
 "#,snapshot=root.join("core/src/task/handle_snapshot.rs")));
     let ipc = include_str!("../../../core/src/syscall/ipc.rs");
-    program.push_str(probe::between(
-        ipc,
-        "#[derive(Debug, Clone, Copy, PartialEq, Eq)]\npub struct IpcEndpoint",
-        "#[derive(Clone, Copy, Debug)]\nstruct EndpointRecord",
-    ));
-    program.push_str(probe::between(
-        ipc,
-        "pub fn endpoint_rights_for_process(",
-        "fn with_endpoints_mut",
+    program.push_str(
+        &[
+            probe::definition(
+                include_str!("../../../core/src/ipc/mod.rs"),
+                "struct IpcEndpoint",
+            ),
+            probe::definition(
+                include_str!("../../../core/src/ipc/mod.rs"),
+                "impl EndpointRights {",
+            ),
+        ]
+        .join("\n"),
+    );
+    program.push_str(&probe::definition(
+        include_str!("../../../core/src/ipc/mod.rs"),
+        "fn endpoint_rights_for_process(",
     ));
     program.push_str(
         r#"
@@ -95,11 +102,19 @@ fn ensure_endpoint_for_thread(id:u64)->Option<u64>{
 }
 "#,
     );
-    program.push_str(probe::between(
-        ipc,
-        "pub fn create(",
-        "pub(crate) fn endpoint_wait_ready(",
-    ));
+    program.push_str(
+        &[
+            probe::definition(
+                include_str!("../../../core/src/syscall/ipc.rs"),
+                "fn create(",
+            ),
+            probe::definition(
+                include_str!("../../../core/src/syscall/ipc.rs"),
+                "fn create_handle(",
+            ),
+        ]
+        .join("\n"),
+    );
     program.push_str(r#"
 fn count()->usize{OWNER.with_borrow(|p|p.table.describe().len())}
 fn main(){
@@ -141,5 +156,9 @@ fn main(){
     assert!(!LOCKED.get());
 }
 "#);
+    program.push_str(&probe::definition(
+        include_str!("../../../core/src/ipc/mod.rs"),
+        "struct EndpointRights",
+    ));
     probe::run(&program);
 }

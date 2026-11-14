@@ -127,7 +127,7 @@ fn image_commit_reserves_generation_before_destructive_work_and_retires_before_u
 
 #[test]
 fn production_default_cache_serializes_creation_and_retirement_cannot_remove_a_new_image() {
-    let source = include_str!("../../../core/src/syscall/ipc.rs");
+    let source = include_str!("../../../core/src/ipc/mod.rs");
     let mut program = String::from(
         r#"
 #![allow(dead_code)]
@@ -144,19 +144,51 @@ fn endpoint_rights_for_thread(_:u64)->EndpointRights{EndpointRights}
     );
     program.push_str(probe::between(
         source,
-        "#[derive(Clone, Copy, Debug)]\nstruct EndpointRecord",
+        "#[derive(Clone, Copy, Debug)]\npub(crate) struct EndpointRecord",
         "pub fn endpoint_for_thread(",
     ));
-    program.push_str(probe::between(
-        source,
-        "fn with_endpoints_mut<R>",
-        "pub fn endpoint_alive(",
-    ));
-    program.push_str(probe::between(
-        source,
-        "fn endpoint_handle_for_thread(",
-        "pub fn resolve_endpoint_handle(",
-    ));
+    program.push_str(
+        &[
+            probe::definition(
+                include_str!("../../../core/src/ipc/mod.rs"),
+                "fn with_endpoints_mut(",
+            ),
+            probe::definition(
+                include_str!("../../../core/src/ipc/mod.rs"),
+                "fn with_default_endpoints_mut(",
+            ),
+            probe::definition(
+                include_str!("../../../core/src/ipc/mod.rs"),
+                "fn endpoint_record_is_valid(",
+            ),
+            probe::definition(
+                include_str!("../../../core/src/ipc/mod.rs"),
+                "fn endpoint_record_from_handle(",
+            ),
+        ]
+        .join("\n"),
+    );
+    program.push_str(
+        &[
+            probe::definition(
+                include_str!("../../../core/src/ipc/mod.rs"),
+                "fn endpoint_handle_for_thread(",
+            ),
+            probe::definition(
+                include_str!("../../../core/src/ipc/mod.rs"),
+                "fn ensure_endpoint_for_thread(",
+            ),
+            probe::definition(
+                include_str!("../../../core/src/ipc/mod.rs"),
+                "fn record_matches_endpoint(",
+            ),
+            probe::definition(
+                include_str!("../../../core/src/ipc/mod.rs"),
+                "fn retire_endpoint_records(",
+            ),
+        ]
+        .join("\n"),
+    );
     program.push_str(r#"
 fn main(){
  let old=endpoint_for_thread(7).unwrap();

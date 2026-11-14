@@ -6,11 +6,14 @@ mod probe;
 fn public_send_admission_fails_closed_and_preserves_native_delivery_errors() {
     let ipc = include_str!("../../../core/src/syscall/ipc.rs");
     let mut program = probe::program();
+    program.push_str(&probe::definition(
+        include_str!("../../../core/src/ipc/mod.rs"),
+        "struct EndpointRights",
+    ));
     program.push_str("\nuse std::cell::Cell;\nuse mnu_abi::status::Error;\n");
-    program.push_str(probe::between(
-        ipc,
-        "#[derive(Debug, Clone, Copy, PartialEq, Eq)]\npub struct EndpointRights",
-        "#[derive(Clone, Copy, Debug)]\nstruct EndpointRecord",
+    program.push_str(&probe::definition(
+        include_str!("../../../core/src/ipc/mod.rs"),
+        "impl EndpointRights {",
     ));
     program.push_str(r#"
 thread_local!{
@@ -52,11 +55,11 @@ mod syscall{pub mod security{
     }
 }}
 struct ObjectHandleAttachments{delivery_flags:u32}
-fn resolve_call_destination(handle:u64)->Result<(IpcEndpoint,u64,u32),u64>{
+fn resolve_call_destination(handle:u64)->Result<CallDestination,u64>{
     let error=RESOLVE_ERROR.get();if error!=0{return Err(error);}
     let dest=IpcEndpoint{thread_id:19,slot:3,generation:7};
     if handle>4096&&CAPABILITIES.get()==0{return Err(Error::AccessDenied.into_raw());}
-    match handle{7=>Ok((dest,5001,2)),5001=>Ok((dest,5001,0)),_=>Err(Error::NotFound.into_raw())}
+    match handle{7=>Ok(CallDestination{endpoint:dest,reply_sender:5001,delivery_flags:2}),5001=>Ok(CallDestination{endpoint:dest,reply_sender:5001,delivery_flags:0}),_=>Err(Error::NotFound.into_raw())}
 }
 fn decode_outgoing_object_handles(pointer:u64)->Result<ObjectHandleAttachments,u64>{
     assert_eq!(pointer,99);DECODES.set(DECODES.get()+1);
@@ -122,5 +125,9 @@ fn main(){
     assert_eq!((SENDS.get(),DECODES.get(),CAPABILITIES.get()),(1,1,0));
 }
 "#);
+    program.push_str(&probe::definition(
+        include_str!("../../../core/src/syscall/ipc.rs"),
+        "struct CallDestination",
+    ));
     probe::run(&program);
 }

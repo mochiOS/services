@@ -1,3 +1,6 @@
+#[allow(dead_code)]
+#[path = "support/native_error_probe.rs"]
+mod probe;
 use std::io::Write;
 use std::process::{Command, Stdio};
 
@@ -141,13 +144,14 @@ fn endpoint_record_from_handle(raw: u64) -> Option<Record> {
 }
 "#,
     );
+    program.push_str(&probe::definition(source, "struct CallDestination"));
     program.push_str(&source[start..end]);
     program.push_str(
         r#"
 fn main() {
-    assert_eq!(resolve_call_destination(7), Ok((IpcEndpoint {thread_id:19,slot:3,generation:7}, 5001, 2)));
+    assert_eq!(resolve_call_destination(7), Ok(CallDestination{endpoint:IpcEndpoint {thread_id:19,slot:3,generation:7},reply_sender:5001,delivery_flags:2}));
     assert_eq!(resolve_call_destination(8), Err(EACCES));
-    assert_eq!(resolve_call_destination(5001), Ok((IpcEndpoint {thread_id:19,slot:3,generation:7}, 5001, 0)));
+    assert_eq!(resolve_call_destination(5001), Ok(CallDestination{endpoint:IpcEndpoint {thread_id:19,slot:3,generation:7},reply_sender:5001,delivery_flags:0}));
     assert_eq!(resolve_call_destination(5002), Err(EACCES));
     assert_eq!(resolve_call_destination(6000), Err(NOT_FOUND));
 }
@@ -173,15 +177,19 @@ fn provider_dispatch_requires_native_origin_and_abi_layout_is_unchanged() {
         assert!(source.contains("delivery_flags != mnu_abi::IPC_DELIVERY_NATIVE_OBJECT"));
     }
     let ipc = include_str!("../../../core/src/syscall/ipc.rs");
-    let native = &ipc[ipc
+    let transport = include_str!("../../../core/src/ipc/mod.rs");
+    let native = &transport[transport
         .find("pub(crate) fn call_provider_from_kernel(")
-        .unwrap()..ipc.find("pub(crate) fn call_provider_with_handle_from_kernel(").unwrap()];
+        .unwrap()
+        ..transport
+            .find("pub(crate) fn call_provider_with_handle_from_kernel(")
+            .unwrap()];
     assert!(native.contains("attachments.delivery_flags = mnu_abi::IPC_DELIVERY_NATIVE_OBJECT"));
     assert!(
         ipc.contains("output[4..8].copy_from_slice(&attachments.delivery_flags.to_le_bytes())")
     );
-    let generic = &ipc[ipc.find("pub fn call(").unwrap()
-        ..ipc.find("pub fn call_object_handles(").unwrap()];
+    let generic =
+        &ipc[ipc.find("pub fn call(").unwrap()..ipc.find("pub fn call_object_handles(").unwrap()];
     assert!(!generic.contains("IPC_DELIVERY_NATIVE_OBJECT"));
     assert!(generic.contains("send_call_to_endpoint("));
     for retired in [

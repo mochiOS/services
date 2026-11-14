@@ -38,10 +38,9 @@ fn decode_outgoing_object_handles(pointer:u64)->Result<ObjectHandleAttachments,u
     assert_eq!(pointer,99);let error=DECODE_ERROR.get();if error!=0{return Err(error);}Ok(owned())
 }
 "#);
-    program.push_str(probe::between(
-        source,
-        "#[derive(Clone, Copy, Debug, PartialEq, Eq)]\nstruct ReplyTarget",
-        "#[derive(Debug)]\nstruct Mailbox",
+    program.push_str(&probe::definition(
+        include_str!("../../../core/src/ipc/mod.rs"),
+        "struct ReplyTarget",
     ));
     program.push_str(
         r#"

@@ -93,6 +93,7 @@ fn endpoint_record_from_handle(raw:u64)->Option<Record>{
 }
 "#);
     let ipc = include_str!("../../../core/src/syscall/ipc.rs");
+    program.push_str(&probe::definition(ipc, "struct CallDestination"));
     program.push_str(probe::between(
         ipc,
         "fn process_local_endpoint(",
@@ -124,11 +125,11 @@ fn main(){
         reset();KIND.set(false);assert_eq!(process_local_endpoint(7,required),Err(Error::InvalidArgument.into_raw()));
         reset();VALID.set(false);assert_eq!(process_local_endpoint(7,required),Err(Error::NotFound.into_raw()));
     }
-    reset();assert_eq!(resolve_call_destination(7),Ok((IpcEndpoint{thread_id:19,slot:3,generation:7},5001,2)));
+    reset();assert_eq!(resolve_call_destination(7),Ok(CallDestination{endpoint:IpcEndpoint{thread_id:19,slot:3,generation:7},reply_sender:5001,delivery_flags:2}));
     SENDER.set(false);assert_eq!(resolve_call_destination(7),Err(Error::NotReady.into_raw()));
     reset();RIGHTS.set(HandleRights::RECEIVE.bits());
     assert_eq!(resolve_call_destination(7),Err(Error::AccessDenied.into_raw()));
-    reset();assert_eq!(resolve_call_destination(5001),Ok((IpcEndpoint{thread_id:19,slot:3,generation:7},5001,0)));
+    reset();assert_eq!(resolve_call_destination(5001),Ok(CallDestination{endpoint:IpcEndpoint{thread_id:19,slot:3,generation:7},reply_sender:5001,delivery_flags:0}));
     assert_eq!(resolve_call_destination(5002),Err(Error::AccessDenied.into_raw()));
     assert_eq!(resolve_call_destination(6000),Err(Error::NotFound.into_raw()));
     assert_eq!(resolve_receive_thread(7,19),Ok(19));
@@ -140,7 +141,7 @@ fn main(){
     assert_eq!(resolve_receive_thread(5002,20),Err(Error::AccessDenied.into_raw()));
     assert_eq!(resolve_receive_thread(6000,19),Err(Error::NotFound.into_raw()));
     reset();CAPABILITIES.set(false);RIGHTS.set(HandleRights::SEND.bits());
-    assert_eq!(resolve_call_destination(7),Ok((IpcEndpoint{thread_id:19,slot:3,generation:7},5001,2)));
+    assert_eq!(resolve_call_destination(7),Ok(CallDestination{endpoint:IpcEndpoint{thread_id:19,slot:3,generation:7},reply_sender:5001,delivery_flags:2}));
     assert_eq!(GLOBAL_LOOKUPS.get(),0);
     for raw in [5001,5002,6000,u64::MAX]{
         assert_eq!(resolve_call_destination(raw),Err(Error::AccessDenied.into_raw()));

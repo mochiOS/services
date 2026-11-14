@@ -132,7 +132,7 @@ mod syscall {
     }}
     pub mod ipc {
         use crate::{mnu_abi,HandleRights,KernelObject};
-        struct IpcEndpoint{thread_id:u64,slot:u16,generation:u64}
+        #[derive(Debug,Clone,Copy,PartialEq,Eq)]struct IpcEndpoint{thread_id:u64,slot:u16,generation:u64}
         fn endpoint_is_valid(e:IpcEndpoint)->bool{
             assert_eq!((e.thread_id,e.slot,e.generation),(119,2,8));
             crate::MODE.get()!=5

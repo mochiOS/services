@@ -3,26 +3,36 @@ use std::process::{Command, Stdio};
 
 #[test]
 fn production_retirement_releases_only_exact_destinations_and_rejects_late_sends() {
-    let source = include_str!("../../../core/src/syscall/ipc.rs");
+    let source = include_str!("../../../core/src/ipc/mod.rs");
     let types = source
-        .find("#[derive(Debug)]\nstruct ObjectHandleAttachments")
+        .find("#[derive(Debug)]\npub(crate) struct ObjectHandleAttachments")
         .unwrap();
     let mailbox = source
-        .find("#[derive(Clone, Copy, Debug, PartialEq, Eq)]\nstruct ReplyTarget")
+        .find("#[derive(Clone, Copy, Debug, PartialEq, Eq)]\npub(crate) struct ReplyTarget")
         .unwrap();
-    let constructor_end = source[mailbox..].find("    fn add_reply_target(").unwrap() + mailbox;
-    let slots = source.find("    fn reserve_slot(").unwrap();
-    let slots_end = source[slots..].find("    fn push_message(").unwrap() + slots;
-    let waiter = source.find("    fn take_waiter(").unwrap();
+    let constructor_end = source[mailbox..]
+        .find("    pub(crate) fn add_reply_target(")
+        .unwrap()
+        + mailbox;
+    let slots = source.find("    pub(crate) fn reserve_slot(").unwrap();
+    let slots_end = source[slots..]
+        .find("    pub(crate) fn push_message(")
+        .unwrap()
+        + slots;
+    let waiter = source.find("    pub(crate) fn take_waiter(").unwrap();
     let waiter_end = source[waiter..].find("\n    }\n").unwrap() + waiter + 7;
     let cache = source.find("struct MessageCache {").unwrap();
-    let cache_end = source[cache..].find("static MESSAGE_CACHE:").unwrap() + cache;
+    let cache_end = source[cache..]
+        .find("pub(crate) static MESSAGE_CACHE:")
+        .unwrap()
+        + cache;
     let retire = source.find("pub(crate) fn retire_endpoint(").unwrap();
     let retire_end = source[retire..].find("\n}\n").unwrap() + retire + 3;
-    let send = source
+    let adapter = include_str!("../../../core/src/syscall/ipc.rs");
+    let send = adapter
         .find("fn send_to_endpoint_with_attachments(")
         .unwrap();
-    let send_end = source[send..].find("\n}\n").unwrap() + send + 3;
+    let send_end = adapter[send..].find("\n}\n").unwrap() + send + 3;
     let mut program = String::from(
         r#"
 use std::{alloc::{alloc as system_alloc,Layout},collections::BTreeMap,sync::{Arc,Mutex,atomic::{AtomicU64,AtomicUsize,AtomicBool,Ordering}}};
@@ -109,10 +119,12 @@ fn lock_mailboxes()->std::sync::MutexGuard<'static,[Mailbox;MAX_THREADS]>{MAILBO
 "#,
     );
     program.push_str(&source[retire..retire_end]);
-    let rotate = source.find("pub(crate) fn replace_thread_image_endpoint(").unwrap();
+    let rotate = source
+        .find("pub(crate) fn replace_thread_image_endpoint(")
+        .unwrap();
     let rotate_end = rotate + source[rotate..].find("\n}\n").unwrap() + 3;
     program.push_str(&source[rotate..rotate_end]);
-    program.push_str(&source[send..send_end]);
+    program.push_str(&adapter[send..send_end]);
     program.push_str(r#"
 fn make_message(to:u64,generation:u64,slot:u16,tag:u64)->(Box<Message>,std::sync::Weak<Resource>){
  let resource=Arc::new(Resource);let weak=Arc::downgrade(&resource);

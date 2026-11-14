@@ -68,7 +68,7 @@ thread_local!{
 struct State{replies:VecDeque<u64>,calls:usize,yields:usize,receives:usize,decodes:usize}
 thread_local!{static STATE:RefCell<State>=RefCell::new(State{replies:VecDeque::new(),calls:0,yields:0,receives:0,decodes:0});}
 static NEXT_CALL_ID:AtomicU64=AtomicU64::new(1);
-#[derive(Clone,Copy)]struct IpcEndpoint;
+#[derive(Clone,Copy,Debug,PartialEq,Eq)]struct IpcEndpoint;
 struct ObjectHandleAttachments{delivery_flags:u32}
 mod capability{pub enum Capability{IpcClient,IpcServer}}
 mod syscall{pub mod security{pub fn caller_has_any_capability(_:&[crate::capability::Capability])->bool{crate::CAPS.get()}}}
@@ -85,8 +85,8 @@ mod lifetime{
         crate::OBSERVERS.set(crate::OBSERVERS.get()+1);Ok(Observation)
     }
 }
-fn resolve_call_destination(_:u64)->Result<(IpcEndpoint,u64,u32),u64>{
-    if TARGET.get(){Ok((IpcEndpoint,88,2))}else{Err(mnu_abi::status::Error::NotFound.into_raw())}
+fn resolve_call_destination(_:u64)->Result<CallDestination,u64>{
+    if TARGET.get(){Ok(CallDestination{endpoint:IpcEndpoint,reply_sender:88,delivery_flags:2})}else{Err(mnu_abi::status::Error::NotFound.into_raw())}
 }
 fn ensure_endpoint_for_thread(_:u64)->Option<u64>{REGISTER.get().then_some(77)}
 fn endpoint_for_thread(_:u64)->Option<IpcEndpoint>{TARGET.get().then_some(IpcEndpoint)}
@@ -163,5 +163,9 @@ fn main(){
     STATE.with_borrow(|s|assert_eq!((s.calls,s.receives,s.decodes),(0,0,1)));
 }
 "#);
+    program.push_str(&probe::definition(
+        include_str!("../../../core/src/syscall/ipc.rs"),
+        "struct CallDestination",
+    ));
     probe::run(&program);
 }
