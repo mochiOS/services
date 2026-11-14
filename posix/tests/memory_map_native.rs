@@ -38,6 +38,7 @@ thread_local!{{
  static COPY:Cell<Option<Error>>=const{{Cell::new(None)}};
  static WALK_FAIL:Cell<bool>=const{{Cell::new(false)}};
  static OCCUPIED:Cell<bool>=const{{Cell::new(false)}};
+ static PROTECTED:Cell<bool>=const{{Cell::new(false)}};
  static FAIL_ALLOC:Cell<bool>=const{{Cell::new(false)}};
  static STATE:RefCell<task::Process>=const{{RefCell::new(task::Process{{regions:Vec::new(),cursor:0}})}};
 }}
@@ -73,6 +74,9 @@ mod mem{{
   }}
  }}
  pub mod paging{{
+  pub fn check_user_mapping_range(_:u64,_:u64,_:u64)->Result<(),crate::Error>{{
+   assert!(crate::LOCKED.get());if crate::PROTECTED.get(){{Err(crate::Error::AccessDenied)}}else{{Ok(())}}
+  }}
   pub unsafe fn next_user_page_entry(_:u64,_:u64,_:u64)->Result<Option<u64>,u64>{{
    assert!(crate::LOCKED.get());if crate::WALK_FAIL.get(){{Err(9)}}else{{Ok(None)}}
   }}
@@ -164,7 +168,7 @@ thread_local!{{static EXPECT_WRITE:Cell<bool>=const{{Cell::new(false)}};static A
 fn reset(){
  assert!(!LOCKED.get());THREAD.set(true);OWNER.set(true);PROCESS.set(true);ROOT.set(true);
  LOOKUPS.set(0);GRANTED.set(67);KIND.set(0);GATE.set(None);LOWER.set(0);FLUSH.set(0);COPY.set(None);
- WALK_FAIL.set(false);OCCUPIED.set(false);EXPECT_WRITE.set(false);ABSENT.set(false);
+ WALK_FAIL.set(false);OCCUPIED.set(false);PROTECTED.set(false);EXPECT_WRITE.set(false);ABSENT.set(false);
  STATE.with_borrow_mut(|p|{p.regions.clear();p.regions.reserve(4);p.cursor=0;});
 }
 fn map(handle:u64)->u64{memory_map(0,4096,3,0,handle,0)}
@@ -203,6 +207,12 @@ fn main(){
  reset();assert_eq!(memory_map(USER_SPACE_END+1,4096,3,1,0,0),Error::InvalidAddress.into_raw());unchanged();
  reset();OCCUPIED.set(true);assert_eq!(memory_map(0x10000,4096,3,1,0,0),Error::AlreadyExists.into_raw());unchanged();
  reset();OCCUPIED.set(true);assert_eq!(map(0),0x11000);
+ // Reserved supervisor mappings are rejected before publishing metadata,
+ // including when REPLACE permits overwriting ordinary user mappings.
+ for options in [1,5]{
+  reset();PROTECTED.set(true);
+  assert_eq!(memory_map(0x10000,4096,3,options,0,0),Error::AccessDenied.into_raw());unchanged();
+ }
  let request=memory_map::Request{length:4096,access:3,byte_ceiling:4096,..Default::default()};
  reset();let bytes=request.encode();assert_eq!(memory_map_bounded(bytes.as_ptr()as u64,64),0x10000);
  reset();let bytes=memory_map::Request{byte_ceiling:4095,..request}.encode();assert_eq!(memory_map_bounded(bytes.as_ptr()as u64,64),Error::ResourceUnavailable.into_raw());unchanged();

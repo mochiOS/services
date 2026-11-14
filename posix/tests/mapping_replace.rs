@@ -73,6 +73,7 @@ mod mem {
     #[path="@ROOT@/core/src/mem/mapping_admission.rs"] pub mod mapping_admission;
     #[path="@ROOT@/core/src/mem/mapping_replace.rs"] pub mod mapping_replace;
     pub mod paging {
+        pub fn check_user_mapping_range(_:u64,_:u64,_:u64)->Result<(),crate::status::Error>{Ok(())}
         pub unsafe fn next_user_page_entry(_:u64,start:u64,end:u64)->Result<Option<u64>,u64> {
             if crate::FAIL_WALK.get(){return Err(1);}
             Ok(crate::PAGES.with_borrow(|pages| pages.iter().copied().filter(|&p|p>=start&&p<end).min()))
@@ -139,7 +140,8 @@ fn reset()->task::Process {
     EVENTS.with_borrow_mut(|events|{events.clear();events.reserve(16);}); FAIL_SYNC.set(false);
     FAIL_WALK.set(false);HAS_ROOT.set(true);
     let mut old=MemoryRegion::file_backed(0x1000, 0x4000, 3, 2, Arc::new(mem::vm_object::VmObject{busy:false}), 8192, 3);
-    assert!(old.set_access(0x4000,0x1000,1));
+    let access=old.prepare_access(0x4000,0x1000,1).unwrap();
+    old.publish_access(access);
     for p in 0..4 {old.mark_dirty_page(p);}
     task::Process{memory_regions:vec![old],dma:false,mmio:false}
 }
@@ -186,7 +188,7 @@ fn main() {
             let mut process=reset();
             if anonymous {
                 *process.memory_regions[0].backing_mut()=MemoryBacking::Anonymous{
-                    data:(0..0x4000).map(|index|(index/4096) as u8).collect(),writable:true,shared:false,
+                    data:(0..0x4000).map(|index|(index/4096) as u8).collect(),
                 };
             }
             ALLOCATION_FAILED.set(false);
