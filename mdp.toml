@@ -3,5 +3,5 @@ format = 1
 [build]
 command = ["mdp", "pipeline", "--recipe", "mdp.recipe.json"]
 requires = ["native-sdk-context"]
-sources = ["devkit-host"]
+sources = ["devkit-host", "viewkit", "bootui-source", "boot"]
 artifact = "out/mdp/services.tar.mdp"
