@@ -1,3 +1,15 @@
+mod capability {
+    pub struct CapabilitySet;
+    pub struct KernelAuthoritySet;
+}
+mod task {
+    pub struct PrivilegeLevel;
+    pub mod process {
+        pub struct ApplicationIdentity;
+    }
+}
+struct InheritedHandleGrant;
+struct InheritedValueSpec;
 #[path = "../../../core/src/syscall/exec/launch.rs"]
 mod actual;
 

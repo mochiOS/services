@@ -127,9 +127,9 @@ mod syscall {
         "pub fn duplicate(",
     ));
     program.push_str(probe::between(
-        handle_source,
+        include_str!("../../../core/src/syscall/handle/process.rs"),
         "const PROCESS_HANDLE_RIGHTS:",
-        "fn insert_process_handle(",
+        "pub(super) fn insert_process_handle(",
     ));
     program.push_str("}\npub fn retain(target:&crate::task::Process)->Result<u64,crate::Error>{handle::retain_created_process(target)}\n}\n");
     program.push_str(probe::between(

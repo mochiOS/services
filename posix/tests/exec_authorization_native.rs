@@ -244,5 +244,11 @@ fn main(){
 }
 "#,
     );
+    program.push_str("\nmod ipc { pub(crate) use crate::syscall::ipc::*; }\n");
+    program.push_str("mod authorization {\n");
+    program.push_str(include_str!(
+        "../../../core/src/syscall/exec/authorization.rs"
+    ));
+    program.push_str("}\n");
     probe::run(&program);
 }

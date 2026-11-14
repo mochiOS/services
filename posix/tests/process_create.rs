@@ -363,7 +363,9 @@ fn creation_label_is_bounded_text_and_never_an_authorization_identity() {
     let native = &exec[exec.find("pub fn process_create_syscall(").unwrap()..];
     assert!(native.contains("take_exec_authorization(request.identity, thread)"));
     assert!(!native.contains("take_exec_authorization(request.label"));
-    assert!(native.contains("request.label,\n        request.identity,"));
+    assert!(
+        native.contains("process_name: request.label,\n            exec_path: request.identity,")
+    );
 }
 
 #[test]
@@ -490,7 +492,9 @@ fn explicit_placement_cannot_overwrite_entries_or_capture_a_foreign_table() {
     // that admission precedes reservation/publication in the current layout.
     let vacant = insert.find("let Err(index)").unwrap();
     let reserve = insert.find("self.reserve_publication_storage()").unwrap();
-    let publish = insert.find("self.entries.insert(index, (handle, entry))").unwrap();
+    let publish = insert
+        .find("self.entries.insert(index, (handle, entry))")
+        .unwrap();
     assert!(vacant < reserve && reserve < publish);
     let exec = include_str!("../../../core/src/syscall/exec.rs");
     let install = &exec[exec.find("fn install_inherited_handles(").unwrap()

@@ -60,12 +60,16 @@ impl ExecMeasurement {
 mod task {
     pub struct MemoryRegion {pub start:u64,pub length:u64}
     impl MemoryRegion {
-        pub fn anonymous(start:u64,length:u64,access:u64,offset:u64,private:bool,shared:bool)->Self {
-            assert_eq!(access,3);assert_eq!(offset,0);assert!(private);assert!(!shared);Self{start,length}
+        pub fn anonymous(start:u64,length:u64,access:u64,offset:u64)->Self {
+            assert_eq!(access,3);assert_eq!(offset,0);Self{start,length}
         }
     }
 }
 mod mem {pub mod paging {
+    pub struct TableEdit<'a>{pub table:u64,pub owner:core::marker::PhantomData<&'a mut ()>}
+    impl TableEdit<'_>{pub fn map_segment(&mut self,address:u64,filesz:u64,memsz:u64,data:&[u8],write:bool,exec:bool)->Result<(),crate::Kernel>{
+        map_and_copy_segment_to(self.table,address,filesz,memsz,data,write,exec)
+    }}
     pub fn map_and_copy_segment_to(table:u64,address:u64,filesz:u64,memsz:u64,data:&[u8],write:bool,exec:bool)->Result<(),crate::Kernel> {
         assert_eq!(table,17);assert!(address>=0x400000,"metadata must respect the user-image window");assert_eq!(data.len() as u64,filesz);assert!(memsz>=filesz);assert!(!(write&&exec));
         crate::MAPS.set(crate::MAPS.get()+1);
@@ -88,7 +92,7 @@ fn valid()->[u8;8192] {
     data
 }
 fn reject(data:&[u8]) {
-    MAPS.set(0);assert_eq!(image::map_elf_image(data,17,&mut ExecMeasurement).err(),Some(Error::InvalidFormat));
+    MAPS.set(0);assert_eq!(image::map_elf_image(data, &mut mem::paging::TableEdit{table:17,owner:core::marker::PhantomData}, &mut ExecMeasurement).err(),Some(Error::InvalidFormat));
     assert_eq!(MAPS.get(),0,"invalid ELF must not mutate any page table");
 }
 fn metadata(data: &[u8], address: u64, expected_maps: usize, private: bool) {
@@ -96,7 +100,7 @@ fn metadata(data: &[u8], address: u64, expected_maps: usize, private: bool) {
     MAPS.set(0);
     MAPPING_ERROR.set(None);
     FAIL_AT.set(0);
-    let layout = image::map_elf_image(data, 17, &mut ExecMeasurement).unwrap();
+    let layout = image::map_elf_image(data, &mut mem::paging::TableEdit{table:17,owner:core::marker::PhantomData}, &mut ExecMeasurement).unwrap();
     assert_eq!(layout.phdr_vaddr, address);
     assert_eq!(MAPS.get(), expected_maps);
     let start = u64::from_le_bytes(data[32..40].try_into().unwrap()) as usize;
@@ -181,7 +185,7 @@ fn metadata_cases() {
         FAIL_AT.set(failing);
         MAPPING_ERROR.set(Some(Kernel::Memory(result::Memory::OutOfMemory)));
         assert_eq!(
-            image::map_elf_image(&data, 17, &mut ExecMeasurement).err(),
+            image::map_elf_image(&data, &mut mem::paging::TableEdit{table:17,owner:core::marker::PhantomData}, &mut ExecMeasurement).err(),
             Some(Error::ResourceUnavailable)
         );
         assert_eq!(MAPS.get(), failing);
@@ -203,11 +207,11 @@ fn main() {
         let mut data=valid();put32(&mut data,offset,value);reject(&data);
     }
     for (failure,expected) in [(Kernel::Memory(result::Memory::OutOfMemory),Error::ResourceUnavailable),
-        (Kernel::Memory(result::Memory::InvalidAddress),Error::InvalidArgument),(Kernel::InvalidParam,Error::InvalidArgument)] {
+        (Kernel::Memory(result::Memory::InvalidAddress),Error::InvalidAddress),(Kernel::InvalidParam,Error::InvalidArgument)] {
         MAPS.set(0);MAPPING_ERROR.set(Some(failure));
-        assert_eq!(image::map_elf_image(&valid(),17,&mut ExecMeasurement).err(),Some(expected));assert_eq!(MAPS.get(),1);
+        assert_eq!(image::map_elf_image(&valid(), &mut mem::paging::TableEdit{table:17,owner:core::marker::PhantomData}, &mut ExecMeasurement).err(),Some(expected));assert_eq!(MAPS.get(),1);
     }
-    MAPPING_ERROR.set(None);MAPS.set(0);let layout=image::map_elf_image(&valid(),17,&mut ExecMeasurement).unwrap();
+    MAPPING_ERROR.set(None);MAPS.set(0);let layout=image::map_elf_image(&valid(), &mut mem::paging::TableEdit{table:17,owner:core::marker::PhantomData}, &mut ExecMeasurement).unwrap();
     assert_eq!((layout.entry,layout.phdr_vaddr,layout.phentsize,layout.phnum),(0x400000,0x400040,56,2));
     assert_eq!(MAPS.get(),2);assert_eq!(layout.deferred_zero_regions.len(),1);
     assert_eq!((layout.deferred_zero_regions[0].start,layout.deferred_zero_regions[0].length),(0x501000,4096));
@@ -215,6 +219,11 @@ fn main() {
 }
 "#,
     );
+    program.push_str("use result::{Memory,Process,Device,Elf};\n");
+    program.push_str(&probe::definition(
+        include_str!("../../../core/src/result.rs"),
+        "impl From<Kernel> for mnu_abi::status::Error {",
+    ));
     program
 }
 
@@ -234,5 +243,9 @@ fn main() {{
     metadata(&data, address, loads, false);
 }}
 "#));
+    program.push_str(&probe::definition(
+        include_str!("../../../core/src/result.rs"),
+        "impl From<Kernel> for mnu_abi::status::Error {",
+    ));
     probe::run(&program);
 }

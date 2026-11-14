@@ -19,7 +19,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 static STARTS:AtomicUsize=AtomicUsize::new(0);
 #[derive(Clone,Copy,Debug,PartialEq,Eq)]struct CapabilitySet;
 #[derive(Clone,Copy,Debug,PartialEq,Eq)]struct KernelAuthoritySet;
-mod task {#[derive(Clone,Copy,Debug,PartialEq,Eq)]pub enum PrivilegeLevel {Service}}
+mod task {#[derive(Clone,Copy,Debug,PartialEq,Eq)]pub enum PrivilegeLevel {Service} pub mod process {pub type ApplicationIdentity=();}}
 mod init {pub mod boot_data {
 pub static BYTES:std::sync::Mutex<&'static [u8]>=std::sync::Mutex::new(&[]);
 pub fn boot_module_bytes()->&'static [u8]{*BYTES.lock().unwrap()}
@@ -35,7 +35,7 @@ fn start()->Self{STARTS.fetch_add(1,Ordering::Relaxed);Self}
 fn finish(self,result:u64)->u64{result}
 }
 enum ImageLaunch<'a>{Bootstrap(Option<mnu_abi::process_image::StartupImage<'a>>)}
-fn exec_with_data(data:&[u8],name:&str,identity:&str,caps:Option<CapabilitySet>,
+fn legacy_exec_with_data(data:&[u8],name:&str,identity:&str,caps:Option<CapabilitySet>,
 authorities:Option<KernelAuthoritySet>,privilege:Option<task::PrivilegeLevel>,
 application:Option<()>,handles:&[()],values:&[()],launch:ImageLaunch,_:&mut ExecMeasurement)->u64 {
 assert_eq!(data,b"selected");assert!(name.is_empty()&&identity.is_empty());
@@ -76,6 +76,14 @@ assert_eq!(launch(invalid),Error::InvalidArgument.into_raw());
 assert_eq!(STARTS.load(Ordering::Relaxed),0);
 assert_eq!(launch(bytes),37);assert_eq!(STARTS.load(Ordering::Relaxed),1);
 }
+"#);
+    program.push_str(&probe::prepared_launch());
+    program.push_str(r#"mod capability {pub(crate) use crate::{CapabilitySet,KernelAuthoritySet};}
+ type InheritedHandleGrant=();type InheritedValueSpec=();
+ fn exec_with_data(prepared:PreparedLaunch<'_>,measurement:&mut ExecMeasurement)->u64 {
+  let PreparedLaunch{data,process_name,exec_path,security,inherited_handles,inherited_values,launch}=prepared;
+  legacy_exec_with_data(data,process_name,exec_path,Some(security.capabilities),Some(security.authorities),Some(security.privilege),security.application_identity,inherited_handles,inherited_values,launch,measurement)
+ }
 "#);
     probe::run(&program);
 }

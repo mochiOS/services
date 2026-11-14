@@ -50,6 +50,10 @@ mod config {
 mod result {#[derive(Clone,Copy)]pub enum Memory {OutOfMemory}}
 fn aslr_offset_pages(_:u64,max:u64)->u64 {assert_eq!(max,0);0}
 mod mem {pub mod paging {
+    pub struct TableEdit<'a>{pub table:u64,pub owner:core::marker::PhantomData<&'a mut ()>}
+    impl TableEdit<'_>{pub fn map_segment(&mut self,address:u64,filesz:u64,memsz:u64,data:&[u8],write:bool,exec:bool)->Result<(),crate::Kernel>{
+        map_and_copy_segment_to(self.table,address,filesz,memsz,data,write,exec)
+    }}
     pub fn map_and_copy_segment_to(table:u64,address:u64,filesz:u64,memsz:u64,data:&[u8],write:bool,exec:bool)->Result<(),crate::Kernel> {
         assert_eq!(table,17);assert_eq!(address,0x600000);assert_eq!((filesz,memsz),(32,32));assert!(write);assert!(!exec);
         assert_eq!(&data[..8],&address.to_ne_bytes());assert!(data[8..].iter().all(|&b|b==0));
@@ -87,18 +91,20 @@ fn main() {
         match mode {0=>configuration.exec.user_stack_size_pages=usize::MAX,1=>configuration.exec.stack_top_base=4096,_=>{configuration.exec.stack_top_base=0;configuration.exec.user_stack_size_pages=0;}}
         CONFIG.set(configuration);assert_eq!(build_relocatable_user_stack(0,startup,0,0,0,0).err(),Some(Error::InvalidArgument));
     }
-    CONFIG.set(config::DEFAULT);FAIL.set(true);assert_eq!(map_initial_tls(17,0),Err(Error::ResourceUnavailable));assert!(!FAIL.get());assert_eq!(MAPS.get(),0);
+    CONFIG.set(config::DEFAULT);FAIL.set(true);assert_eq!(map_initial_tls(&mut mem::paging::TableEdit{table:17,owner:core::marker::PhantomData},0),Err(Error::ResourceUnavailable));assert!(!FAIL.get());assert_eq!(MAPS.get(),0);
     for length in [0,1,7] {
         let mut configuration=config::DEFAULT;configuration.exec.initial_tls_size=length;CONFIG.set(configuration);
-        assert_eq!(map_initial_tls(17,0),Err(Error::InvalidArgument));assert_eq!(MAPS.get(),0);
+        assert_eq!(map_initial_tls(&mut mem::paging::TableEdit{table:17,owner:core::marker::PhantomData},0),Err(Error::InvalidArgument));assert_eq!(MAPS.get(),0);
     }
     CONFIG.set(config::DEFAULT);
     for (error,expected) in [(Kernel::Memory(result::Memory::OutOfMemory),Error::ResourceUnavailable),(Kernel::InvalidParam,Error::InvalidArgument)] {
-        MAP_ERROR.set(Some(error));assert_eq!(map_initial_tls(17,0),Err(expected));
+        MAP_ERROR.set(Some(error));assert_eq!(map_initial_tls(&mut mem::paging::TableEdit{table:17,owner:core::marker::PhantomData},0),Err(expected));
     }
-    MAP_ERROR.set(None);assert_eq!(map_initial_tls(17,0),Ok(0x600000));assert_eq!(MAPS.get(),3);
+    MAP_ERROR.set(None);assert_eq!(map_initial_tls(&mut mem::paging::TableEdit{table:17,owner:core::marker::PhantomData},0),Ok(0x600000));assert_eq!(MAPS.get(),3);
 }
 "#,
     );
+
+    program.push_str("impl From<Kernel> for status::Error { fn from(error:Kernel)->Self {match error {Kernel::Memory(result::Memory::OutOfMemory)=>Self::ResourceUnavailable,Kernel::InvalidParam=>Self::InvalidArgument}} }\n");
     probe::run(&program);
 }

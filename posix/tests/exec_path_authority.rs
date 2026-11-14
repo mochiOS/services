@@ -1,3 +1,6 @@
+#[allow(dead_code)]
+#[path = "support/native_error_probe.rs"]
+mod probe;
 use std::io::Write;
 use std::process::{Command, Stdio};
 
@@ -17,7 +20,7 @@ static PRESENT: AtomicBool = AtomicBool::new(false);
 static CALLS: AtomicU64 = AtomicU64::new(0);
 static BYTES: AtomicU64 = AtomicU64::new(0);
 static RESULT: AtomicU64 = AtomicU64::new(77);
-mod task { #[derive(Clone,Copy,Debug,PartialEq,Eq)] pub enum PrivilegeLevel { Service } }
+mod task { #[derive(Clone,Copy,Debug,PartialEq,Eq)] pub enum PrivilegeLevel { Service } pub mod process {pub type ApplicationIdentity=();} }
 mod init { pub mod boot_data {
     static MODULE:std::sync::OnceLock<Vec<u8>>=std::sync::OnceLock::new();
     pub fn boot_module_bytes()->&'static [u8] {
@@ -45,7 +48,7 @@ impl ExecMeasurement {
     fn start()->Self { Self }
     fn finish(self,result:u64)->u64 { result }
 }
-fn exec_with_data(data:&[u8],name:&str,path:&str,
+fn legacy_exec_with_data(data:&[u8],name:&str,path:&str,
     caps:Option<u64>,authorities:Option<u64>,privilege:Option<task::PrivilegeLevel>,
     identity:Option<()>,handles:&[()],values:&[()],launch:ImageLaunch,_:&mut ExecMeasurement)->u64 {
     assert_eq!(data,[1,2,3]); assert!(name.is_empty()&&path.is_empty());
@@ -94,6 +97,14 @@ fn main(){
     ));
     std::fs::create_dir(&directory).unwrap();
     let executable = directory.join("probe");
+    program.push_str(&probe::prepared_launch());
+    program.push_str(r#"mod capability {pub(crate) use crate::{CapabilitySet,KernelAuthoritySet};}
+ type InheritedHandleGrant=();type InheritedValueSpec=();
+ fn exec_with_data(prepared:PreparedLaunch<'_>,measurement:&mut ExecMeasurement)->u64 {
+  let PreparedLaunch{data,process_name,exec_path,security,inherited_handles,inherited_values,launch}=prepared;
+  legacy_exec_with_data(data,process_name,exec_path,Some(security.capabilities),Some(security.authorities),Some(security.privilege),security.application_identity,inherited_handles,inherited_values,launch,measurement)
+ }
+"#);
     let mut compiler = Command::new("rustc")
         .args(["--edition=2024", "-Awarnings", "-"])
         .arg("-o")

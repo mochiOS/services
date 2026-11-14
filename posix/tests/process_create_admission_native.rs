@@ -54,7 +54,7 @@ unsafe impl std::alloc::GlobalAlloc for Allocator {
 }
 #[global_allocator]static ALLOCATOR:Allocator=Allocator;
 mod task {
-    pub mod process {
+    pub mod process { pub type ApplicationIdentity=();
         #[derive(PartialEq)]pub enum PendingExecKind {Spawn,SpawnInherit,ImageReplace,ImageInstall{image_revision:u64}}
         pub struct PendingExecSecurity {
             pub kind:PendingExecKind,pub executable_digest:[u8;32],pub execution_class:crate::ExecutionClass,
@@ -127,7 +127,7 @@ fn create_from_address_space(image:u64,request:&mnu_abi::process_create::Request
 struct Sha256;impl Sha256 {fn digest(_:&[u8])->[u8;32] {panic!("VM request has no ELF digest step")}}
 enum ImageLaunch<'a>{Created(mnu_abi::process_image::StartupImage<'a>)}
 struct ExecMeasurement;impl ExecMeasurement {fn start()->Self {Self}fn finish(self,result:u64)->u64 {result}}
-fn exec_with_data(_:&[u8],_:&str,_:&str,_:Option<()>,_:Option<()>,_:Option<task::PrivilegeLevel>,_:Option<()>,_:&[InheritedHandleGrant],_:&[InheritedValueSpec],_:ImageLaunch<'_>,_:&mut ExecMeasurement)->u64 {panic!("not an ELF request")}
+fn exec_with_data(_:PreparedLaunch<'_>,_:&mut ExecMeasurement)->u64 {panic!("not an ELF request")}
 "#,
     );
     program.push_str(probe::between(
@@ -207,5 +207,8 @@ fn main() {
 }
 "#,
     );
+    program.push_str(&probe::prepared_launch());
+    program
+        .push_str(r#"mod capability {pub type CapabilitySet=();pub type KernelAuthoritySet=();}"#);
     probe::run(&program);
 }

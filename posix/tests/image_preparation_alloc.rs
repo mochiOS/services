@@ -181,13 +181,30 @@ mod task {
     #[allow(dead_code)]
     pub struct MemoryRegion(u64);
     impl MemoryRegion {
-        pub fn anonymous(_: u64, _: u64, _: u64, _: u64, _: bool, _: bool) -> Self {
+        pub fn anonymous(_: u64, _: u64, _: u64, _: u64) -> Self {
             Self(0)
         }
     }
 }
 mod mem {
     pub mod paging {
+        pub struct TableEdit<'a> {
+            pub table: u64,
+            pub owner: core::marker::PhantomData<&'a mut ()>,
+        }
+        impl TableEdit<'_> {
+            pub fn map_segment(
+                &mut self,
+                address: u64,
+                filesz: u64,
+                memsz: u64,
+                data: &[u8],
+                write: bool,
+                exec: bool,
+            ) -> Result<(), ()> {
+                map_and_copy_segment_to(self.table, address, filesz, memsz, data, write, exec)
+            }
+        }
         pub fn map_and_copy_segment_to(
             _: u64,
             _: u64,
@@ -222,7 +239,14 @@ fn elf_metadata_allocation_failures_precede_page_table_mutation() {
     for successful_allocations in 0..2 {
         MAPS.with(|maps| maps.set(0));
         FAIL_AFTER.with(|fail| fail.set(Some(successful_allocations)));
-        let result = image::map_elf_image(&[0; 8192], 1, &mut ExecMeasurement);
+        let result = image::map_elf_image(
+            &[0; 8192],
+            &mut mem::paging::TableEdit {
+                table: 1,
+                owner: core::marker::PhantomData,
+            },
+            &mut ExecMeasurement,
+        );
         let consumed = FAIL_AFTER.with(|fail| fail.replace(None).is_none());
         assert!(consumed);
         assert_eq!(
@@ -231,7 +255,15 @@ fn elf_metadata_allocation_failures_precede_page_table_mutation() {
         );
         assert_eq!(MAPS.with(Cell::get), 0);
     }
-    let layout = image::map_elf_image(&[0; 8192], 1, &mut ExecMeasurement).unwrap();
+    let layout = image::map_elf_image(
+        &[0; 8192],
+        &mut mem::paging::TableEdit {
+            table: 1,
+            owner: core::marker::PhantomData,
+        },
+        &mut ExecMeasurement,
+    )
+    .unwrap();
     assert_eq!(layout.entry, 0x400000);
     assert_eq!(
         (layout.phdr_vaddr, layout.phentsize, layout.phnum),
@@ -379,7 +411,7 @@ fn native_image_preparation_routes_owned_storage_through_fallible_paths() {
     let image = include_str!("../../../core/src/syscall/exec/image.rs");
     let reserve = image.find(".try_reserve_exact(segments.len())").unwrap();
     assert!(reserve < image.find("let mapped = measurement.load(").unwrap());
-    let handles = include_str!("../../../core/src/syscall/handle.rs");
+    let handles = include_str!("../../../core/src/syscall/handle/provider_io.rs");
     let read = handles
         .split("pub(crate) fn read_all(")
         .nth(1)

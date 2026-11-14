@@ -174,10 +174,9 @@ mod syscall {
 mod production {use crate::{mnu_abi,ObjectHandle};const SUCCESS:u64=0;
 "#,
     );
-    program.push_str(probe::between(
-        kernel,
-        "pub fn launch_get(",
-        "/// Associates one of the caller's existing object handles",
+    program.push_str(&probe::definition(
+        include_str!("../../../core/src/syscall/handle/context.rs"),
+        "fn launch_get(",
     ));
     program.push_str(&kernel[kernel.find("pub fn launch_value_get(").unwrap()..]);
     program.push_str(

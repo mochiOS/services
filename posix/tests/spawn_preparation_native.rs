@@ -70,12 +70,12 @@ fn claim_init_pid(id:u64)->bool{assert_eq!(id,7);STAGE.get()!=7}
 fn release_init_pid(id:u64)->bool{assert_eq!(id,7);RELEASES.set(RELEASES.get()+1);true}
 fn install_inherited_handles(_:&mut task::Process,_:&[InheritedHandleGrant])->Result<(),Error>{if STAGE.get()==12{Err(Error::AccessDenied)}else{Ok(())}}
 fn install_inherited_values(_:&mut task::Process,_:&[InheritedValueSpec])->Result<(),Error>{if STAGE.get()==13{Err(Error::AlreadyExists)}else{Ok(())}}
-fn map_elf_image(_:&[u8],table:u64,_:&mut ExecMeasurement)->Result<ElfImageLayout,Error>{
-    assert_eq!(table,17);if STAGE.get()==2 {return Err(Error::InvalidArgument);}
+fn map_elf_image(_:&[u8],edit:&mut mem::paging::TableEdit<'_>,_:&mut ExecMeasurement)->Result<ElfImageLayout,Error>{
+    assert_eq!(edit.table(),17);if STAGE.get()==2 {return Err(Error::InvalidArgument);}
     Ok(ElfImageLayout{entry:0x400000,phdr_vaddr:0x400040,phentsize:56,phnum:1,deferred_zero_regions:Vec::new()})
 }
 fn build_relocatable_user_stack(_:u64,_:(),_:u64,_:u64,_:u64,_:u64)->Result<InitialUserStack,Error>{bootstrap_stack::empty(0x800000,32)}
-fn map_initial_tls(table:u64,_:u64)->Result<u64,Error>{assert_eq!(table,17);if STAGE.get()==5 {Err(Error::ResourceUnavailable)}else{Ok(0x600000)}}
+fn map_initial_tls(edit:&mut mem::paging::TableEdit<'_>,_:u64)->Result<u64,Error>{assert_eq!(edit.table(),17);if STAGE.get()==5 {Err(Error::ResourceUnavailable)}else{Ok(0x600000)}}
 mod initial_mappings {pub fn prepare(_:u64,_:(),_:&mut Vec<crate::task::MemoryRegion>)->Result<(),crate::Error>{Ok(())}}
 mod config {
     pub struct Exec {pub stack_top_base:u64,pub stack_aslr_max_pages:u64,pub user_stack_size_pages:usize,pub kernel_thread_stack_size:usize}
@@ -87,6 +87,13 @@ mod cpu {pub struct SmapSmepGuard;impl SmapSmepGuard{pub fn new()->Self{Self}}}
 mod mem {
     pub mod detached_roots {pub struct Root;impl Root {pub fn published(&self)->bool{false}pub fn table(&self)->u64{17}}}
     pub mod paging {
+        pub struct TableEdit<'a>{table:u64,owner:core::marker::PhantomData<&'a mut ()>}
+        impl<'a> TableEdit<'a>{
+         pub unsafe fn new<T>(table:u64,_:&'a mut T)->Result<Self,()>{Ok(Self{table,owner:core::marker::PhantomData})}
+         pub fn table(&self)->u64{self.table}
+         pub fn map_segment(&mut self,a:u64,f:u64,m:u64,d:&[u8],w:bool,x:bool)->Result<(),()>{map_and_copy_segment_to(self.table,a,f,m,d,w,x)}
+        }
+
         pub fn create_user_page_table()->Result<u64,()>{if crate::STAGE.get()==1{Err(())}else{Ok(17)}}
         pub fn destroy_user_page_table(table:u64)->Result<(),()>{assert_eq!(table,17);crate::DESTROYS.set(crate::DESTROYS.get()+1);Ok(())}
         pub fn map_and_copy_segment_to(table:u64,_:u64,_:u64,_:u64,_:&[u8],_:bool,_:bool)->Result<(),()>{
@@ -103,7 +110,11 @@ mod syscall {
     }
 }
 mod task {
-    pub mod process{pub type ApplicationIdentity=();}
+    pub mod process{pub type ApplicationIdentity=();
+      pub fn with_process_vm<R>(_:super::Id,f:impl FnOnce(&mut super::Process,&mut crate::mem::paging::TableEdit<'_>)->R)->Option<R>{
+       let mut owner=();let mut edit=unsafe{crate::mem::paging::TableEdit::new(17,&mut owner)}.unwrap();Some(f(&mut super::Process,&mut edit))
+      }
+    }
     #[derive(Clone,Copy)]pub struct Id;impl Id{pub fn as_u64(self)->u64{7}}
     pub struct PrivilegeLevel;pub struct MemoryRegion;pub struct Process;
     impl Process {
@@ -146,28 +157,35 @@ fn main(){
             (9,Error::ResourceUnavailable),(10,Error::ResourceUnavailable),(12,Error::AccessDenied),
             (13,Error::AlreadyExists),(14,Error::ResourceUnavailable)] {
             reset(stage);let launch=if native{ImageLaunch::Created(&())}else{ImageLaunch::Bootstrap(None)};
-            assert_eq!(exec_with_data(&[],"name","opaque:target",None,None,None,None,&[],&[],launch,&mut ExecMeasurement),error.into_raw());
+            assert_eq!(exec_with_data(request(launch),&mut ExecMeasurement),error.into_raw());
             assert_eq!(DESTROYS.get(),usize::from(stage!=1));assert_eq!(PROCESSES.get(),0);
             assert_eq!(CLOSES.get(),usize::from(native&&matches!(stage,8|9|10)));
             assert_eq!(RELEASES.get(),usize::from(!native&&matches!(stage,8|9|10)));
             assert_eq!(FREES.get(),usize::from(stage==10));
         }
         {reset(0);let launch=if native{ImageLaunch::Created(&())}else{ImageLaunch::Bootstrap(None)};
-            assert_eq!(exec_with_data(&[],"name","opaque:target",None,None,None,None,&[],&[],launch,&mut ExecMeasurement),if native{91}else{7});
+            assert_eq!(exec_with_data(request(launch),&mut ExecMeasurement),if native{91}else{7});
             assert_eq!(DESTROYS.get(),0);assert_eq!(PROCESSES.get(),1);assert_eq!(CLOSES.get(),0);assert_eq!(RELEASES.get(),0);assert_eq!(FREES.get(),0);
             // Only the two stack mapping operations are implicit. User heaps
             // must be requested explicitly through native VM APIs.
             assert_eq!(MAPS.get(),2);
         }
     }
-    reset(6);assert_eq!(exec_with_data(&[],"name","opaque:target",None,None,None,None,&[],&[],ImageLaunch::Created(&()),&mut ExecMeasurement),Error::NotReady.into_raw());assert_eq!(DESTROYS.get(),1);assert_eq!(PROCESSES.get(),0);assert_eq!(CLOSES.get(),0);
-    reset(7);assert_eq!(exec_with_data(&[],"name","opaque:target",None,None,None,None,&[],&[],ImageLaunch::Bootstrap(None),&mut ExecMeasurement),Error::AlreadyExists.into_raw());assert_eq!(DESTROYS.get(),1);assert_eq!(PROCESSES.get(),0);assert_eq!(RELEASES.get(),0);
-    reset(0);assert_eq!(exec_with_data(&[],"name","opaque:target",None,None,None,None,&[],&[],ImageLaunch::Bootstrap(Some(&())),&mut ExecMeasurement),7);assert_eq!(PROCESSES.get(),1);assert_eq!(CLOSES.get(),0);
+    reset(6);assert_eq!(exec_with_data(request(ImageLaunch::Created(&())),&mut ExecMeasurement),Error::NotReady.into_raw());assert_eq!(DESTROYS.get(),1);assert_eq!(PROCESSES.get(),0);assert_eq!(CLOSES.get(),0);
+    reset(7);assert_eq!(exec_with_data(request(ImageLaunch::Bootstrap(None)),&mut ExecMeasurement),Error::AlreadyExists.into_raw());assert_eq!(DESTROYS.get(),1);assert_eq!(PROCESSES.get(),0);assert_eq!(RELEASES.get(),0);
+    reset(0);assert_eq!(exec_with_data(request(ImageLaunch::Bootstrap(Some(&()))),&mut ExecMeasurement),7);assert_eq!(PROCESSES.get(),1);assert_eq!(CLOSES.get(),0);
     reset(0);FAIL_NEXT.set(true);
-    let result=exec_with_data(&[],"name","opaque:target",None,None,None,None,&[],&[],ImageLaunch::Created(&()),&mut ExecMeasurement);
+    let result=exec_with_data(request(ImageLaunch::Created(&())),&mut ExecMeasurement);
     assert!(!FAIL_NEXT.get());assert_eq!(result,Error::ResourceUnavailable.into_raw());assert_eq!(DESTROYS.get(),0);assert_eq!(MAPS.get(),0);assert_eq!(PROCESSES.get(),0);
 }
 "#,
     );
+    program.push_str("struct Kernel;impl Kernel {fn Memory(_:())->(){}}mod result {pub type Result<T>=core::result::Result<T,()>;pub struct Memory;impl Memory {pub const PermissionDenied:()=();}}\n");
+    program.push_str(&probe::prepared_launch());
+    program.push_str(r#"mod capability {pub type CapabilitySet=();pub type KernelAuthoritySet=();}
+fn request(launch:ImageLaunch<'_>)->PreparedLaunch<'_>{
+ PreparedLaunch{data:&[],process_name:"name",exec_path:"opaque:target",security:LaunchSecurity{capabilities:(),authorities:(),privilege:task::PrivilegeLevel,application_identity:None},inherited_handles:&[],inherited_values:&[],launch}
+}
+"#);
     probe::run(&program);
 }
