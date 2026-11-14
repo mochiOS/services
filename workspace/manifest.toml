@@ -16,5 +16,6 @@ requires = [
     "process.inspect",
     "process.kill",
     "process.spawn",
+    "system.random.read",
     "window.modal.control",
 ]

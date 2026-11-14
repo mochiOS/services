@@ -12,6 +12,8 @@ use mochios_workspace_protocol as protocol;
 
 mod error;
 mod session;
+mod file_targets;
+mod association_confirmation;
 mod crash_notifications;
 use error::{io_errno as errno, posix_errno as posix_client_errno};
 
@@ -70,6 +72,8 @@ struct PendingFilePanel {
     token: [u8; protocol::FILE_PANEL_TOKEN_LEN],
     mode: u16,
     allowed_content_types: String,
+    object_reply: bool,
+    requester_image: platform::syscall::ProcessImageInfo,
 }
 
 #[derive(Debug)]
@@ -129,6 +133,8 @@ struct WorkspaceService {
     association_path: PathBuf,
     pending_file_panels: Vec<PendingFilePanel>,
     next_file_panel_token: u64,
+    file_targets: file_targets::Targets,
+    pending_associations: Vec<association_confirmation::Pending>,
     application_endpoints: BTreeMap<u64, u64>,
     pending_documents: BTreeMap<u64, PendingDocument>,
     control_center_cards: BTreeMap<(String, String), RegisteredControlCenterCard>,
@@ -192,6 +198,8 @@ impl WorkspaceService {
             association_path,
             pending_file_panels: Vec::new(),
             next_file_panel_token: 1,
+            file_targets: file_targets::Targets::new(),
+            pending_associations: Vec::new(),
             application_endpoints: BTreeMap::new(),
             pending_documents: BTreeMap::new(),
             control_center_cards: BTreeMap::new(),
@@ -225,6 +233,7 @@ impl WorkspaceService {
             }
             return;
         }
+        self.expire_associations();
         let capability = match request.opcode {
             protocol::OP_CLIPBOARD_SNAPSHOT | protocol::OP_CLIPBOARD_READ => CLIPBOARD_READ,
             protocol::OP_CLIPBOARD_SET_BEGIN
@@ -234,9 +243,16 @@ impl WorkspaceService {
             | protocol::OP_ASSOCIATION_HANDLERS
             | protocol::OP_DOCUMENT_OPEN => ASSOCIATIONS_READ,
             protocol::OP_FILE_PANEL
+            | protocol::OP_ASSOCIATION_REQUEST
+            | protocol::OP_ASSOCIATION_REMOVE_REQUEST
+            | protocol::OP_ASSOCIATION_CONFIRM
+            | protocol::OP_FILE_PANEL_OBJECT
             | protocol::OP_FILE_PANEL_COMPLETE
             | protocol::OP_FILE_PANEL_FINISH
             | protocol::OP_FILE_PANEL_RETRY
+            | protocol::OP_FILE_TARGET_BEGIN
+            | protocol::OP_FILE_TARGET_COMMIT
+            | protocol::OP_FILE_TARGET_ABORT
             | protocol::OP_APPLICATION_REGISTER
             | protocol::OP_APPLICATION_ACTIVATE => "ipc.client",
             protocol::OP_APPLICATION_LAUNCH => "process.spawn",
@@ -277,15 +293,35 @@ impl WorkspaceService {
             protocol::OP_CLIPBOARD_SET_COMMIT => self.clipboard_commit(sender, request),
             protocol::OP_CLIPBOARD_SNAPSHOT => self.clipboard_snapshot(sender, request),
             protocol::OP_CLIPBOARD_READ => self.clipboard_read(sender, request),
-            protocol::OP_ASSOCIATION_SET => self.association_set(sender, request),
-            protocol::OP_ASSOCIATION_REMOVE => self.association_remove(sender, request),
+            protocol::OP_ASSOCIATION_SET | protocol::OP_ASSOCIATION_REMOVE => self.reply_status(sender, request.request_id, -95, 0),
+            protocol::OP_ASSOCIATION_REQUEST | protocol::OP_ASSOCIATION_REMOVE_REQUEST => {
+                if handles.count != 0 { self.reply_status(sender, request.request_id, -22, 0); }
+                else { self.request_association(sender, request, request.opcode == protocol::OP_ASSOCIATION_REMOVE_REQUEST); }
+            }
+            protocol::OP_ASSOCIATION_CONFIRM => self.confirm_association(sender, request),
             protocol::OP_ASSOCIATION_RESOLVE => self.association_resolve(sender, request),
             protocol::OP_ASSOCIATION_HANDLERS => self.association_handlers(sender, request),
             protocol::OP_DOCUMENT_OPEN => self.document_open(sender, request, handles),
             protocol::OP_FILE_PANEL => self.file_panel(sender, request),
+            protocol::OP_FILE_PANEL_OBJECT => self.file_panel(sender, request),
             protocol::OP_FILE_PANEL_COMPLETE => self.file_panel_complete(sender, request),
             protocol::OP_FILE_PANEL_FINISH => self.file_panel_finish(sender, request),
             protocol::OP_FILE_PANEL_RETRY => self.file_panel_retry(sender, request),
+            protocol::OP_FILE_TARGET_BEGIN | protocol::OP_FILE_TARGET_COMMIT | protocol::OP_FILE_TARGET_ABORT => {
+                match self.file_targets.execute(request.opcode, request.payload, handles, &self.posix) {
+                    Ok(Some(file)) => {
+                        let mut reply = [0; protocol::HEADER_LEN];
+                        let length = protocol::encode(protocol::OP_FILE_TARGET_FILE, request.request_id, 0, &[], &mut reply).expect("fixed header");
+                        let mut outgoing = platform::ipc::IpcObjectHandles::default();
+                        outgoing.count = 1;
+                        outgoing.handles[0] = platform::ipc::IpcObjectHandle { handle: file.handle, reserved: 0, rights: file.rights };
+                        let _ = platform::ipc::reply_object_handles(sender, &reply[..length], &outgoing);
+                        let _ = platform::handle::close(file.handle);
+                    }
+                    Ok(None) => self.reply_status(sender, request.request_id, 0, 0),
+                    Err(status) => self.reply_status(sender, request.request_id, -(status as i32), 0),
+                }
+            }
             protocol::OP_APPLICATION_REGISTER => self.application_register(sender, request),
             protocol::OP_APPLICATION_ACTIVATE => self.application_activate(sender, request),
             protocol::OP_APPLICATION_LAUNCH => {
@@ -1020,59 +1056,6 @@ impl WorkspaceService {
         );
     }
 
-    fn association_set(&mut self, sender: u64, request: protocol::Message<'_>) {
-        let Some(candidate) = decode_association_request(request.payload) else {
-            self.reply_status(
-                sender,
-                request.request_id,
-                mochi_user_syscall::EINVAL as i32,
-                0,
-            );
-            return;
-        };
-        let mut associations = self.associations.clone();
-        associations.retain(|association| {
-            association.extension != candidate.extension
-                || association.content_type != candidate.content_type
-                || association.roles != candidate.roles
-        });
-        associations.push(candidate);
-        let status = match persist_associations(&self.association_path, &associations) {
-            Ok(()) => {
-                self.associations = associations;
-                0
-            }
-            Err(error) => errno(error),
-        };
-        self.reply_status(sender, request.request_id, -(status as i32), 0);
-    }
-
-    fn association_remove(&mut self, sender: u64, request: protocol::Message<'_>) {
-        let Some((extension, content_type, roles)) = decode_association_key(request.payload) else {
-            self.reply_status(
-                sender,
-                request.request_id,
-                mochi_user_syscall::EINVAL as i32,
-                0,
-            );
-            return;
-        };
-        let mut associations = self.associations.clone();
-        associations.retain(|association| {
-            association.extension != extension
-                || association.content_type != content_type
-                || association.roles != roles
-        });
-        let status = match persist_associations(&self.association_path, &associations) {
-            Ok(()) => {
-                self.associations = associations;
-                0
-            }
-            Err(error) => errno(error),
-        };
-        self.reply_status(sender, request.request_id, -(status as i32), 0);
-    }
-
     fn association_resolve(&self, sender: u64, request: protocol::Message<'_>) {
         let Some((extension, content_type, roles)) = decode_association_key(request.payload) else {
             self.reply_status(
@@ -1305,6 +1288,10 @@ impl WorkspaceService {
             );
             return;
         };
+        let Ok(requester_image) = panel_requester_image(sender) else {
+            self.reply_status(sender, request.request_id, mochi_user_syscall::EACCES as i32, 0);
+            return;
+        };
         if context.process_id == 0
             || !options.executable.starts_with('/')
             || options.executable.as_bytes().contains(&0)
@@ -1402,6 +1389,8 @@ impl WorkspaceService {
             token,
             mode: options.mode,
             allowed_content_types: options.allowed_content_types.to_owned(),
+            object_reply: request.opcode == protocol::OP_FILE_PANEL_OBJECT,
+            requester_image,
         });
         // The request intentionally remains unanswered until the trusted picker
         // reports a selection or cancellation.
@@ -1466,8 +1455,12 @@ impl WorkspaceService {
         }
         let outcome = {
             let pending = &self.pending_file_panels[index];
+            if panel_requester_image(pending.grant_endpoint).ok() != Some(pending.requester_image) {
+                self.reply_status(sender, request.request_id, mochi_user_syscall::EACCES as i32, 0);
+                return;
+            }
             validate_panel_selection(pending, result.path).and_then(|path| {
-                require_file_panel_authority(pending)?;
+                if !pending.object_reply { require_file_panel_authority(pending)?; }
                 Ok(path)
             })
         };
@@ -1480,6 +1473,12 @@ impl WorkspaceService {
                 return;
             }
         };
+        let file = if self.pending_file_panels[index].object_reply {
+            match self.file_targets.select(&self.posix, &path, self.pending_file_panels[index].mode) {
+                Ok(file) => Some(file),
+                Err(status) => { self.reply_status(sender, request.request_id, -(status as i32), 0); return; }
+            }
+        } else { None };
         let pending = &mut self.pending_file_panels[index];
         let requester_endpoint = pending
             .requester_endpoint
@@ -1490,7 +1489,24 @@ impl WorkspaceService {
         let requester_process = pending.requester_process;
         let picker_process = pending.picker_process;
         pending.selection_delivered = true;
-        self.reply_file_panel_result(requester_endpoint, requester_request_id, 0, token, &path);
+        if let Some((file, target)) = file {
+            let mut payload = vec![0; protocol::FILE_PANEL_RESULT_PREFIX_LEN + path.len()];
+            let length = protocol::encode_file_panel_result(protocol::FilePanelResult { status: 0, token, path: &path }, &mut payload).expect("validated selection");
+            let mut output = vec![0; protocol::HEADER_LEN + length];
+            let length = protocol::encode(protocol::OP_FILE_PANEL_RESULT, requester_request_id, 0, &payload[..length], &mut output).expect("validated selection");
+            let mut objects = platform::ipc::IpcObjectHandles::default();
+            objects.count = 1;
+            objects.handles[0] = platform::ipc::IpcObjectHandle { handle: file.handle, reserved: 0, rights: file.rights };
+            if let Some(target) = target {
+                objects.count = 2;
+                objects.handles[1] = platform::ipc::IpcObjectHandle { handle: target.handle, reserved: 0, rights: target.rights };
+            }
+            let _ = platform::ipc::reply_object_handles(requester_endpoint, &output[..length], &objects);
+            let _ = platform::handle::close(file.handle);
+            if let Some(target) = target { let _ = platform::handle::close(target.handle); }
+        } else {
+            self.reply_file_panel_result(requester_endpoint, requester_request_id, 0, token, &path);
+        }
         // Dismiss the picker as soon as the user confirms a destination. Its
         // event loop must not remain synchronously blocked while the requesting
         // application performs I/O; otherwise every control in the visible
@@ -1634,7 +1650,7 @@ fn valid_file_panel_content_types(value: &str) -> bool {
 }
 
 fn validate_panel_selection(pending: &PendingFilePanel, selected: &str) -> Result<String, u64> {
-    if selected.is_empty() || !selected.starts_with('/') || selected.as_bytes().contains(&0) {
+    if selected.len() + protocol::FILE_PANEL_RESULT_PREFIX_LEN + protocol::HEADER_LEN > protocol::MAX_MESSAGE_LEN || selected.is_empty() || !selected.starts_with('/') || selected.as_bytes().contains(&0) {
         return Err(error::status_errno(mochi_user_syscall::EINVAL as i64));
     }
     let home = std::env::var_os("HOME")
@@ -1642,7 +1658,7 @@ fn validate_panel_selection(pending: &PendingFilePanel, selected: &str) -> Resul
         .and_then(|path| fs::canonicalize(path).ok())
         .ok_or(error::status_errno(mochi_user_syscall::EACCES as i64))?;
     let path = Path::new(selected);
-    let validated = if pending.mode == protocol::FILE_PANEL_MODE_OPEN {
+    let validated = if pending.mode != protocol::FILE_PANEL_MODE_SAVE {
         let canonical = fs::canonicalize(path).map_err(errno)?;
         if !canonical.is_file() {
             return Err(error::status_errno(i64::from(
@@ -1723,7 +1739,7 @@ fn require_file_panel_authority(pending: &PendingFilePanel) -> Result<(), u64> {
     // kernel pathname registry. Existing file capabilities keep working;
     // otherwise a broker returning a rights-restricted FileHandle is required.
     let capabilities = match pending.mode {
-        protocol::FILE_PANEL_MODE_OPEN => ["fs.read.user", "fs.read.all"],
+        protocol::FILE_PANEL_MODE_OPEN | protocol::FILE_PANEL_MODE_EDIT => ["fs.read.user", "fs.read.all"],
         protocol::FILE_PANEL_MODE_SAVE => ["fs.write.user", "fs.write.all"],
         _ => return Err(error::status_errno(mochi_user_syscall::EINVAL as i64)),
     };
@@ -1740,6 +1756,11 @@ fn require_file_panel_authority(pending: &PendingFilePanel) -> Result<(), u64> {
         mochi_user_syscall::NativeError::Unsupported.into_raw() as i64,
     ))
 }
+
+fn panel_requester_image(endpoint: u64) -> Result<platform::syscall::ProcessImageInfo, platform::syscall::SysError> {
+    platform::execution_peer::capture(endpoint).map(|peer| peer.image)
+}
+
 
 fn set_process_modal(opcode: u32, owner_process: u64, modal_process: u64) -> Result<(), u64> {
     if !matches!(
@@ -2566,6 +2587,13 @@ fn main() {
         }
     };
     let mut service = WorkspaceService::load(endpoint, posix, session);
+    let receiver = match platform::ipc::create_handle() {
+        Ok(handle) => OwnedObjectHandle(handle),
+        Err(error) => {
+            let _ = platform::service_ready::notify(ready_target, -(error.raw().unsigned_abs() as i32));
+            platform::process::exit(1);
+        }
+    };
     if platform::service_ready::notify(ready_target, 0).is_err() {
         platform::logln!("workspace.service: ready notification failed");
         platform::process::exit(1);
@@ -2578,11 +2606,20 @@ fn main() {
         platform::logln!("workspace.service: crash watcher unavailable: {error}");
     }
     let mut buffer = vec![0u8; protocol::MAX_MESSAGE_LEN];
+    let mut wait_items = [mochi_user_syscall::HandleWaitItem::default(); mnu_abi::HANDLE_WAIT_MANY_MAX_ITEMS];
     loop {
+        service.expire_associations();
         let mut handles = platform::ipc::IpcObjectHandles::default();
-        let message = match platform::ipc::wait_object_handles(endpoint, &mut buffer, &mut handles)
+        let message = match platform::ipc::try_wait_object_handles(&mut buffer, &mut handles)
         {
             Ok(message) => message,
+            Err(error) if error.raw() == mochi_user_syscall::NativeError::NotReady.into_raw() as i64 => {
+                let (count, deadline) = service.association_wait_items(receiver.raw(), &mut wait_items);
+                if let Err(error) = platform::process::wait_many(&mut wait_items[..count], deadline) {
+                    if error.raw() != mochi_user_syscall::NativeError::NotReady.into_raw() as i64 { platform::process::exit(1); }
+                }
+                continue;
+            }
             Err(error) => {
                 eprintln!(
                     "workspace.service: request receive failed errno={}",
@@ -2593,6 +2630,10 @@ fn main() {
         };
         let sender = message >> 32;
         let length = (message & 0xffff_ffff) as usize;
+        if service.file_targets.release(&buffer[..length.min(buffer.len())], &handles, &service.posix) {
+            close_attached_handles(&mut handles);
+            continue;
+        }
         let request = match protocol::decode(&buffer[..length.min(buffer.len())]) {
             Ok(request) => request,
             Err(_) => {

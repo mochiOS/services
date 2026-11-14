@@ -4423,6 +4423,16 @@ impl<H: Copy> PosixService<H> {
             return Err(STATUS_EINVAL);
         }
         let access = request.options & (protocol::OPEN_READ | protocol::OPEN_WRITE);
+        if request.options & protocol::OPEN_DIRECTORY_AUTHORITY != 0
+            && (access != protocol::OPEN_READ | protocol::OPEN_WRITE
+                || request.options & protocol::OPEN_DIRECTORY == 0
+                || request.options & (protocol::OPEN_CREATE | protocol::OPEN_TRUNCATE | protocol::OPEN_APPEND | protocol::OPEN_EXECUTE | protocol::OPEN_CURSOR_RECORDS) != 0)
+        { return Err(STATUS_EINVAL); }
+        if request.options & protocol::OPEN_BENEATH != 0
+            && (request.base != protocol::OpenBase::AttachedDirectory || request.path.first() == Some(&b'/'))
+        {
+            return Err(STATUS_EINVAL);
+        }
         if access == 0
             || request.options & protocol::OPEN_EXECUTE != 0
                 && (access != protocol::OPEN_READ

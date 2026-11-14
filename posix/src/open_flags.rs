@@ -24,6 +24,8 @@ impl PreparedOpen {
                 filesystem::OPEN_AT_CURSOR_RECORDS,
             ),
             (posix::OPEN_EXECUTE, filesystem::OPEN_AT_EXECUTE),
+            (posix::OPEN_BENEATH, filesystem::OPEN_AT_BENEATH),
+            (posix::OPEN_DIRECTORY_AUTHORITY, filesystem::OPEN_AT_DIRECTORY_AUTHORITY),
         ] {
             if self.options & source != 0 {
                 flags |= target;

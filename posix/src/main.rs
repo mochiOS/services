@@ -3602,7 +3602,7 @@ impl RuntimeFilesystem {
             request.effective_uid,
             request.effective_gid,
             &request.supplementary_groups,
-            u32::from(request.base == mochios_posix_protocol::OpenBase::AttachedDirectory),
+            Self::explicit_base_policy(request.base, paths.base),
             &request.path,
         )?;
         let header = filesystem::Header {
@@ -3650,7 +3650,7 @@ impl RuntimeFilesystem {
             request.effective_uid,
             request.effective_gid,
             &request.supplementary_groups,
-            u32::from(request.base == mochios_posix_protocol::OpenBase::AttachedDirectory),
+            Self::explicit_base_policy(request.base, paths.base),
             &request.path,
         )?;
         Ok((
@@ -3816,6 +3816,11 @@ impl RuntimeFilesystem {
         Ok(result)
     }
 
+    fn explicit_base_policy(base: mochios_posix_protocol::OpenBase, object: Option<posix_service::AttachedObject<u32>>) -> u32 {
+        if base != mochios_posix_protocol::OpenBase::AttachedDirectory { return 0; }
+        1 | if object.is_some_and(|o| o.rights & mnu_abi::HANDLE_RIGHT_WRITE != 0) { 1 << 8 } else { 0 }
+    }
+
     fn credential_payload(
         &self,
         effective_uid: u32,
@@ -3831,7 +3836,7 @@ impl RuntimeFilesystem {
             effective_uid,
             effective_gid,
             supplementary_groups,
-            filesystem::namespace_policy::NamespacePolicy { explicit_read_bases, ..self.namespace_policy },
+            filesystem::namespace_policy::NamespacePolicy { explicit_read_bases: explicit_read_bases & 3, explicit_write_bases: (explicit_read_bases >> 8) & 3, ..self.namespace_policy },
             payload,
             &mut encoded,
         )
@@ -3856,7 +3861,7 @@ impl RuntimeFilesystem {
             request.effective_uid,
             request.effective_gid,
             &request.supplementary_groups,
-            u32::from(request.base == mochios_posix_protocol::OpenBase::AttachedDirectory),
+            Self::explicit_base_policy(request.base, paths.base),
             &request.path,
         )?;
         self.empty_call(
@@ -4050,7 +4055,7 @@ impl RuntimeFilesystem {
             handles.handles[index] = platform::ipc::IpcObjectHandle {
                 handle: object.handle,
                 reserved: 0,
-                rights: required,
+                rights: required | (object.rights & platform::handle::HANDLE_RIGHT_WRITE),
             };
             handles.count += 1;
         }
@@ -4076,7 +4081,7 @@ impl RuntimeFilesystem {
             handles.handles[index] = platform::ipc::IpcObjectHandle {
                 handle: object.handle,
                 reserved: 0,
-                rights: required,
+                rights: required | (object.rights & platform::handle::HANDLE_RIGHT_WRITE),
             };
             handles.count += 1;
         }
@@ -4218,7 +4223,7 @@ impl posix_service::FilesystemBackend<mochi_user_platform::handle::Handle> for R
             request.effective_uid,
             request.effective_gid,
             &request.supplementary_groups,
-            u32::from(request.base == mochios_posix_protocol::OpenBase::AttachedDirectory),
+            Self::explicit_base_policy(request.base, paths.base),
             &request.path,
         )?;
         self.open_call(
@@ -4251,7 +4256,7 @@ impl posix_service::FilesystemBackend<mochi_user_platform::handle::Handle> for R
             request.effective_uid,
             request.effective_gid,
             &request.supplementary_groups,
-            u32::from(request.base == mochios_posix_protocol::OpenBase::AttachedDirectory),
+            Self::explicit_base_policy(request.base, paths.base),
             &request.path,
         )?;
         let bytes = self.payload_call(
@@ -4285,7 +4290,7 @@ impl posix_service::FilesystemBackend<mochi_user_platform::handle::Handle> for R
             request.effective_uid,
             request.effective_gid,
             &request.supplementary_groups,
-            u32::from(request.base == mochios_posix_protocol::OpenBase::AttachedDirectory),
+            Self::explicit_base_policy(request.base, paths.base),
             &request.path,
         )?;
         let bytes = self.payload_call(
@@ -4326,7 +4331,7 @@ impl posix_service::FilesystemBackend<mochi_user_platform::handle::Handle> for R
             request.effective_uid,
             request.effective_gid,
             &request.supplementary_groups,
-            u32::from(request.base == mochios_posix_protocol::OpenBase::AttachedDirectory),
+            Self::explicit_base_policy(request.base, paths.base),
             &body,
         )?;
         let bytes = self.payload_call(
@@ -4361,7 +4366,7 @@ impl posix_service::FilesystemBackend<mochi_user_platform::handle::Handle> for R
             request.effective_uid,
             request.effective_gid,
             &request.supplementary_groups,
-            u32::from(request.base == mochios_posix_protocol::OpenBase::AttachedDirectory),
+            Self::explicit_base_policy(request.base, paths.base),
             &request.path,
         )?;
         self.payload_call(
@@ -4396,7 +4401,7 @@ impl posix_service::FilesystemBackend<mochi_user_platform::handle::Handle> for R
             request.effective_uid,
             request.effective_gid,
             &request.supplementary_groups,
-            u32::from(request.base == mochios_posix_protocol::OpenBase::AttachedDirectory),
+            Self::explicit_base_policy(request.base, paths.base),
             &request.path,
         )?;
         let status = self.status_call(
@@ -4626,7 +4631,7 @@ impl posix_service::FilesystemBackend<mochi_user_platform::handle::Handle> for R
             request.effective_uid,
             request.effective_gid,
             &request.supplementary_groups,
-            u32::from(request.base == mochios_posix_protocol::OpenBase::AttachedDirectory),
+            Self::explicit_base_policy(request.base, paths.base),
             &request.path,
         )?;
         self.empty_call(
@@ -4664,7 +4669,7 @@ impl posix_service::FilesystemBackend<mochi_user_platform::handle::Handle> for R
             request.effective_uid,
             request.effective_gid,
             &request.supplementary_groups,
-            u32::from(request.old_base == mochios_posix_protocol::OpenBase::AttachedDirectory) | (u32::from(request.new_base == mochios_posix_protocol::OpenBase::AttachedDirectory) << 1),
+            Self::explicit_base_policy(request.old_base, paths.old_base) | (Self::explicit_base_policy(request.new_base, paths.new_base) << 1),
             &operation,
         )?;
         self.empty_call(
@@ -4707,7 +4712,7 @@ impl posix_service::FilesystemBackend<mochi_user_platform::handle::Handle> for R
             request.effective_uid,
             request.effective_gid,
             &request.supplementary_groups,
-            u32::from(request.old_base == mochios_posix_protocol::OpenBase::AttachedDirectory) | (u32::from(request.new_base == mochios_posix_protocol::OpenBase::AttachedDirectory) << 1),
+            Self::explicit_base_policy(request.old_base, paths.old_base) | (Self::explicit_base_policy(request.new_base, paths.new_base) << 1),
             &operation,
         )?;
         self.empty_call(
@@ -4764,7 +4769,7 @@ impl posix_service::FilesystemBackend<mochi_user_platform::handle::Handle> for R
             request.effective_uid,
             request.effective_gid,
             &request.supplementary_groups,
-            u32::from(request.base == mochios_posix_protocol::OpenBase::AttachedDirectory),
+            Self::explicit_base_policy(request.base, paths.base),
             &operation,
         )?;
         self.empty_call(
@@ -4796,7 +4801,7 @@ impl posix_service::FilesystemBackend<mochi_user_platform::handle::Handle> for R
             request.effective_uid,
             request.effective_gid,
             &request.supplementary_groups,
-            u32::from(request.base == mochios_posix_protocol::OpenBase::AttachedDirectory),
+            Self::explicit_base_policy(request.base, paths.base),
             &request.path,
         )?;
         self.payload_call(
@@ -4867,7 +4872,7 @@ impl posix_service::FilesystemBackend<mochi_user_platform::handle::Handle> for R
             request.effective_uid,
             request.effective_gid,
             &request.supplementary_groups,
-            u32::from(request.base == mochios_posix_protocol::OpenBase::AttachedDirectory),
+            Self::explicit_base_policy(request.base, paths.base),
             &request.path,
         )?;
         self.empty_call(
@@ -4903,7 +4908,7 @@ impl posix_service::FilesystemBackend<mochi_user_platform::handle::Handle> for R
             request.effective_uid,
             request.effective_gid,
             &request.supplementary_groups,
-            u32::from(request.base == mochios_posix_protocol::OpenBase::AttachedDirectory),
+            Self::explicit_base_policy(request.base, paths.base),
             &request.path,
         )?;
         self.empty_call(
@@ -4948,7 +4953,7 @@ impl posix_service::FilesystemBackend<mochi_user_platform::handle::Handle> for R
             request.uid,
             request.gid,
             &request.supplementary_groups,
-            u32::from(request.base == mochios_posix_protocol::OpenBase::AttachedDirectory),
+            Self::explicit_base_policy(request.base, paths.base),
             &request.path,
         )?;
         self.empty_call(

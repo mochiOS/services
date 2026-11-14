@@ -12,6 +12,7 @@ use user_service::{password, storage};
 mod administrator;
 mod public_endpoint;
 mod administrator_authentication;
+mod self_account;
 
 const READ_CAPABILITY: &str = "account.other.read";
 const MODIFY_CAPABILITY: &str = "account.other.modify";
@@ -30,6 +31,7 @@ struct UserService {
     groups: mochios_user_database::groups::GroupDatabase,
     groups_healthy: bool,
     administrator_authentication: administrator_authentication::Limiter,
+    own_password_limiter: self_account::Limiter,
 }
 
 impl UserService {
@@ -46,6 +48,7 @@ impl UserService {
             generation: 1,
             healthy: true,
             administrator_authentication: administrator_authentication::Limiter::default(),
+            own_password_limiter: self_account::Limiter::default(),
         })
     }
 
@@ -230,17 +233,25 @@ impl UserService {
             self.reply_status(sender, 0, mochi_user_syscall::EINVAL);
             return;
         };
-        let Some(existing) = self.database.find_name(request.name) else {
-            self.reply_status(sender, request.request_id, mochi_user_syscall::ENOENT);
+        self.replace_password(sender, request.request_id, request.name, request.password, || Ok(()));
+    }
+
+    fn replace_password(&mut self, sender: u64, request_id: u64, name: &str, password_bytes: &[u8], revalidate: impl Fn() -> Result<(), i32>) {
+        let Some(existing) = self.database.find_name(name) else {
+            self.reply_status(sender, request_id, mochi_user_syscall::ENOENT);
             return;
         };
-        let password_hash = match password::hash(request.password) {
+        let password_hash = match password::hash(password_bytes) {
             Ok(password_hash) => password_hash,
             Err(_) => {
-                self.reply_status(sender, request.request_id, mochi_user_syscall::EIO);
+                self.reply_status(sender, request_id, mochi_user_syscall::EIO);
                 return;
             }
         };
+        if let Err(status) = revalidate() {
+            self.reply_status(sender, request_id, i64::from(status) as u64);
+            return;
+        }
         // Publish both old/new encrypted key wrappers before changing the
         // account DB. A crash or failed save keeps the old login recoverable.
         let prepared = user_service::keychain::Connection::connect().and_then(|c| {
@@ -248,37 +259,73 @@ impl UserService {
                 existing.uid,
                 &existing.password_hash,
                 &password_hash,
-                request.password,
+                password_bytes,
             )
         });
         if prepared.is_err() {
-            self.reply_status(sender, request.request_id, mochi_user_syscall::EIO);
+            self.reply_status(sender, request_id, mochi_user_syscall::EIO);
             return;
         }
         let mut candidate = self.database.clone();
         let Some(user) = candidate.find_name_mut(&existing.name) else {
-            self.reply_status(sender, request.request_id, mochi_user_syscall::ENOENT);
+            self.reply_status(sender, request_id, mochi_user_syscall::ENOENT);
             return;
         };
         user.password_hash = password_hash;
         user.locked = false;
+        if let Err(status) = revalidate() {
+            self.reply_status(sender, request_id, i64::from(status) as u64);
+            return;
+        }
         let status = match self.save_candidate("set-password", candidate) {
             Ok(()) => 0,
             Err(status) => status,
         };
         if status == 0 {
-            if let Some(user) = self.database.find_name(request.name) {
+            if let Some(user) = self.database.find_name(name) {
                 // Initial account setup can proceed straight to session
                 // activation without another password-entry screen.
                 if user_service::keychain::Connection::connect()
-                    .and_then(|c| c.verified_login(user.uid, &user.password_hash, request.password))
+                    .and_then(|c| c.verified_login(user.uid, &user.password_hash, password_bytes))
                     .is_err()
                 {
                     diagnostic("user.service: password saved; keychain login handoff unavailable");
                 }
             }
         }
-        self.reply_status(sender, request.request_id, status);
+        self.reply_status(sender, request_id, status);
+    }
+
+    fn handle_self_info(&self, client: &mochios_posix_client::Client<mochios_posix_client::SyscallEndpointTransport>, sender: u64, bytes: &[u8]) {
+        let result = (|| {
+            let request = mochios_user_protocol::self_account::Info::decode(bytes).map_err(|_| -22)?;
+            let caller = self_account::capture(client, sender, false)?;
+            let user = self.database.find_uid(caller.uid).filter(|_| self.healthy).ok_or(-13)?;
+            let record = mochios_user_protocol::public_account::Record { uid: user.uid, gid: user.gid, name: &user.name, display_name: &user.display_name, home: &user.home, shell: &user.shell };
+            let mut reply = [0; MAX_MESSAGE_LEN];
+            let n = mochios_user_protocol::self_account::encode_info(request.request_id, record, &mut reply).map_err(|_| -5)?;
+            platform::ipc::reply(sender, &reply[..n]).map_err(|_| -5)?;
+            Ok::<_, i32>(())
+        })();
+        if let Err(status) = result { let id = mochios_user_protocol::self_account::Info::decode(bytes).map(|r| r.request_id).unwrap_or(0); self.reply_status(sender, id, i64::from(status) as u64); }
+    }
+
+    fn handle_change_own_password(&mut self, client: &mochios_posix_client::Client<mochios_posix_client::SyscallEndpointTransport>, sender: u64, bytes: &[u8]) {
+        let result = (|| {
+            let request = mochios_user_protocol::self_account::ChangePassword::decode(bytes).map_err(|_| -22)?;
+            let caller = self_account::capture(client, sender, true)?;
+            let now = platform::time::monotonic_nanoseconds().map_err(|_| -5)?;
+            self.own_password_limiter.check(caller.uid, now)?;
+            let user = self.database.find_uid(caller.uid).filter(|user| self.healthy && !user.locked).ok_or(-13)?;
+            let verified = password::verify(request.current, &user.password_hash);
+            let name = user.name.clone();
+            if !verified { self.own_password_limiter.failed(caller.uid, now); return Err(-13); }
+            caller.revalidate(client, sender)?;
+            self.own_password_limiter.succeeded(caller.uid);
+            self.replace_password(sender, request.request_id, &name, request.replacement, || caller.revalidate(client, sender));
+            Ok::<_, i32>(())
+        })();
+        if let Err(status) = result { let id = mochios_user_protocol::self_account::ChangePassword::decode(bytes).map(|r| r.request_id).unwrap_or(0); self.reply_status(sender, id, i64::from(status) as u64); }
     }
 
     fn handle_authenticate(&self, sender: u64, request: &[u8]) {
@@ -467,10 +514,13 @@ fn main() {
         }
         let required_capability = match opcode {
             Ok(Opcode::SnapshotBegin | Opcode::SnapshotChunk) => READ_CAPABILITY,
+            Ok(Opcode::SelfInfo) => "account.self.read",
+            Ok(Opcode::ChangeOwnPassword) => "account.self.modify",
             Ok(Opcode::AddUser | Opcode::RemoveUser | Opcode::SetPassword) => MODIFY_CAPABILITY,
             Ok(Opcode::Authenticate | Opcode::VerifyAdministrator) => AUTHENTICATE_CAPABILITY,
             _ => {
                 service.reply_status(sender, 0, mochi_user_syscall::EINVAL);
+                buffer.zeroize();
                 continue;
             }
         };
@@ -480,6 +530,7 @@ fn main() {
                 required_capability
             );
             service.reply_status(sender, 0, mochi_user_syscall::EACCES);
+            buffer.zeroize();
             continue;
         }
         if required_capability == MODIFY_CAPABILITY && !administrator::permits(&posix, sender) {
@@ -499,6 +550,8 @@ fn main() {
             Ok(Opcode::AddUser) => service.handle_add(sender, request),
             Ok(Opcode::RemoveUser) => service.handle_remove(sender, request),
             Ok(Opcode::SetPassword) => service.handle_set_password(sender, request),
+            Ok(Opcode::SelfInfo) => service.handle_self_info(&posix, sender, request),
+            Ok(Opcode::ChangeOwnPassword) => service.handle_change_own_password(&posix, sender, request),
             Ok(Opcode::Authenticate) => service.handle_authenticate(sender, request),
             Ok(Opcode::VerifyAdministrator) => {
                 let id = mochios_user_protocol::VerifyAdministrator::decode(request).map(|request| request.request_id).unwrap_or(0);

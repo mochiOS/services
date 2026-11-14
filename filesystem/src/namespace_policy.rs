@@ -110,7 +110,8 @@ impl FilesystemService {
             return Ok(());
         }
         let target = self.authority_path(path, anchors, follow, credentials)?;
-        if !write && path.first() != Some(&b'/') && scope.explicit_read_bases & base_slot != 0 {
+        if path.first() != Some(&b'/') && scope.explicit_read_bases & base_slot != 0
+            && (!write || scope.explicit_write_bases & base_slot != 0) {
             if let Some(base) = anchors.base_open_id {
                 let base = self.authority_path(
                     b".",
@@ -162,7 +163,10 @@ impl FilesystemService {
             });
         if let Some(user) = store_user {
             let end = user.iter().position(|byte| *byte == b'/').unwrap_or(user.len());
-            if self.owns_home_name(&user[..end], credentials) { required |= policy::USER; }
+            // Reserved private stores are reached through owner-issued
+            // directory authority, even for apps with broad home access.
+            let private = within(&user[end..], b"/private");
+            if !private && self.owns_home_name(&user[..end], credentials) { required |= policy::USER; }
         }
         if let Some(rest) = target.strip_prefix(b"/home/") {
             let name_len = rest

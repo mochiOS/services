@@ -447,7 +447,17 @@ impl FilesystemService {
         {
             return Err(EINVAL);
         }
+        let anchors = if request.flags & protocol::OPEN_AT_BENEATH != 0 {
+            if payload.first() == Some(&b'/') { return Err(EINVAL); }
+            let base = anchors.base_open_id.ok_or(EINVAL)?;
+            PathAnchors { root_open_id: Some(base), base_open_id: Some(base) }
+        } else { anchors };
         let access = request.flags & (protocol::OPEN_AT_READ | protocol::OPEN_AT_WRITE);
+        let directory_authority = request.flags & protocol::OPEN_AT_DIRECTORY_AUTHORITY != 0;
+        if directory_authority && (access != protocol::OPEN_AT_READ | protocol::OPEN_AT_WRITE
+            || request.flags & protocol::OPEN_AT_DIRECTORY == 0
+            || request.flags & (protocol::OPEN_AT_CREATE | protocol::OPEN_AT_TRUNCATE | protocol::OPEN_AT_APPEND | protocol::OPEN_AT_EXECUTE | protocol::OPEN_AT_CURSOR_RECORDS) != 0)
+        { return Err(EINVAL); }
         let search = request.flags & protocol::OPEN_AT_SEARCH != 0;
         let execute = request.flags & protocol::OPEN_AT_EXECUTE != 0;
         if access == 0 && !search
@@ -559,13 +569,15 @@ impl FilesystemService {
         if request.flags & protocol::OPEN_AT_DIRECTORY != 0 && !kind.is_dir() {
             return Err(ENOTDIR);
         }
-        if kind.is_dir() && request.flags & protocol::OPEN_AT_WRITE != 0 {
+        if kind.is_dir() && request.flags & protocol::OPEN_AT_WRITE != 0 && !directory_authority {
             return Err(EISDIR);
         }
         // Executable loading reads bytes through this retained object, but POSIX
         // image admission requires execute mode, not read mode. Ambient native
         // file authority is checked separately by the authenticated request.
-        let requested_access = if search || execute {
+        let requested_access = if directory_authority {
+            protocol::ACCESS_AT_READ | protocol::ACCESS_AT_WRITE | protocol::ACCESS_AT_EXECUTE
+        } else if search || execute {
             protocol::ACCESS_AT_EXECUTE
         } else {
             (u32::from(request.flags & protocol::OPEN_AT_READ != 0) * protocol::ACCESS_AT_READ)

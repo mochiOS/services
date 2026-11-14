@@ -4176,3 +4176,88 @@ mod object_limits;
 
 #[path = "support/device_observation_path.rs"]
 mod device_observation_path;
+
+#[test]
+fn beneath_open_confines_selected_parent_even_with_symlinks_and_dotdot() {
+    for mounted in [false, true] {
+        let mut filesystem = test_filesystem();
+        if mounted { filesystem.mount_devices(b"/dev", Default::default()).unwrap(); }
+        let outside = filesystem.open_at(protocol::Header {
+            flags: protocol::OPEN_AT_READ | protocol::OPEN_AT_WRITE | protocol::OPEN_AT_CREATE,
+            mode: 0o600, ..Default::default()
+        }, b"/outside/secret", PathAnchors::default(), root_credentials()).unwrap().header.open_id;
+        filesystem.provider_write(outside, b"outside").unwrap();
+        let parent = filesystem.open_at(protocol::Header {
+            flags: protocol::OPEN_AT_READ | protocol::OPEN_AT_DIRECTORY,
+            ..Default::default()
+        }, b"/jail", PathAnchors::default(), root_credentials()).unwrap().header.open_id;
+        let request = protocol::Header {
+            flags: protocol::OPEN_AT_READ | protocol::OPEN_AT_BENEATH | protocol::OPEN_AT_BASE_ATTACHED,
+            ..Default::default()
+        };
+        let anchors = PathAnchors { base_open_id: Some(parent), ..Default::default() };
+        for path in [b"../outside/secret".as_slice(), b"../../outside/secret", b"escape/secret"] {
+            assert!(matches!(filesystem.open_at(request, path, anchors, root_credentials()), Err(2)), "escape: {path:?}, mounted={mounted}");
+        }
+        assert!(matches!(filesystem.open_at(request, b"/outside/secret", anchors, root_credentials()), Err(22)));
+        assert!(matches!(filesystem.open_at(protocol::Header { flags: protocol::OPEN_AT_READ | protocol::OPEN_AT_BENEATH, ..Default::default() }, b"secret", PathAnchors::default(), root_credentials()), Err(22)));
+        let file = filesystem.open_at(protocol::Header {
+            flags: request.flags | protocol::OPEN_AT_WRITE | protocol::OPEN_AT_CREATE,
+            mode: 0o600, ..Default::default()
+        }, b"inside/selected", anchors, root_credentials()).unwrap().header.open_id;
+        filesystem.provider_write(file, b"selected").unwrap();
+        assert_eq!(filesystem.provider_read_at(file, 0, 8).unwrap(), b"selected");
+        assert_eq!(filesystem.provider_read_at(outside, 0, 7).unwrap(), b"outside");
+        for handle in [file, parent, outside] { filesystem.provider_close(handle).unwrap(); }
+    }
+}
+
+#[test]
+fn explicit_directory_write_authority_is_confined_and_never_inferred_from_uid_or_cwd() {
+    let mut filesystem = test_filesystem();
+    let directory = filesystem.open_at(protocol::Header {
+        flags: protocol::OPEN_AT_READ | protocol::OPEN_AT_WRITE | protocol::OPEN_AT_DIRECTORY | protocol::OPEN_AT_DIRECTORY_AUTHORITY,
+        ..Default::default()
+    }, b"/jail", Default::default(), root_credentials()).unwrap().header.open_id;
+    assert_eq!(filesystem.provider_write(directory, b"not directory records"), Err(21));
+    let anchors = PathAnchors { base_open_id: Some(directory), ..Default::default() };
+    let mut scoped = root_credentials();
+    scoped.namespace = protocol::namespace_policy::NamespacePolicy { explicit_read_bases: 1, explicit_write_bases: 1, ..protocol::namespace_policy::NamespacePolicy::denied() };
+    let create = protocol::Header { flags: protocol::OPEN_AT_READ | protocol::OPEN_AT_WRITE | protocol::OPEN_AT_CREATE | protocol::OPEN_AT_BASE_ATTACHED, mode: 0o600, ..Default::default() };
+    let file = filesystem.open_at(create, b"selected", anchors, scoped).unwrap().header.open_id;
+    filesystem.provider_write(file, b"private").unwrap();
+    assert_eq!(filesystem.provider_read_at(file, 0, 7).unwrap(), b"private");
+    for path in [b"../outside/stolen".as_slice(), b"escape/stolen", b"/outside/stolen"] {
+        assert!(matches!(filesystem.open_at(create, path, anchors, scoped), Err(13)), "{path:?}");
+    }
+    let mut readonly = scoped; readonly.namespace.explicit_write_bases = 0;
+    assert!(matches!(filesystem.open_at(create, b"denied", anchors, readonly), Err(13)));
+    let denied = { let mut c = root_credentials(); c.namespace = protocol::namespace_policy::NamespacePolicy::denied(); c };
+    assert!(matches!(filesystem.open_at(create, b"also-denied", anchors, denied), Err(13)));
+    let old = b"selected"; let mut paths = old.to_vec(); paths.extend_from_slice(b"/outside/stolen");
+    assert!(matches!(filesystem.rename_at(protocol::Header { flags: protocol::RENAME_AT_OLD_BASE_ATTACHED, mode: old.len() as u32, ..Default::default() }, &paths,
+        RenameAnchors { old_base_open_id: Some(directory), ..Default::default() }, scoped), Err(13)));
+    assert_eq!(filesystem.provider_read_at(file, 0, 7).unwrap(), b"private");
+    filesystem.provider_close(file).unwrap(); filesystem.provider_close(directory).unwrap();
+}
+
+#[test]
+fn broad_user_file_access_does_not_include_reserved_application_private_stores() {
+    let mut filesystem = test_filesystem();
+    for directory in ["/home", "/home/root", "/libraries", "/libraries/applications",
+        "/libraries/applications/test", "/libraries/applications/test/users",
+        "/libraries/applications/test/users/root", "/libraries/applications/test/users/root/private"] {
+        filesystem.mkdir_at(protocol::Header { mode: 0o700, ..Default::default() }, directory.as_bytes(), Default::default(), root_credentials()).unwrap();
+    }
+    for path in ["/libraries/applications/test/users/root/legacy", "/libraries/applications/test/users/root/private/secret"] {
+        let file = filesystem.open_at(protocol::Header { flags: protocol::OPEN_AT_READ | protocol::OPEN_AT_WRITE | protocol::OPEN_AT_CREATE, mode: 0o600, ..Default::default() }, path.as_bytes(), Default::default(), root_credentials()).unwrap().header.open_id;
+        filesystem.provider_write(file, b"data").unwrap(); filesystem.provider_close(file).unwrap();
+    }
+    let mut caller = root_credentials();
+    caller.namespace = protocol::namespace_policy::NamespacePolicy { read: protocol::namespace_policy::USER, write: protocol::namespace_policy::USER, ..protocol::namespace_policy::NamespacePolicy::denied() };
+    let read = protocol::Header { flags: protocol::OPEN_AT_READ, ..Default::default() };
+    let legacy = filesystem.open_at(read, b"/libraries/applications/test/users/root/legacy", Default::default(), caller).unwrap().header.open_id;
+    filesystem.provider_close(legacy).unwrap();
+    assert!(matches!(filesystem.open_at(read, b"/libraries/applications/test/users/root/private/secret", Default::default(), caller), Err(13)));
+    assert!(matches!(filesystem.open_at(protocol::Header { flags: protocol::OPEN_AT_WRITE | protocol::OPEN_AT_CREATE, mode: 0o600, ..Default::default() }, b"/libraries/applications/test/users/root/private/new", Default::default(), caller), Err(13)));
+}

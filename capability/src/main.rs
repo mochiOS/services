@@ -3,6 +3,8 @@ extern crate alloc;
 use mochi_user_platform as platform;
 
 mod app_spawn;
+mod application_data;
+mod application_data_identity;
 mod administrator;
 mod package_approval;
 mod app_stdio;

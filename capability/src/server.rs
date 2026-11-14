@@ -349,6 +349,20 @@ pub(crate) fn serve_capability_requests(mut state: CapabilityServiceState) -> ! 
             if !released { capability_reply(sender, 13); }
             continue;
         }
+        if opcode == platform::capability::application_data::OPCODE {
+            let result = crate::application_data::request(sender, slice, &attached);
+            close_received_handles(&attached);
+            match result {
+                Ok(object) => {
+                    let mut objects = platform::ipc::IpcObjectHandles::default(); objects.count = 1;
+                    objects.handles[0] = platform::ipc::IpcObjectHandle { handle: object.handle, reserved: 0, rights: object.rights };
+                    let _ = platform::ipc::reply_object_handles(sender, &0i64.to_le_bytes(), &objects);
+                    let _ = platform::handle::close(object.handle);
+                }
+                Err(error) => { let _ = platform::ipc::reply(sender, &(-(error_status(error) as i64)).to_le_bytes()); }
+            }
+            continue;
+        }
         if opcode == platform::capability::executables::OPCODE {
             let result = crate::executable_tokens::request(&state, sender, slice, &attached);
             close_received_handles(&attached);
