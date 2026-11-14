@@ -114,14 +114,16 @@ fn contains(name:&str)->bool{PROCESS.with_borrow(|p|{let p=p.as_ref().unwrap();i
 fn count()->usize{PROCESS.with_borrow(|p|{let p=p.as_ref().unwrap();p.caps.len()+p.authorities.len()})}
 fn restrict(parent:&str,child:&str)->u64{restrict_capability(parent.as_ptr() as u64,parent.len() as u64,child.as_ptr() as u64,child.len() as u64)}
 fn main(){
+    Capability::try_intern("fs.read.all").unwrap();
+    Capability::try_intern("fs.read.tmp").unwrap();
     set("fs.read.all",None);
     task::authority_transition::FROZEN.set(Some(23));
-    assert_eq!(restrict("fs.read.all","fs.read.tmp"),Error::ResourceUnavailable.into_raw());
+    assert_eq!(restrict("unsandboxed","process.spawn"),Error::ResourceUnavailable.into_raw());
     assert_eq!(drop_capability("fs.read.all".as_ptr() as u64,11),Error::ResourceUnavailable.into_raw());
     assert_eq!(clone_capability("fs.read.all".as_ptr() as u64,11),SUCCESS);
     assert!(contains("fs.read.all"));assert_eq!(count(),1);
     task::authority_transition::FROZEN.set(None);
-    for (parent,child) in [("fs.read.all","fs.read.tmp"),("memory.phys.map@4096:8192","memory.phys.map@4096:4096")] {
+    for (parent,child) in [("unsandboxed","process.spawn"),("memory.phys.map@4096:8192","memory.phys.map@4096:4096")] {
         for failure in 0..2 {
             set(parent,None);FAIL_AFTER.set(Some(failure));assert_eq!(restrict(parent,child),Error::ResourceUnavailable.into_raw());assert!(FAIL_AFTER.get().is_none());assert!(contains(parent));assert!(!contains(child));assert_eq!(count(),1);assert!(!LOCKED.get());
         }
@@ -136,10 +138,11 @@ fn main(){
         set(parent,None);CONTEXT.set(false);assert_eq!(restrict(parent,child),Error::NotReady.into_raw());assert_eq!(COPIES.get(),0);assert!(contains(parent));
         set(parent,None);PROCESS.set(None);assert_eq!(restrict(parent,child),Error::NotReady.into_raw());
     }
+    set("fs.read.all",None);assert_eq!(restrict("fs.read.all","fs.read.tmp"),Error::AccessDenied.into_raw());assert!(contains("fs.read.all"));
     set("fs.read.all",None);assert_eq!(restrict("fs.read.all","memory.phys.map@4096:4096"),Error::InvalidArgument.into_raw());assert!(contains("fs.read.all"));assert_eq!(count(),1);
     for invalid in ["unknown.capability", "bad..name"]{set("fs.read.all",None);assert_eq!(restrict("fs.read.all",invalid),Error::InvalidArgument.into_raw());assert!(contains("fs.read.all"));}
     set("memory.phys.map@4096:4096",None);assert_eq!(restrict("memory.phys.map@4096:4096","memory.phys.map@8192:4096"),Error::AccessDenied.into_raw());assert!(contains("memory.phys.map@4096:4096"));
-    for (parent,child) in [("fs.read.all","fs.read.tmp"),("memory.phys.map@4096:8192","memory.phys.map@4096:4096")] {
+    for (parent,child) in [("unsandboxed","process.spawn"),("memory.phys.map@4096:8192","memory.phys.map@4096:4096")] {
         let args=(parent.as_ptr() as u64,parent.len() as u64);let narrowed=(child.as_ptr() as u64,child.len() as u64);
         set(parent,None);assert_eq!(clone_capability(args.0,args.1),SUCCESS);assert_eq!(clone_capability(narrowed.0,narrowed.1),SUCCESS);assert!(contains(parent));assert!(!contains(child));assert_eq!(count(),1);
         assert_eq!(drop_capability(narrowed.0,narrowed.1),Error::AccessDenied.into_raw());assert!(contains(parent));assert_eq!(count(),1);

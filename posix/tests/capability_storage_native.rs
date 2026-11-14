@@ -101,8 +101,8 @@ fn main(){
         assert!(!capability_implies(scoped,writable));
         let mut granted=CapabilitySet::empty();
         granted.try_insert(scoped).unwrap();
-        granted.try_insert(Capability::FsReadAll).unwrap();
-        granted.try_insert(Capability::FsWriteAll).unwrap();
+        granted.try_insert(Capability::try_intern("fs.read.all").unwrap()).unwrap();
+        granted.try_insert(Capability::try_intern("fs.write.all").unwrap()).unwrap();
         assert!(granted.contains(scoped));
         assert!(!granted.contains(Capability::DeviceStorage));
         assert!(!capability_implies(scoped,Capability::DeviceStorage));
@@ -143,7 +143,7 @@ fn main(){
     set.try_insert(second).unwrap();assert_eq!(set.len(),2);
     let mut caps=CapabilitySet::empty();FAIL_AFTER.set(Some(0));assert_eq!(caps.try_insert(Capability::ProcessSpawn),Err(Error::ResourceUnavailable));assert!(caps.is_empty());
     caps.try_insert(Capability::ProcessSpawn).unwrap();FAIL_AFTER.set(Some(0));assert_eq!(caps.try_insert(Capability::ProcessSpawn),Ok(()));assert_eq!(FAIL_AFTER.get(),Some(0));FAIL_AFTER.set(None);
-    caps.caps.shrink_to_fit();FAIL_AFTER.set(Some(0));assert_eq!(caps.try_insert(Capability::FsReadAll),Err(Error::ResourceUnavailable));assert_eq!(caps.iter().collect::<Vec<_>>(),[Capability::ProcessSpawn]);
+    caps.caps.shrink_to_fit();FAIL_AFTER.set(Some(0));assert_eq!(caps.try_insert(Capability::ProcessInspect),Err(Error::ResourceUnavailable));assert_eq!(caps.iter().collect::<Vec<_>>(),[Capability::ProcessSpawn]);
     // Compare mixed insertion/removal and ordering with the previous backing.
     let mut oracle=std::collections::BTreeSet::new();let mut sorted=CapabilitySet::empty();
     for step in 0..2000u32 {
@@ -151,9 +151,9 @@ fn main(){
         if step%5==0 {assert_eq!(sorted.remove(cap),oracle.remove(&cap));}else if step%2==0{sorted.insert(cap);oracle.insert(cap);}else{sorted.try_insert(cap).unwrap();oracle.insert(cap);}
         assert_eq!(sorted.iter().collect::<Vec<_>>(),oracle.iter().copied().collect::<Vec<_>>());assert_eq!(sorted.contains_exact(cap),oracle.contains(&cap));assert_eq!(sorted.len(),oracle.len());
     }
-    let mut parent=CapabilitySet::empty();parent.try_insert(Capability::FsReadAll).unwrap();
-    let mut child=CapabilitySet::empty();child.try_insert(Capability::FsReadTmp).unwrap();child.try_insert(Capability::FsReadRemovable).unwrap();
-    assert!(child.is_subset_of(&parent));assert!(!parent.contains(Capability::FsWriteTmp));
+    let mut parent=CapabilitySet::empty();parent.try_insert(Capability::try_intern("fs.read.all").unwrap()).unwrap();
+    let mut child=CapabilitySet::empty();child.try_insert(Capability::try_intern("fs.read.tmp").unwrap()).unwrap();child.try_insert(Capability::try_intern("fs.read.removable").unwrap()).unwrap();
+    assert!(!child.is_subset_of(&parent));assert!(!parent.contains(Capability::try_intern("fs.write.tmp").unwrap()));
     child.try_insert(Capability::Dynamic(100)).unwrap();assert!(!child.is_subset_of(&parent));parent.try_insert(Capability::Unsandboxed).unwrap();assert!(child.is_subset_of(&parent));
     let requests=vec!["process.spawn".to_string(),"memory.phys.map@0x1000:4096".to_string()];
     for allocation in 0..2 {let live=LIVE.load(Ordering::Relaxed);FAIL_AFTER.set(Some(allocation));assert_eq!(parse_requested_exec_grants(&requests).err(),Some(Error::ResourceUnavailable));assert_eq!(FAIL_AFTER.get(),None);assert_eq!(LIVE.load(Ordering::Relaxed),live);}
@@ -163,7 +163,7 @@ fn main(){
     let captured=origin::ImageOrigin::capture(&process).unwrap().unwrap();
     let mut authorization=process::PendingExecSecurity{path:String::new(),authorized_thread:task::ThreadId(23),executable_digest:[9;32],capabilities:process.caps.try_clone().unwrap(),kernel_authorities:process.authorities.try_clone().unwrap(),identity:process.identity.as_ref().unwrap().try_clone().unwrap(),kind:process::PendingExecKind::Spawn,execution_class:mnu_abi::exec::ExecutionClass::Unprivileged,authority_revision:0};
     process.caps.remove(Capability::ProcessSpawn);process.authorities.remove_exact(&first);process.identity=None;process.digest=None;
-    assert!(captured.permits(&authorization));authorization.capabilities.try_insert(Capability::FsReadAll).unwrap();assert!(!captured.permits(&authorization));
+    assert!(captured.permits(&authorization));authorization.capabilities.try_insert(Capability::try_intern("fs.read.all").unwrap()).unwrap();assert!(!captured.permits(&authorization));
     FAIL_AFTER.set(Some(0));assert!(origin::ImageOrigin::capture(&process).unwrap().is_none());assert_eq!(FAIL_AFTER.get(),Some(0));FAIL_AFTER.set(None);
     FAIL_AFTER.set(Some(0));assert!(CapabilitySet::empty().try_clone().unwrap().is_empty());assert!(KernelAuthoritySet::empty().try_clone().unwrap().is_empty());assert_eq!(FAIL_AFTER.get(),Some(0));FAIL_AFTER.set(None);
 }

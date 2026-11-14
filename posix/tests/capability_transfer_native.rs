@@ -98,7 +98,7 @@ pub mod process {
     pub fn set(source:Option<&str>,destination:Option<&str>,reverse:bool){
         let make=|id,name:Option<&str>|{
             let mut caps=CapabilitySet::empty();let mut authorities=KernelAuthoritySet::empty();
-            if let Some(name)=name{if let Some(a)=parse_kernel_authority_spec(name){authorities.insert(a)}else{caps.insert(Capability::from_str(name).unwrap())}}
+            if let Some(name)=name{if let Some(a)=parse_kernel_authority_spec(name){authorities.insert(a)}else{caps.insert(Capability::try_intern(name).unwrap())}}
             Process{id,caps:caps.try_clone().unwrap(),authorities:authorities.try_clone().unwrap()}
         };
         let source=Some(make(1,source));let destination=Some(make(2,destination));
