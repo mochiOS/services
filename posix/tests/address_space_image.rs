@@ -123,6 +123,12 @@ mod task {
         pub fn is_shared(&self) -> bool {
             self.shared
         }
+        pub fn allows_write_at(&self, address: u64) -> bool {
+            self.contains(address)
+        }
+        pub fn allows_execute_at(&self, _: u64) -> bool {
+            false
+        }
     }
     pub struct VmObject {
         pub reserved: std::sync::atomic::AtomicBool,
@@ -242,6 +248,7 @@ mod paging {
         Exclude,
         Shared,
         PrivateWritable,
+        PrivateReadOnly,
         Private,
     }
     #[derive(Default)]

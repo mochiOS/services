@@ -2,18 +2,14 @@
 fn source_write_access_is_invalidated_before_destination_can_fail() {
     let source = include_str!("../../../core/src/mem/paging.rs");
     let clone = &source[source.find("pub fn clone_user_page_table(").unwrap()..];
-    let private = &clone[clone
-        .find("ForkPagePolicy::Private | ForkPagePolicy::PrivateWritable")
-        .unwrap()..];
+    let private = &clone[clone.find("let shared_flags =").unwrap()..];
     let update = private
         .find("pte.set_addr(pte.addr(), shared_flags)")
         .unwrap();
     let revoke = private
         .find("flush_page_if_active(src_table_phys, vaddr)")
         .unwrap();
-    let share = private
-        .find("share_page(dst_l4, vaddr, pte.addr().as_u64(), shared_flags, phys_off)?")
-        .unwrap();
+    let share = private.find("share_page(").unwrap();
     assert!(update < revoke && revoke < share);
     // Native address-space capture now quiesces siblings and synchronizes
     // remote TLBs rather than embedding a single-threaded POSIX restriction.
