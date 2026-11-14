@@ -96,7 +96,7 @@ fn outgoing_reference_is_released_only_after_assembly_switches_stacks() {
         assembly.find("mov rsp, [rsi + 0x00]").unwrap() < assembly.find("xchg [rdx], rcx").unwrap()
     );
     let switching = context
-        .split("let outgoing_marker = crate::percpu::begin_thread_switch(")
+        .split("crate::percpu::begin_thread_switch(")
         .nth(1)
         .unwrap();
     assert!(

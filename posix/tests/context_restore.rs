@@ -4,7 +4,7 @@ use std::process::{Command, Stdio};
 #[test]
 fn production_restore_copies_before_commit_and_rejects_invalid_self_contexts() {
     let source = include_str!("../../../core/src/syscall/upcall.rs");
-    let thread = include_str!("../../../core/src/task/thread.rs");
+    let thread = include_str!("../../../core/src/cpu/context.rs");
     let abi = include_str!("../../../core/crates/abi/src/lib.rs");
     let mut program = String::new();
     let start = thread.find("pub struct UserUpcallContext {").unwrap();

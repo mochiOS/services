@@ -79,10 +79,9 @@ pub fn exhaust(object:&ProcessObject){object.image_revision.store(u64::MAX,Order
 }}
 "#,
     );
-    program.push_str(probe::between(
-        handle,
+    program.push_str(&probe::definition(
+        include_str!("../../../core/src/syscall/handle/process.rs"),
         "fn process_status_of(",
-        "fn write_process_status(",
     ));
     program.push_str(
         r#"
@@ -171,7 +170,10 @@ fn image_revision_is_checked_before_destruction_and_published_at_commit() {
     // Native queries still resolve caller-held WAIT references; revision is
     // not a path/PID lookup or a service-specific syscall.
     let handles = include_str!("../../../core/src/syscall/handle.rs");
-    let status = probe::between(handles, "fn process_status_for(", "fn process_status_of(");
+    let status = &probe::definition(
+        include_str!("../../../core/src/syscall/handle/process.rs"),
+        "fn process_status_for(",
+    );
     assert!(status.contains("object_native(raw, HandleRights::WAIT)"));
     assert!(status.contains("KernelObject::Process(process)"));
 }

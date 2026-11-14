@@ -93,11 +93,19 @@ mod task{
     pub fn suspend_process_threads(id:u64)->usize{assert_eq!(id,7);crate::CALLS.set(crate::CALLS.get()+1);crate::SUSPENDED.get()}
 }
 "#);
-    program.push_str(probe::between(
-        include_str!("../../../core/src/syscall/handle.rs"),
-        "pub fn process_resume(",
-        "pub fn process_terminate(",
-    ));
+    program.push_str(
+        &[
+            probe::definition(
+                include_str!("../../../core/src/syscall/handle/process_control.rs"),
+                "fn process_resume(",
+            ),
+            probe::definition(
+                include_str!("../../../core/src/syscall/handle/process_control.rs"),
+                "fn process_suspend(",
+            ),
+        ]
+        .join("\n"),
+    );
     program.push_str(r#"
 fn main(){
     for operation in [process_resume as fn(u64)->u64,process_suspend as fn(u64)->u64]{
@@ -162,7 +170,7 @@ fn native_process_suspension_is_generic_and_outside_the_posix_protocol() {
 #[test]
 fn suspension_preserves_wait_state_and_resume_does_not_wake_blocked_threads() {
     let thread = include_str!("../../../core/src/task/thread.rs");
-    let handle = include_str!("../../../core/src/syscall/handle.rs");
+    let handle = include_str!("../../../core/src/syscall/handle/process_control.rs");
     assert!(thread.contains("scheduling_suspended: bool"));
     assert!(thread.contains("thread.state() == ThreadState::Ready"));
     assert!(thread.contains("&& !thread.is_scheduling_suspended()"));
@@ -175,7 +183,7 @@ fn suspension_preserves_wait_state_and_resume_does_not_wake_blocked_threads() {
     assert!(service.contains("mochi_user_platform::process::resume_handle(process)"));
     assert!(service.contains("service.apply_process_resume(process_id, processes)"));
 
-    let native_handles = include_str!("../../../core/src/syscall/handle.rs");
+    let native_handles = include_str!("../../../core/src/syscall/handle/process.rs");
     assert!(native_handles.contains("crate::capability::Capability::ProcessKill"));
     let manifest = include_str!("../manifest.toml");
     assert!(manifest.contains("\"process.kill\""));

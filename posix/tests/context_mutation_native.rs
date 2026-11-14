@@ -39,9 +39,8 @@ mod mnu_abi {pub mod status {
         "#[derive(Clone, Debug)]\npub struct ObjectHandleEntry",
         "#[derive(Clone, Debug)]\npub struct ObjectHandleTable",
     ));
-    program.push_str(
-        "struct Table {entries:Vec<(ObjectHandle,ObjectHandleEntry)>}\nimpl Table {\n",
-    );
+    program
+        .push_str("struct Table {entries:Vec<(ObjectHandle,ObjectHandleEntry)>}\nimpl Table {\n");
     program.push_str(probe::between(
         table,
         "    pub fn get(",
@@ -97,11 +96,27 @@ mod task {
 mod production {use crate::{mnu_abi,ObjectHandle};const SUCCESS:u64=0;
 "#,
     );
-    program.push_str(probe::between(
-        include_str!("../../../core/src/syscall/handle.rs"),
-        "pub fn context_handle_set(",
-        "pub fn rights_get(",
-    ));
+    program.push_str(
+        &[
+            probe::definition(
+                include_str!("../../../core/src/syscall/handle/context.rs"),
+                "fn context_handle_set(",
+            ),
+            probe::definition(
+                include_str!("../../../core/src/syscall/handle/context.rs"),
+                "fn context_handle_remove(",
+            ),
+            probe::definition(
+                include_str!("../../../core/src/syscall/handle/context.rs"),
+                "fn context_value_set(",
+            ),
+            probe::definition(
+                include_str!("../../../core/src/syscall/handle/context.rs"),
+                "fn context_value_remove(",
+            ),
+        ]
+        .join("\n"),
+    );
     program.push_str(
         r#"
 }

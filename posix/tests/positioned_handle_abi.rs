@@ -26,7 +26,13 @@ fn positioned_io_uses_native_handles_not_seek_or_posix_rpc() {
     assert!(!implementation.contains("posix_client()"));
     let kernel = include_str!("../../../core/src/syscall/handle.rs");
     assert!(kernel.contains("object_native(raw, required)"));
-    assert!(kernel.contains("HandleRights::WRITE } else { HandleRights::READ"));
+    assert!(
+        kernel
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect::<String>()
+            .contains("ifwrite{HandleRights::WRITE}else{HandleRights::READ}")
+    );
 }
 
 #[test]

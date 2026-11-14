@@ -119,15 +119,22 @@ mod syscall{
 mod upcall{pub use crate::syscall::upcall::*;}
 mod actual{use crate::{mnu_abi,object_native,KernelObject,HandleRights,SUCCESS};
 "#);
-    program.push_str(probe::between(
-        handle,
-        "fn process_status_of(",
-        "pub fn process_status(",
-    ));
-    program.push_str(probe::between(
-        handle,
-        "pub fn process_wait(",
-        "#[derive(Clone)]\nenum WaitTarget",
+    program.push_str(
+        &[
+            probe::definition(
+                include_str!("../../../core/src/syscall/handle/process.rs"),
+                "fn process_status_of(",
+            ),
+            probe::definition(
+                include_str!("../../../core/src/syscall/handle/process.rs"),
+                "fn write_process_status(",
+            ),
+        ]
+        .join("\n"),
+    );
+    program.push_str(&probe::definition(
+        include_str!("../../../core/src/syscall/handle/process.rs"),
+        "fn process_wait(",
     ));
     program.push_str(r#"
 }

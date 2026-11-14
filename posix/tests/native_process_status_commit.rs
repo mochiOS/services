@@ -88,11 +88,19 @@ fn object_native(raw:u64,right:HandleRights)->Result<KernelObject,status::Error>
  match raw{42=>Ok(KernelObject::Process(task::process::object())),43=>Ok(KernelObject::Other),_=>Err(status::Error::InvalidArgument)}
 }
 "#);
-    program.push_str(probe::between(
-        handles,
-        "fn process_status_for(",
-        "fn write_process_status(",
-    ));
+    program.push_str(
+        &[
+            probe::definition(
+                include_str!("../../../core/src/syscall/handle/process.rs"),
+                "fn process_status_for(",
+            ),
+            probe::definition(
+                include_str!("../../../core/src/syscall/handle/process.rs"),
+                "fn process_status_of(",
+            ),
+        ]
+        .join("\n"),
+    );
     program.push_str("fn commit(process:&mut Process,next_image_revision:u64){\n");
     program.push_str(probe::between(
         exec,

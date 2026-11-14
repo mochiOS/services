@@ -40,10 +40,9 @@ mod syscall {pub mod security {pub fn current_process_id()->Option<u64>{crate::C
         .next()
         .unwrap();
     program = program.replace("mod mnu_abi {", &format!("mod mnu_abi {{#[repr(C)]#[derive(Default)]pub struct ProcessMemoryUsage {{{definition}}}\n"));
-    program.push_str(probe::between(
-        include_str!("../../../core/src/syscall/handle.rs"),
-        "pub fn process_memory_read(",
-        "fn process_status_for(",
+    program.push_str(&probe::definition(
+        include_str!("../../../core/src/syscall/handle/process.rs"),
+        "fn process_memory_read(",
     ));
     program.push_str(r#"
 fn main(){
@@ -59,5 +58,11 @@ fn main(){
  CALLER.set(true);VALID.set(true);for output in [0,1,u64::MAX]{assert_eq!(process_memory_read(0,output,16),Error::InvalidAddress.into_raw());}
 }
 "#);
+    program.push_str("mod encoding {use crate::mnu_abi::ProcessMemoryUsage;\n");
+    program.push_str(&probe::definition(
+        include_str!("../../../core/crates/abi/src/lib.rs"),
+        "impl ProcessMemoryUsage {",
+    ));
+    program.push_str("}\n");
     probe::run(&program);
 }

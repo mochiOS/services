@@ -4,11 +4,14 @@ use std::process::{Command, Stdio};
 #[test]
 fn production_interrupt_register_conversion_preserves_every_word_and_validates_return_addresses() {
     let source = include_str!("../../../core/src/syscall/upcall.rs");
-    let thread = include_str!("../../../core/src/task/thread.rs");
-    let begin = thread.find("pub struct UserUpcallContext {").unwrap();
-    let end = begin + thread[begin..].find("\n}\n").unwrap() + 3;
-    let mut program = String::from("#[derive(Clone, Copy, Debug, PartialEq, Eq)]\n");
-    program.push_str(&thread[begin..end]);
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()
+        .unwrap();
+    let mut program = format!(
+        "mod cpu {{ #[path={:?}]pub mod context; }}\nuse cpu::context::UserUpcallContext;\n",
+        root.join("core/src/cpu/context.rs")
+    );
     let abi = include_str!("../../../core/crates/abi/src/lib.rs");
     program.push_str("mod mnu_abi {\n");
     for declaration in [
@@ -36,6 +39,7 @@ fn production_interrupt_register_conversion_preserves_every_word_and_validates_r
 fn main() {
     let mut frame = core::array::from_fn::<_,20,_>(|index|index as u64+100);
     let original=frame;
+    let mut frame:cpu::context::InterruptFrame=unsafe{core::mem::transmute(frame)};
     let context=read_interrupt_context(&frame);
     let snapshot=snapshot_context(context,[0xa7;512]);
     let registers=snapshot.registers;
@@ -50,13 +54,13 @@ fn main() {
         context.rdx,context.rcx,context.rax,context.user_rip,context.user_rflags,context.user_rsp],
         [100,101,102,103,104,105,106,107,108,109,110,111,112,113,114,115,117,118]);
     write_interrupt_context(&mut frame,context);
-    assert_eq!(frame,original);
+    assert_eq!(unsafe{core::mem::transmute_copy::<_,[u64;20]>(&frame)},original);
     let mut updated=context;
     updated.rcx=0x1122334455667788; updated.r11=0x8877665544332211;
     updated.user_rip=0x400000;updated.user_rsp=0x7fff0000;
     write_interrupt_context(&mut frame,updated);
     assert_eq!(read_interrupt_context(&frame),updated);
-    assert_eq!(frame[16],original[16]);assert_eq!(frame[19],original[19]);
+    assert_eq!(frame.iret.cs,original[16]);assert_eq!(frame.iret.ss,original[19]);
     assert!(valid_user_return(&updated));
     for address in [0x800000000000u64,0xffff800000000000,u64::MAX] {
         let mut invalid=updated;invalid.user_rip=address;assert!(!valid_user_return(&invalid));
@@ -151,8 +155,10 @@ fn both_native_entries_use_one_upcall_state_and_only_full_restore_uses_iret() {
         resume.find("current_thread_user_page_table").unwrap()
             < resume.find("resume_usermode").unwrap()
     );
-    assert!(resume.contains("rcx: context.rcx"));
-    assert!(resume.contains("r11: context.r11"));
+    assert!(resume.contains("context.syscall_registers()"));
+    let contexts = include_str!("../../../core/src/cpu/context.rs");
+    assert!(contexts.contains("rcx: self.rcx"));
+    assert!(contexts.contains("r11: self.r11"));
     let entry = include_str!("../../../core/src/syscall/mod.rs");
     assert!(entry.contains("upcall::prepare_interrupt_return(frame)"));
     assert!(entry.contains("\"cld\",\n        \"call {int80_handler}\""));

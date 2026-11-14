@@ -72,7 +72,7 @@ fn current_process_name_for_log()->Option<String>{Some("probe".into())}
 #[derive(Clone,Copy)] struct Pid(u64);impl Pid{fn as_u64(self)->u64{self.0}}
 mod security {pub fn current_process_id()->Option<crate::Pid>{Some(crate::Pid(7))}}
 mod syscall {pub mod security {pub fn current_process_id()->Option<crate::Pid>{crate::security::current_process_id()}}}
-mod audit {pub enum AuditEventKind{Usercopy} pub fn log(_:AuditEventKind,_:&str){crate::STATE.with_borrow_mut(|s|s.audits+=1);}}
+mod audit { pub fn log_args(kind:AuditEventKind,args:core::fmt::Arguments){log(kind,&args.to_string());}pub enum AuditEventKind{Usercopy} pub fn log(_:AuditEventKind,_:&str){crate::STATE.with_borrow_mut(|s|s.audits+=1);}}
 mod task {
     pub struct Process;impl Process {pub fn page_table(&self)->Option<u64>{crate::current_user_page_table()}}
     pub fn with_process<T>(id:crate::Pid,operation:impl FnOnce(&Process)->T)->Option<T>{

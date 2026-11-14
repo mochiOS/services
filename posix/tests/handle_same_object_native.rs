@@ -68,10 +68,9 @@ mod task {
 mod production {use crate::{mnu_abi,ObjectHandle};
 "#,
     );
-    program.push_str(probe::between(
+    program.push_str(&probe::definition(
         include_str!("../../../core/src/syscall/handle.rs"),
-        "pub fn same_object(",
-        "const PROCESS_HANDLE_RIGHTS:",
+        "fn same_object(",
     ));
     program.push_str(
         r#"

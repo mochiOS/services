@@ -100,11 +100,25 @@ mod task {
     );
     // ProcessId is a nominal ID in the kernel; this probe uses its scalar
     // representation while retaining the exact production control flow.
-    let source = probe::between(
-        include_str!("../../../core/src/syscall/handle.rs"),
-        "fn insert_process_handle(",
-        "fn process_status_for(",
-    );
+    let source = &[
+        probe::definition(
+            include_str!("../../../core/src/syscall/handle/process.rs"),
+            "fn insert_process_handle(",
+        ),
+        probe::definition(
+            include_str!("../../../core/src/syscall/handle/process.rs"),
+            "fn process_open(",
+        ),
+        probe::definition(
+            include_str!("../../../core/src/syscall/handle/process.rs"),
+            "fn process_open_by_id(",
+        ),
+        probe::definition(
+            include_str!("../../../core/src/syscall/handle/process.rs"),
+            "fn process_memory_read(",
+        ),
+    ]
+    .join("\n");
     program.push_str(&source.replace("target: crate::task::ProcessId", "target: u64"));
     program.push_str(
         r#"
