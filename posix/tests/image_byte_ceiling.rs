@@ -13,6 +13,7 @@ fn production_admission_counts_the_detached_images_union_and_propagates_failures
     let mut program = format!(
         r#"
 #[path = {usage:?}] pub(crate) mod mapping_usage;
+#[path = {budget:?}] pub(crate) mod scan_budget;
 use std::sync::Mutex;
 static PAGES:Mutex<Vec<u64>>=Mutex::new(Vec::new());
 static FAIL:Mutex<bool>=Mutex::new(false);
@@ -32,7 +33,8 @@ mod mem {{
         }}
     }}
 }}
-"#
+"#,
+        budget = usage.with_file_name("scan_budget.rs"),
     );
     program.push_str("mod mnu_abi {pub mod status {\n");
     program.push_str(include_str!("../../../core/crates/abi/src/status.rs"));

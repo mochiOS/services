@@ -1,6 +1,6 @@
 #[path = "../../../core/src/mem/sparse_page_walk.rs"]
 mod sparse_page_walk;
-use sparse_page_walk::{next, Entry, Error};
+use sparse_page_walk::{Entry, Error, next};
 use std::collections::BTreeMap;
 
 #[test]
@@ -34,6 +34,18 @@ fn missing_subtrees_are_skipped_across_all_levels() {
 
 #[test]
 fn invalid_inputs_and_unsupported_leaf_levels_are_rejected() {
+    // Placement may skip the whole huge leaf, while 4KiB revocation still
+    // rejects it. The returned end must not be clipped to the query length.
+    assert_eq!(
+        sparse_page_walk::next_span(4096, 4096, 8192, |_, _, level| {
+            Ok::<_, ()>(if level == 2 {
+                Entry::Leaf
+            } else {
+                Entry::Branch(4096)
+            })
+        }),
+        Ok(Some((4096, 1 << 21)))
+    );
     for (root, start, end) in [
         (0, 0, 4096),
         (1, 0, 4096),

@@ -32,10 +32,11 @@ fn user_placement_preserves_kernel_ranges_and_supervisor_references() {
 extern crate self as x86_64;
 pub mod structures {pub mod paging {pub use crate::mem::paging::PageTableFlags;}}
 #[macro_export]macro_rules! debug{($($arg:tt)*)=>{{}}}
-#[derive(Debug,PartialEq,Eq)]pub enum Memory{InvalidAddress,NotMapped,PermissionDenied,AlreadyMapped}
+#[derive(Debug,PartialEq,Eq)]pub enum Memory{InvalidAddress,NotMapped,PermissionDenied,AlreadyMapped,OutOfMemory}
 #[derive(Debug,PartialEq,Eq)]pub enum Kernel{Memory(Memory)}
 mod cpu{pub struct SmapSmepGuard;impl SmapSmepGuard{pub fn new()->Self{Self}}}
 mod mem{
+ #[path="@BUDGET@"]pub mod scan_budget;
  #[path="@WALKER@"]pub mod sparse_page_walk;
  pub mod paging{
   pub use crate::{Kernel,Memory};
@@ -75,7 +76,7 @@ mod mem{
   }
   @HIERARCHY@
   #[path="@RESERVED@"]mod reserved;
-  pub(crate) use reserved::check_user_mapping_range;
+  pub(crate) use reserved::{check_user_mapping_range,user_mapping_conflict};
  }
 }
 use mem::paging::*;
@@ -90,6 +91,9 @@ fn main(){
  assert_eq!(check_user_mapping_range(root,0x3000,4096),Err(Kernel::Memory(Memory::PermissionDenied)));
  assert_eq!(l1[3],before);
  l1[3]=entry(0x9000,7);assert_eq!(check_user_mapping_range(root,0x3000,4096),Ok(()));
+ assert_eq!(user_mapping_conflict(root,0x3000,4096,&mut mem::scan_budget::Budget::new()),Ok(Some(0x4000)));
+ let mut exhausted=mem::scan_budget::Budget::new();assert!(exhausted.take(16_384));
+ assert_eq!(user_mapping_conflict(root,0x3000,4096,&mut exhausted),Err(Kernel::Memory(Memory::OutOfMemory)));
  l4[0].flags=PageTableFlags(3);
  assert_eq!(check_user_mapping_range(root,0x3000,4096),Err(Kernel::Memory(Memory::PermissionDenied)));
  l4[0].flags=PageTableFlags(7);
@@ -121,7 +125,8 @@ fn main(){
  }
  assert_eq!(check_user_mapping_range(root,0x208000,4096),Err(Kernel::Memory(Memory::PermissionDenied)));
 }
-"#.replace("@WALKER@",root.join("core/src/mem/sparse_page_walk.rs").to_str().unwrap())
+"#.replace("@BUDGET@",root.join("core/src/mem/scan_budget.rs").to_str().unwrap())
+.replace("@WALKER@",root.join("core/src/mem/sparse_page_walk.rs").to_str().unwrap())
 .replace("@RESERVED@",root.join("core/src/mem/paging/reserved.rs").to_str().unwrap());
     program = program.replace(
         "@HIERARCHY@",

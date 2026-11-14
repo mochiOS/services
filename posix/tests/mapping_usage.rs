@@ -1,5 +1,7 @@
 #[path = "../../../core/src/mem/mapping_usage.rs"]
 mod native;
+#[path = "../../../core/src/mem/scan_budget.rs"]
+mod scan_budget;
 use native::{Error, bytes, permits};
 
 fn usage(regions: &[(u64, u64)], leaves: &[u64]) -> u64 {

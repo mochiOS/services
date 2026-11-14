@@ -55,6 +55,7 @@ fn randomized_mapping_base(_:u64,floor:u64,_:u64)->u64{{assert!(LOCKED.get());fl
 mod config{{pub struct Exec{{pub memory_map_base_min:u64,pub memory_map_aslr_max_pages:u64}}
  pub struct Config{{pub exec:Exec}} pub fn kernel()->Config{{Config{{exec:Exec{{memory_map_base_min:0x10000,memory_map_aslr_max_pages:1}}}}}}}}
 mod mem{{
+ #[path={scan:?}]pub mod scan_budget;
  #[path={usage:?}]pub mod mapping_usage;
  pub mod shared_memory{{pub struct SharedMemory;
   impl SharedMemory{{pub fn new(_:u64,_:u64)->Result<Self,crate::Error>{{Ok(Self)}}}}
@@ -74,6 +75,11 @@ mod mem{{
   }}
  }}
  pub mod paging{{
+  pub fn user_mapping_conflict(_:u64,start:u64,_:u64,budget:&mut super::scan_budget::Budget)->Result<Option<u64>,crate::Error>{{
+   assert!(crate::LOCKED.get());if !budget.take(1){{return Err(crate::Error::ResourceUnavailable);}}
+   Ok((crate::PROTECTED.get() || (crate::OCCUPIED.get()&&start==0x10000)).then_some(start+4096))
+  }}
+  pub unsafe fn next_user_page_entry_bounded(t:u64,s:u64,e:u64,_:&mut super::scan_budget::Budget)->Result<Option<u64>,u64>{{unsafe{{next_user_page_entry(t,s,e)}}}}
   pub fn check_user_mapping_range(_:u64,_:u64,_:u64)->Result<(),crate::Error>{{
    assert!(crate::LOCKED.get());if crate::PROTECTED.get(){{Err(crate::Error::AccessDenied)}}else{{Ok(())}}
   }}
@@ -103,6 +109,7 @@ mod task{{
  }}
  pub struct Process{{pub regions:Vec<MemoryRegion>,pub cursor:u64}}
  impl Process{{
+  pub fn stack_bottom(&self)->u64{{0}}pub fn stack_top(&self)->u64{{0}}
   pub fn mapping_cursor(&self)->u64{{self.cursor}}
   pub fn set_mapping_cursor(&mut self,x:u64){{self.cursor=x;}}
   pub fn page_table(&self)->Option<u64>{{ROOT.get().then_some(4096)}}
@@ -144,6 +151,7 @@ thread_local!{{static EXPECT_WRITE:Cell<bool>=const{{Cell::new(false)}};static A
         status = root.join("core/crates/abi/src/status.rs"),
         request = root.join("core/crates/abi/src/memory_map.rs"),
         usage = root.join("core/src/mem/mapping_usage.rs"),
+        scan = root.join("core/src/mem/scan_budget.rs"),
     );
     for line in include_str!("../../../core/crates/abi/src/lib.rs").lines() {
         if line.starts_with("pub const MEMORY_ACCESS_") || line.starts_with("pub const MEMORY_MAP_")
@@ -177,6 +185,14 @@ fn main(){
  reset();assert_eq!(map(0),0x10000);assert_eq!(LOOKUPS.get(),0);
  STATE.with_borrow(|p|assert_eq!(p.cursor,0x11000));
  assert_eq!(map(0),0x11000);STATE.with_borrow(|p|assert_eq!(p.cursor,0x12000));
+ // A sparse terabyte reservation takes an interval jump, not 2^28 probes.
+ reset();assert_eq!(map(0),0x10000);
+ STATE.with_borrow_mut(|p|p.regions.push(task::MemoryRegion::anonymous(0x11000,1<<40,3,0)));
+ assert_eq!(map(0),0x11000+(1<<40));
+ // Fragmentation exhausts one operation's budget without changing metadata.
+ reset();STATE.with_borrow_mut(|p|for i in 0..20_000{p.regions.push(task::MemoryRegion::anonymous(0x10000+i*8192,4096,3,0));});
+ assert_eq!(map(0),Error::ResourceUnavailable.into_raw());
+ STATE.with_borrow(|p|{assert_eq!(p.regions.len(),20_000);assert_eq!(p.cursor,0);});
  // Exact placement does not advance the hint or reserve its intervening gap.
  reset();assert_eq!(memory_map(0x800000,4096,3,1,0,0),0x800000);
  STATE.with_borrow(|p|assert_eq!(p.cursor,0));
@@ -211,7 +227,8 @@ fn main(){
  // including when REPLACE permits overwriting ordinary user mappings.
  for options in [1,5]{
   reset();PROTECTED.set(true);
-  assert_eq!(memory_map(0x10000,4096,3,options,0,0),Error::AccessDenied.into_raw());unchanged();
+  let error=if options==1{Error::AlreadyExists}else{Error::AccessDenied};
+  assert_eq!(memory_map(0x10000,4096,3,options,0,0),error.into_raw());unchanged();
  }
  let request=memory_map::Request{length:4096,access:3,byte_ceiling:4096,..Default::default()};
  reset();let bytes=request.encode();assert_eq!(memory_map_bounded(bytes.as_ptr()as u64,64),0x10000);

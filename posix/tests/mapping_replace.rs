@@ -59,6 +59,7 @@ unsafe impl std::alloc::GlobalAlloc for Allocator {
 }
 #[global_allocator] static ALLOCATOR:Allocator=Allocator;
 mod mem {
+    #[path="@ROOT@/core/src/mem/scan_budget.rs"] pub mod scan_budget;
     pub mod vm_object {
         #[derive(Debug)] pub struct VmObject {pub busy:bool}
         impl VmObject {
@@ -73,6 +74,7 @@ mod mem {
     #[path="@ROOT@/core/src/mem/mapping_admission.rs"] pub mod mapping_admission;
     #[path="@ROOT@/core/src/mem/mapping_replace.rs"] pub mod mapping_replace;
     pub mod paging {
+        pub unsafe fn next_user_page_entry_bounded(t:u64,s:u64,e:u64,_:&mut super::scan_budget::Budget)->Result<Option<u64>,u64>{unsafe{next_user_page_entry(t,s,e)}}
         pub fn check_user_mapping_range(_:u64,_:u64,_:u64)->Result<(),crate::status::Error>{Ok(())}
         pub unsafe fn next_user_page_entry(_:u64,start:u64,end:u64)->Result<Option<u64>,u64> {
             if crate::FAIL_WALK.get(){return Err(1);}
