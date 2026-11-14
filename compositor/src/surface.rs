@@ -174,6 +174,7 @@ pub(crate) struct Surface {
     pub(crate) content_generation: u64,
     pub(crate) z: u32,
     pub(crate) panel_pointer_observed: std::cell::Cell<bool>,
+    pub(crate) pointer_captured: std::cell::Cell<bool>,
     pub(crate) keyboard_capture: std::cell::Cell<Option<crate::keyboard_capture::Capture>>,
 }
 
@@ -225,6 +226,7 @@ impl Surface {
             content_generation: 0,
             z: 0,
             panel_pointer_observed: std::cell::Cell::new(false),
+            pointer_captured: std::cell::Cell::new(false),
             keyboard_capture: std::cell::Cell::new(None),
         }
     }
@@ -232,6 +234,7 @@ impl Surface {
     pub(crate) fn reset(&mut self) {
         self.keyboard_capture.set(None);
         self.panel_pointer_observed.set(false);
+        self.pointer_captured.set(false);
         self.live = false;
         self.owner = ClientId(0);
         self.owner_process = 0;
@@ -366,6 +369,25 @@ pub(crate) fn surface_extent(surface: &Surface) -> (u32, u32) {
         surface.current_height
     };
     (width, height)
+}
+
+/// A popup cannot remain visible or interactive after its parent is hidden.
+/// Bound the walk even if a malformed internal relationship contains a cycle.
+pub(crate) fn surface_is_visible(surfaces: &[Surface], surface: &Surface) -> bool {
+    let mut current = surface;
+    for _ in 0..=surfaces.len() {
+        if !current.live || !current.visible {
+            return false;
+        }
+        let Some(parent) = current.parent else {
+            return true;
+        };
+        let Some(index) = surface_index_by_handle(surfaces, parent) else {
+            return false;
+        };
+        current = &surfaces[index];
+    }
+    false
 }
 
 fn resize_buffer(buffer: &mut Vec<u32>, width: u32, height: u32) -> bool {
@@ -1657,7 +1679,11 @@ pub(crate) fn handle_request(
             }
             let window = surfaces[index].window;
             if let Some(window_index) = window_index_by_id(windows, window) {
-                windows[window_index].state = WINDOW_STATE_NORMAL;
+                windows[window_index].state = if windows[window_index].presentation.is_some() {
+                    crate::protocol::WINDOW_STATE_MAXIMIZED
+                } else {
+                    WINDOW_STATE_NORMAL
+                };
                 if let Some(content) =
                     content_surface_index_for_window(surfaces, &windows[window_index])
                 {
@@ -1666,7 +1692,7 @@ pub(crate) fn handle_request(
                 if let Some(decoration) =
                     decoration_surface_index_for_window(surfaces, &windows[window_index])
                 {
-                    surfaces[decoration].visible = true;
+                    surfaces[decoration].visible = windows[window_index].presentation.is_none();
                 }
                 raise_window(surfaces, windows, next_z, window);
                 update_keyboard_focus(surfaces, keyboard_focus, Some(index));
@@ -1792,5 +1818,24 @@ mod tests {
     fn system_modals_stack_above_shell_panels_but_below_secure_overlays() {
         assert!(SurfaceRole::SystemModal.stack_layer() > SurfaceRole::Panel.stack_layer());
         assert!(SurfaceRole::SystemModal.stack_layer() < SurfaceRole::SecureOverlay.stack_layer());
+    }
+
+    #[test]
+    fn popup_visibility_follows_its_parent_without_losing_its_own_state() {
+        let mut surfaces = [Surface::empty(), Surface::empty()];
+        for (index, surface) in surfaces.iter_mut().enumerate() {
+            surface.live = true;
+            surface.handle = SurfaceHandle(index as u64 + 1);
+            surface.token = surface.handle.0;
+        }
+        surfaces[1].parent = Some(surfaces[0].handle);
+        assert!(surface_is_visible(&surfaces, &surfaces[1]));
+        surfaces[0].visible = false;
+        assert!(!surface_is_visible(&surfaces, &surfaces[1]));
+        assert!(surfaces[1].visible);
+        surfaces[0].visible = true;
+        assert!(surface_is_visible(&surfaces, &surfaces[1]));
+        surfaces[0].parent = Some(surfaces[1].handle);
+        assert!(!surface_is_visible(&surfaces, &surfaces[1]));
     }
 }

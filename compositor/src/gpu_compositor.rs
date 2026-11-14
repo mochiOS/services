@@ -291,8 +291,9 @@ impl GpuCompositor {
             .iter()
             .enumerate()
             .filter_map(|(index, surface)| {
-                (surface.live && surface.visible && surface_has_current_pixels(surface))
-                    .then_some(index)
+                (crate::surface::surface_is_visible(surfaces, surface)
+                    && surface_has_current_pixels(surface))
+                .then_some(index)
             })
             .collect();
         indices.sort_by_key(|index| {
@@ -303,7 +304,8 @@ impl GpuCompositor {
             windows: windows
                 .iter()
                 .filter_map(|window| {
-                    if !window.live || window.decoration.is_none() {
+                    if !window.live || window.presentation.is_some() || window.decoration.is_none()
+                    {
                         return None;
                     }
                     let content = surfaces
@@ -592,7 +594,9 @@ fn texture_requirements(
         surface_index: None,
     });
     for (index, surface) in surfaces.iter().enumerate() {
-        if !surface.live || !surface.visible || !surface_has_current_pixels(surface) {
+        if !crate::surface::surface_is_visible(surfaces, surface)
+            || !surface_has_current_pixels(surface)
+        {
             continue;
         }
         let (width, height, generation) = if surface.current_format == PIXEL_FORMAT_GPU_SCENE {

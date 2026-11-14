@@ -165,7 +165,11 @@ fn activate_process_window(
     };
     let window = surfaces[index].window;
     if let Some(window_index) = crate::window::window_index_by_id(windows, window) {
-        windows[window_index].state = WINDOW_STATE_NORMAL;
+        windows[window_index].state = if windows[window_index].presentation.is_some() {
+            WINDOW_STATE_MAXIMIZED
+        } else {
+            WINDOW_STATE_NORMAL
+        };
         if let Some(content) =
             crate::window::content_surface_index_for_window(surfaces, &windows[window_index])
         {
@@ -174,7 +178,7 @@ fn activate_process_window(
         if let Some(decoration) =
             crate::window::decoration_surface_index_for_window(surfaces, &windows[window_index])
         {
-            surfaces[decoration].visible = true;
+            surfaces[decoration].visible = windows[window_index].presentation.is_none();
         }
     }
     raise_window(surfaces, windows, next_z, window);
@@ -221,6 +225,25 @@ fn handle_request(
         return reply;
     };
     match opcode {
+        mochios_viewkit_gpu_protocol::window_management::PRESENT
+        | mochios_viewkit_gpu_protocol::window_management::CLOSE => {
+            return crate::window_management::handle_request(
+                clients,
+                surfaces,
+                windows,
+                next_z,
+                pointer_focus,
+                keyboard_focus,
+                pointer_grab,
+                modal_sessions,
+                client,
+                sender,
+                request,
+                needs_present,
+                display_width,
+                display_height,
+            );
+        }
         OP_GET_RENDERER_CAPS => {
             put_u32(&mut reply, 0, 0);
             put_u32(&mut reply, 4, renderer_caps);
@@ -644,7 +667,23 @@ pub(crate) fn run() -> ! {
     let mut pending_handles = ReceivedHandles::default();
     let mut pending_buf = [0u8; 4128];
     let mut frame = PendingPresent::default();
+    let mut next_client_cleanup = 0;
     loop {
+        // Reuse normal event-loop wakeups; do not poll an idle desktop.
+        if let Ok(now) = platform::time::monotonic_milliseconds() {
+            if now >= next_client_cleanup {
+                next_client_cleanup = now.saturating_add(500);
+                if crate::client::cleanup_dead_clients(
+                    &mut state.clients,
+                    &mut state.surfaces,
+                    &mut state.windows,
+                    &mut state.pointer_focus,
+                    &mut state.keyboard_focus,
+                ) {
+                    frame.queue(None, false);
+                }
+            }
+        }
         if let Some(scene) = state.boot_scene.as_mut() {
             let updated = platform::time::monotonic_milliseconds()
                 .map_err(|error| errno_status(error.errno().unwrap_or(mochi_user_syscall::EIO)))
@@ -861,6 +900,33 @@ pub(crate) fn run() -> ! {
             let mut reply = [0u8; 16];
             put_u32(&mut reply, 0, STATUS_CAPACITY_EXCEEDED);
             let _ = platform::ipc::reply(sender, &reply);
+            continue;
+        }
+        if read_u32(&buf[..len], 0)
+            == Some(mochios_viewkit_gpu_protocol::window_management::SNAPSHOT)
+        {
+            let mut reply = [0; mochios_viewkit_gpu_protocol::window_management::MAX_REPLY];
+            let length = crate::window_management::snapshot(
+                &state.clients,
+                &state.surfaces,
+                &state.windows,
+                state.keyboard_focus,
+                client,
+                sender,
+                &buf[..len],
+                &mut reply,
+            );
+            if platform::ipc::reply(sender, &reply[..length]).is_err() {
+                cleanup_client(
+                    &mut state.clients,
+                    &mut state.surfaces,
+                    &mut state.windows,
+                    client,
+                    &mut state.pointer_focus,
+                    &mut state.keyboard_focus,
+                );
+                frame.queue(None, false);
+            }
             continue;
         }
         let mut needs_present = false;

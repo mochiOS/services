@@ -51,6 +51,7 @@ pub(crate) fn cleanup_client(
     if client == ClientId(0) {
         return;
     }
+    crate::window_management::release_client(clients, surfaces, windows, client);
     while let Some(index) = surfaces
         .iter()
         .position(|surface| surface.live && surface.owner == client && !surface.is_decoration)
@@ -131,5 +132,5 @@ pub(crate) fn cleanup_dead_clients(
             changed = true;
         }
     }
-    changed
+    changed | crate::window_management::release_orphaned(clients, surfaces, windows)
 }

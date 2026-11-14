@@ -98,8 +98,14 @@ fn decoration_configuration_is_owned_and_has_platform_minima() {
     put_u32(&mut c, 24, 2048);
     assert_eq!(f.call(1, &c), 0);
     assert!(f.windows[0].integrated);
-    assert_eq!(f.windows[0].titlebar_height, 80);
-    assert_eq!(f.windows[0].controls_width, 224);
+    assert_eq!(
+        f.windows[0].titlebar_height,
+        metrics::physical_pixels(metrics::TITLE_BAR_HEIGHT, 2048)
+    );
+    assert_eq!(
+        f.windows[0].controls_width,
+        metrics::physical_pixels(metrics::CONTROLS_WIDTH, 2048)
+    );
     assert_eq!(f.windows[0].insets.top, 0);
     assert_eq!(f.windows[0].titlebar_background & 255, 255);
 }

@@ -54,6 +54,7 @@ pub(crate) struct Window {
     pub(crate) normal_height: u32,
     pub(crate) title_len: u8,
     pub(crate) title: [u8; MAX_WINDOW_TITLE_BYTES],
+    pub(crate) presentation: Option<crate::window_management::Presentation>,
 }
 
 impl Default for Window {
@@ -102,6 +103,7 @@ impl Window {
             normal_height: 0,
             title_len: 0,
             title: [0; MAX_WINDOW_TITLE_BYTES],
+            presentation: None,
         }
     }
 }
@@ -230,7 +232,7 @@ pub(crate) fn notify_decorators(
     put_u32(
         &mut event,
         4,
-        if window.integrated {
+        if window.integrated && window.presentation.is_none() {
             window.titlebar_height
         } else {
             0
@@ -239,7 +241,7 @@ pub(crate) fn notify_decorators(
     put_u32(
         &mut event,
         8,
-        if window.integrated {
+        if window.integrated && window.presentation.is_none() {
             window.controls_width
         } else {
             0
@@ -342,7 +344,10 @@ pub(crate) fn maximized_controls_overlap(
     area: Rect,
 ) -> bool {
     windows.iter().any(|window| {
-        if !window.live || window.state != crate::protocol::WINDOW_STATE_MAXIMIZED {
+        if !window.live
+            || window.presentation.is_some()
+            || window.state != crate::protocol::WINDOW_STATE_MAXIMIZED
+        {
             return false;
         }
         let Some(index) = content_surface_index_for_window(surfaces, window) else {

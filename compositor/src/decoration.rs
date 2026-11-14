@@ -19,7 +19,7 @@ const DECORATE_CAPABILITY: &str = "window.decorate";
 const DECORATE_COMPAT_CAPABILITY: &str = "window.overlay";
 const SECURE_OVERLAY_CAPABILITY: &str = "window.secure-overlay";
 
-fn sender_has_decorate_capability(sender: u64) -> bool {
+pub(crate) fn sender_has_decorate_capability(sender: u64) -> bool {
     matches!(
         platform::capability::check_thread(sender, DECORATE_CAPABILITY),
         Ok(1)
@@ -99,6 +99,23 @@ pub(crate) fn handle_request(
         put_u32(&mut reply, 0, errno_status(mochi_user_syscall::EINVAL));
         return reply;
     };
+    // Desktop decoration requests may have been queued before a presentation
+    // lease. They must not move the viewport or reattach visible chrome.
+    if matches!(
+        opcode,
+        OP_DECOR_CREATE_SURFACE
+            | OP_DECOR_ATTACH
+            | OP_DECOR_UPDATE_INSETS
+            | OP_DECOR_BEGIN_MOVE
+            | OP_DECOR_BEGIN_RESIZE
+            | OP_DECOR_MINIMIZE
+            | OP_DECOR_TOGGLE_MAXIMIZE
+    ) && window_index_by_token(windows, read_u64(request, 4).unwrap_or(0))
+        .is_some_and(|index| windows[index].presentation.is_some())
+    {
+        put_u32(&mut reply, 0, errno_status(mochi_user_syscall::EAGAIN));
+        return reply;
+    }
     match opcode {
         OP_SET_DECORATION => {
             let surface_token = read_u64(request, 4).unwrap_or(0);
@@ -148,7 +165,11 @@ pub(crate) fn handle_request(
             windows[index].controls_width =
                 metrics::physical_pixels(metrics::CONTROLS_WIDTH, scale);
             windows[index].titlebar_background = read_u32(request, 20).unwrap_or(0) | 0xff;
-            windows[index].insets.top = if mode == 1 {
+            let requested_height = windows[index].titlebar_height;
+            if let Some(presentation) = windows[index].presentation.as_mut() {
+                presentation.decoration_changed(mode == 1, requested_height);
+            }
+            windows[index].insets.top = if mode == 1 || windows[index].presentation.is_some() {
                 0
             } else {
                 windows[index].titlebar_height
@@ -156,7 +177,8 @@ pub(crate) fn handle_request(
             let (width, height) = crate::surface::surface_extent(&surfaces[content_index]);
             let next_width = width.max(windows[index].controls_width);
             let next_height = height.max(windows[index].titlebar_height);
-            if mode == 1
+            if windows[index].presentation.is_none()
+                && mode == 1
                 && (width != next_width || height != next_height)
                 && width != 0
                 && height != 0
@@ -171,7 +193,7 @@ pub(crate) fn handle_request(
             put_u32(
                 &mut reply,
                 4,
-                if mode == 1 {
+                if mode == 1 && windows[index].presentation.is_none() {
                     windows[index].titlebar_height
                 } else {
                     0
@@ -180,7 +202,7 @@ pub(crate) fn handle_request(
             put_u32(
                 &mut reply,
                 8,
-                if mode == 1 {
+                if mode == 1 && windows[index].presentation.is_none() {
                     windows[index].controls_width
                 } else {
                     0

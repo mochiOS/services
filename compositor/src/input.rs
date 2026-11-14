@@ -138,6 +138,28 @@ mod routing_tests {
     }
 }
 
+#[cfg(test)]
+mod pointer_capture_tests {
+    use super::*;
+    #[test]
+    fn panel_drag_stays_owned_until_hidden_or_preempted() {
+        let mut surfaces = [Surface::empty(), Surface::empty()];
+        surfaces[0].live = true;
+        surfaces[0].role = SurfaceRole::Panel;
+        surfaces[0].pointer_captured.set(true);
+        assert_eq!(captured_pointer_target(&surfaces), Some(0));
+        surfaces[1].live = true;
+        surfaces[1].role = SurfaceRole::SystemModal;
+        assert_eq!(captured_pointer_target(&surfaces), None);
+        assert!(!surfaces[0].pointer_captured.get());
+        surfaces[1].live = false;
+        assert_eq!(captured_pointer_target(&surfaces), None);
+        surfaces[0].pointer_captured.set(true);
+        surfaces[0].visible = false;
+        assert_eq!(captured_pointer_target(&surfaces), None);
+    }
+}
+
 pub(crate) fn clear_focus_for_surface(
     surfaces: &[Surface],
     index: usize,
@@ -168,7 +190,7 @@ fn hit_test(surfaces: &[Surface], windows: &[Window], x: i32, y: i32) -> Option<
     let mut hit = None;
     let mut best_stack = (0u8, 0u32);
     for (index, surface) in surfaces.iter().enumerate() {
-        if !surface.live || !surface.visible {
+        if !crate::surface::surface_is_visible(surfaces, surface) {
             continue;
         }
         let (width, height) = surface_extent(surface);
@@ -363,7 +385,8 @@ fn dispatch_pointer_motion(
         surfaces,
         windows,
         modal_sessions,
-        hit_test(surfaces, windows, pointer_x, pointer_y),
+        captured_pointer_target(surfaces)
+            .or_else(|| hit_test(surfaces, windows, pointer_x, pointer_y)),
     );
     if *pointer_focus != next {
         if let Some(index) = *pointer_focus {
@@ -459,6 +482,32 @@ fn dispatch_pointer_motion(
     }
 }
 
+/// A press owns the drag until release, including transparent panel sensors.
+/// A new protected presentation preempts an ordinary drag immediately.
+fn captured_pointer_target(surfaces: &[Surface]) -> Option<usize> {
+    surfaces.iter().enumerate().find_map(|(index, surface)| {
+        if !surface.pointer_captured.get() {
+            return None;
+        }
+        let preempted = surfaces.iter().any(|other| {
+            other.live
+                && other.visible
+                && (other.protected_presentation
+                    || matches!(
+                        other.role,
+                        SurfaceRole::SecureOverlay | SurfaceRole::SystemModal
+                    ))
+                && other.stack_layer() > surface.stack_layer()
+        });
+        if !crate::surface::surface_is_visible(surfaces, surface) || preempted {
+            surface.pointer_captured.set(false);
+            None
+        } else {
+            Some(index)
+        }
+    })
+}
+
 fn panel_observer_event(surface: &Surface, x: i32, y: i32, already_notified: bool) -> Option<u32> {
     let (width, height) = surface_extent(surface);
     let inside = surface.y == 0
@@ -544,9 +593,14 @@ pub(crate) fn update_keyboard_focus(
 /// Restores focus to the frontmost remaining application window after the
 /// focused client closes a window. Shell chrome is deliberately excluded.
 pub(crate) fn restore_keyboard_focus(surfaces: &[Surface], keyboard_focus: &mut Option<usize>) {
-    if keyboard_focus.is_some() {
+    if keyboard_focus.is_some_and(|index| {
+        surfaces
+            .get(index)
+            .is_some_and(|surface| crate::surface::surface_is_visible(surfaces, surface))
+    }) {
         return;
     }
+    update_keyboard_focus(surfaces, keyboard_focus, None);
     let next = surfaces
         .iter()
         .enumerate()
@@ -622,7 +676,13 @@ pub(crate) fn handle_input_event(
             )
         }
         platform::input::EVENT_KIND_POINTER_BUTTON => {
-            let raw_target = hit_test(surfaces, windows, *pointer_x, *pointer_y);
+            let raw_target = captured_pointer_target(surfaces)
+                .or_else(|| hit_test(surfaces, windows, *pointer_x, *pointer_y));
+            if event.detail == 1 && event.flags & platform::input::FLAG_RELEASE != 0 {
+                for surface in surfaces.iter() {
+                    surface.pointer_captured.set(false);
+                }
+            }
             let blocked_modal = raw_target
                 .and_then(|index| surface_process(surfaces, windows, index))
                 .and_then(|process| blocking_modal_process(modal_sessions, process));
@@ -645,6 +705,20 @@ pub(crate) fn handle_input_event(
                 return None;
             }
             let mut needs_window_redraw = false;
+            if event.detail == 1 {
+                if event.flags & platform::input::FLAG_PRESS != 0 {
+                    for surface in surfaces.iter() {
+                        surface.pointer_captured.set(false);
+                    }
+                    if let Some(index) = target {
+                        surfaces[index].pointer_captured.set(true);
+                    }
+                } else if event.flags & platform::input::FLAG_RELEASE != 0 {
+                    for surface in surfaces.iter() {
+                        surface.pointer_captured.set(false);
+                    }
+                }
+            }
             if event.flags & platform::input::FLAG_PRESS != 0 {
                 let previous_focus = *keyboard_focus;
                 let focus =
@@ -1070,10 +1144,19 @@ mod tests {
             height: 44,
         });
         let surfaces = [content, decor, panel];
-        for (x, y) in [(1279, 0), (1279, 20), (1160, 0)] {
+        let controls_left = 1280
+            - window.controls_width as i32
+            - mochios_viewkit_gpu_protocol::window_decoration::physical_pixels(
+                mochios_viewkit_gpu_protocol::window_decoration::CONTROL_REVEAL_MARGIN,
+                window.decoration_scale,
+            ) as i32;
+        for (x, y) in [(1279, 0), (1279, 20), (controls_left, 0)] {
             assert_eq!(hit_test(&surfaces, &[window], x, y), Some(1));
         }
-        assert_eq!(hit_test(&surfaces, &[window], 1100, 0), Some(2));
+        assert_eq!(
+            hit_test(&surfaces, &[window], controls_left - 1, 0),
+            Some(2)
+        );
         window.state = crate::protocol::WINDOW_STATE_NORMAL;
         assert_eq!(hit_test(&surfaces, &[window], 1279, 0), Some(2));
     }

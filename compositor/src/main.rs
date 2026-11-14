@@ -24,6 +24,7 @@ mod startup;
 mod state;
 mod surface;
 mod window;
+mod window_management;
 
 use mochi_user_platform as platform;
 

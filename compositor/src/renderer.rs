@@ -235,7 +235,9 @@ fn try_gpu_panel_present(
     }
     let mut candidate = None;
     for (index, surface) in surfaces.iter().enumerate() {
-        if !surface.live || !surface.visible || !surface_has_current_pixels(surface) {
+        if !crate::surface::surface_is_visible(surfaces, surface)
+            || !surface_has_current_pixels(surface)
+        {
             continue;
         }
         let eligible = surface.role == crate::surface::SurfaceRole::Panel
@@ -434,7 +436,7 @@ pub(crate) fn composite_and_present(
         for _ in 0..surfaces.len() {
             let mut selected: Option<usize> = None;
             for (index, surface) in surfaces.iter().enumerate() {
-                if drawn[index] || !surface.live || !surface.visible {
+                if drawn[index] || !crate::surface::surface_is_visible(surfaces, surface) {
                     continue;
                 }
                 if selected.is_none_or(|selected_index| {
@@ -456,12 +458,15 @@ pub(crate) fn composite_and_present(
                 window_index_by_id(windows, surface.window).and_then(|window_index| {
                     let window = &windows[window_index];
                     let content_index = content_surface_index_for_window(surfaces, window)?;
-                    (window.decoration.is_some() && surfaces[content_index].visible).then_some((
-                        window_index,
-                        window_frame_rect(&surfaces[content_index], window),
-                        active_window == Some(window.id),
-                        window.corner_radius(),
-                    ))
+                    (window.presentation.is_none()
+                        && window.decoration.is_some()
+                        && surfaces[content_index].visible)
+                        .then_some((
+                            window_index,
+                            window_frame_rect(&surfaces[content_index], window),
+                            active_window == Some(window.id),
+                            window.corner_radius(),
+                        ))
                 });
             if let Some((window_index, frame_rect, active, radius)) = window_style
                 && radius != 0.0
