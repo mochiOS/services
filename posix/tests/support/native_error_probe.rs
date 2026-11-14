@@ -8,6 +8,52 @@ pub fn between<'a>(source: &'a str, start: &str, end: &str) -> &'a str {
     &source[start..end]
 }
 
+/// Select a formatted top-level production definition independently of the
+/// next item or module layout. Visibility is local to the host probe crate.
+pub fn definition(source: &str, declaration: &str) -> String {
+    let declaration = declaration.strip_suffix('(').unwrap_or(declaration);
+    let declaration_start = source
+        .match_indices(declaration)
+        .find(|(at, _)| {
+            source[at + declaration.len()..]
+                .chars()
+                .next()
+                .is_none_or(|next| !next.is_ascii_alphanumeric() && next != '_')
+        })
+        .map(|(at, _)| at)
+        .expect(declaration);
+    let mut start = source[..declaration_start]
+        .rfind('\n')
+        .map_or(0, |at| at + 1);
+    // Retain derives/attributes belonging to the definition.
+    while start != 0 {
+        let previous_end = start - 1;
+        let previous_start = source[..previous_end].rfind('\n').map_or(0, |at| at + 1);
+        let line = source[previous_start..previous_end].trim();
+        if line.starts_with("#[") || line.starts_with("///") {
+            start = previous_start;
+        } else {
+            break;
+        }
+    }
+    let line_end = source[declaration_start..]
+        .find('\n')
+        .map_or(source.len(), |at| declaration_start + at);
+    let end = if source[declaration_start..line_end]
+        .trim_end()
+        .ends_with(';')
+    {
+        line_end
+    } else {
+        declaration_start
+            + source[declaration_start..]
+                .find("\n}")
+                .expect("top-level definition end")
+            + 2
+    };
+    source[start..end].replace("pub(super)", "pub(crate)")
+}
+
 pub fn program() -> String {
     let syscall = include_str!("../../../../user/crates/syscall/src/lib.rs");
     let mut program =
@@ -112,4 +158,47 @@ fn run_with(program: &str, toolchain: Option<&str>, cfg: Option<&str>) {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+/// The real native/peer distinction, shared by controlled transport fixtures.
+pub fn operation_error() -> String {
+    let source = include_str!("../../../../core/src/result.rs");
+    format!(
+        "mod result {{ use crate::mnu_abi; {} {} {} }}\nuse result::OperationError;\n",
+        definition(source, "enum OperationError"),
+        definition(source, "impl OperationError {"),
+        definition(
+            source,
+            "impl From<mnu_abi::status::Error> for OperationError {"
+        )
+    )
+}
+
+/// Normal-return ownership model for transport fixtures. Forced retirement is
+/// checked separately against task::operation; these fixtures do not schedule.
+pub fn operation_scope() -> &'static str {
+    r#"
+mod task { pub mod operation {
+    pub struct Scope<T>(Vec<T>);
+    impl<T> Scope<T> {
+        pub fn new(value:T)->Result<Self,crate::mnu_abi::status::Error>{
+            let mut values=Vec::new();
+            values.try_reserve_exact(1).map_err(|_|crate::mnu_abi::status::Error::ResourceUnavailable)?;
+            values.push(value);Ok(Self(values))
+        }
+    }
+    impl<T> core::ops::Deref for Scope<T>{type Target=T;fn deref(&self)->&T{&self.0[0]}}
+    impl<T> core::ops::DerefMut for Scope<T>{fn deref_mut(&mut self)->&mut T{&mut self.0[0]}}
+}}
+"#
+}
+
+pub fn prepared_launch() -> String {
+    let source = include_str!("../../../../core/src/syscall/exec/launch.rs");
+    [
+        definition(source, "struct LaunchSecurity"),
+        definition(source, "struct PreparedLaunch"),
+    ]
+    .join("\n")
+    .replace("super::Inherited", "crate::Inherited")
 }
