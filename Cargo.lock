@@ -2649,6 +2649,7 @@ dependencies = [
  "mochios-net-device-protocol",
  "mochios-network-stack",
  "mochios-package-manifest",
+ "mochios-package-protocol",
  "mochios-posix-client",
  "mochios-posix-protocol",
  "mochios-signature-protocol",

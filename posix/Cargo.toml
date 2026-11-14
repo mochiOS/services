@@ -20,6 +20,7 @@ mochios-user-protocol = { git = "https://github.com/mochiOS/syscalls" }
 mochios-posix-client = { git = "https://github.com/mochiOS/syscalls", package = "mochios-posix-client", default-features = false, features = ["syscall-endpoint"] }
 
 [dev-dependencies]
+mochios-package-protocol = { git = "https://github.com/mochiOS/syscalls" }
 zeroize = { version = "1.8", features = ["alloc"] }
 vt100 = "=0.18.1"
 serde = { version = "1", features = ["derive"] }

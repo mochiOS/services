@@ -237,6 +237,7 @@ pub(crate) fn serve_capability_requests(mut state: CapabilityServiceState) -> ! 
     let mut display_authority: Option<crate::consent_presentation::Channel> = None;
     let mut desktop_sessions = crate::consent_presentation::Sessions::default();
     let mut frontends = crate::execution_frontend::Frontends::new();
+    let mut standard_apps = crate::standard_apps::Controller::default();
     let package_approvals = alloc::rc::Rc::new(core::cell::RefCell::new(
         crate::package_approval::Registry::default(),
     ));
@@ -832,6 +833,48 @@ pub(crate) fn serve_capability_requests(mut state: CapabilityServiceState) -> ! 
             capability_reply(sender, status);
             continue;
         }
+        if opcode == mochios_package_protocol::provisioning::OPCODE {
+            use mochios_package_protocol::provisioning as wire;
+            let result = (|| {
+                let request = wire::decode_request(slice)
+                    .map_err(|_| mochi_user_syscall::SysError::from_raw(-22))?;
+                if !attached.is_user_delivery() { return Err(mochi_user_syscall::SysError::from_raw(-13)); }
+                let peer = crate::consent_peer::capture(sender)?;
+                if !crate::standard_apps::trusted(&peer) {
+                    return Err(mochi_user_syscall::SysError::from_raw(-13));
+                }
+                let authority = crate::execution_frontend::native::Native {
+                    trusted: &state.trusted_images, sessions: &desktop_sessions,
+                    display: display_authority.as_ref(), input: None,
+                };
+                let session = crate::execution_frontend::Authority::session(&authority, &peer)?;
+                let account = crate::execution_grant::requester_account(&peer)?;
+                let now = platform::time::monotonic_nanoseconds()?;
+                standard_apps.reconcile(&state.package_index)?;
+                if matches!(request, wire::Request::Authorize) {
+                    // Capture the same native immutable plan used by interactive
+                    // approval. Only the policy decision differs, never commit.
+                    let prepared = crate::package_approval::Prepared::capture(&peer,
+                        &platform::capability::administrator::PACKAGE_OPCODE.to_le_bytes(), &mut attached)?;
+                    let binding = standard_apps.authorize(&peer, session, account, now,
+                        &prepared.bytes, state.authorization_generation)?;
+                    prepared.approve_provisioned(&package_approvals, &peer, binding,
+                        now.checked_add(mochios_package_protocol::transaction::TIMEOUT_NS)
+                            .ok_or_else(|| mochi_user_syscall::SysError::from_raw(-22))?, account)?;
+                    capability_reply(sender, REPLY_OK);
+                } else {
+                    if attached.count != 0 { return Err(mochi_user_syscall::SysError::from_raw(-22)); }
+                    standard_apps.request(request, &peer, session, account, now)?;
+                    let mut bytes = [0; wire::MAX_SNAPSHOT];
+                    let n = standard_apps.snapshot(&mut bytes)?;
+                    let _ = platform::ipc::reply(sender, &bytes[..n]);
+                }
+                Ok(())
+            })();
+            close_received_handles(&attached);
+            if let Err(reason) = result { capability_reply(sender, error_status(reason)); }
+            continue;
+        }
         if opcode == platform::capability::administrator::PACKAGE_CONNECT_OPCODE {
             let result = if slice.len() == 4 && attached.count == 0 && attached.is_user_delivery() {
                 crate::package_approval::connect()
@@ -870,6 +913,7 @@ pub(crate) fn serve_capability_requests(mut state: CapabilityServiceState) -> ! 
                 &attached,
                 state.authorization_generation,
                 platform::time::monotonic_nanoseconds().unwrap_or(u64::MAX),
+                &mut standard_apps,
                 |peer| crate::execution_frontend::Authority::session(&authority, peer),
             );
             close_received_handles(&attached);

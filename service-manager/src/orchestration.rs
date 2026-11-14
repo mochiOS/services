@@ -25,6 +25,7 @@ pub(crate) struct ChildProcesses<
     pub(crate) linux: Option<u64>,
     pub(crate) binder: Option<u64>,
     pub(crate) installer: Option<u64>,
+    pub(crate) standard_applications: Option<u64>,
     pub(crate) update: Option<Update>,
     pub(crate) workspace: Option<u64>,
 }
@@ -91,6 +92,7 @@ impl<Input, Display, Drivers, Compositor, Network, User, Update, SecureUi>
                 linux: None,
                 binder: None,
                 installer: None,
+                standard_applications: None,
                 update: None,
                 workspace: None,
             },
@@ -278,6 +280,14 @@ pub(crate) fn orchestrate<O: BootstrapOperations>(
         children.installer = Some(installer);
     }
     operations.notify_mboot_stage(MbootStage::Desktop);
+    // The desktop is usable before any downloads begin. This is a normal
+    // unprivileged Store process in the authenticated session, not a new service
+    // or an installer-media job. Failure never prevents login.
+    if !installation_required {
+        children.standard_applications = operations.spawn_user_session(
+            FixedService::StandardApplications, identity, session_id,
+        );
+    }
     if discovery_started {
         let _ = operations.wait_discovery_complete(children.drivers.as_ref().unwrap());
     }
@@ -452,6 +462,7 @@ mod tests {
                 FixedService::Installer => 21,
                 FixedService::Update => 18,
                 FixedService::Workspace => 22,
+                FixedService::StandardApplications => 26,
             })
         }
 
@@ -467,6 +478,7 @@ mod tests {
                 FixedService::Binder => 17,
                 FixedService::Installer => 21,
                 FixedService::Workspace => 22,
+                FixedService::StandardApplications => 26,
                 _ => unreachable!("only user-session services are accepted"),
             })
         }
@@ -562,9 +574,27 @@ mod tests {
             Event::SpawnUserSession(FixedService::Binder, TEST_IDENTITY),
             Event::WaitBinder,
             Event::NotifyMbootStage(MbootStage::Desktop),
+            Event::SpawnUserSession(FixedService::StandardApplications, TEST_IDENTITY),
             Event::WaitDiscovery,
             Event::WaitNetwork,
         ]
+    }
+
+    #[test]
+    fn standard_applications_start_after_desktop_and_never_block_login() {
+        let mut operations = FakeOperations::new(Failure::Spawn(FixedService::StandardApplications));
+        let result = orchestrate(&mut operations);
+        assert_eq!(result.reason, StopReason::Running);
+        assert_eq!(result.children.standard_applications, None);
+        let desktop = operations.events.iter().position(|event| *event == Event::NotifyMbootStage(MbootStage::Desktop)).unwrap();
+        let worker = operations.events.iter().position(|event|
+            *event == Event::SpawnUserSession(FixedService::StandardApplications, TEST_IDENTITY)).unwrap();
+        assert!(desktop < worker);
+
+        let mut media = FakeOperations::first_boot();
+        assert_eq!(orchestrate(&mut media).children.standard_applications, None);
+        assert!(!media.events.iter().any(|event| matches!(event,
+            Event::SpawnUserSession(FixedService::StandardApplications, _))));
     }
 
     #[test]

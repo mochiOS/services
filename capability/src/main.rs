@@ -7,6 +7,7 @@ mod application_data;
 mod application_data_identity;
 mod administrator;
 mod package_approval;
+mod standard_apps;
 mod app_stdio;
 mod app_image;
 mod native_app;

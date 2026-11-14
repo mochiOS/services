@@ -6,11 +6,16 @@ mod probe;
 fn package_reply_preserves_native_failures_in_both_wire_formats() {
     let mut program = probe::program();
     program.push_str("mod package_protocol {\n");
-    program.push_str(
-        include_str!("../../../user/crates/package-protocol/src/lib.rs")
-            .strip_prefix("#![no_std]\n")
-            .unwrap(),
-    );
+    // This probe embeds the production status codec, not unrelated external
+    // modules whose own tests run through Cargo. Preserve the actual wire code.
+    let codec = include_str!("../../../user/crates/package-protocol/src/lib.rs")
+        .strip_prefix("#![no_std]\n")
+        .unwrap()
+        .lines()
+        .filter(|line| !(line.starts_with("pub mod ") && line.ends_with(';')))
+        .collect::<Vec<_>>()
+        .join("\n");
+    program.push_str(&codec);
     program.push_str("}\n");
     // Exercise the production status normalizer, not a second mapping table.
     program.push_str("mod wire_status {pub mod status {\n");

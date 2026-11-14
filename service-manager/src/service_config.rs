@@ -26,6 +26,7 @@ pub(crate) enum FixedService {
     Installer,
     Update,
     Workspace,
+    StandardApplications,
 }
 
 impl FixedService {
@@ -133,6 +134,10 @@ pub(crate) const fn fixed_service_spec(service: FixedService) -> ServiceSpec {
             "/system/services/update.service",
             "/system/packages/update/manifest.toml",
         ),
+        FixedService::StandardApplications => ServiceSpec::isolated(
+            "/system/applications/AppStore.app/entry.elf",
+            "/system/packages/appstore/manifest.toml",
+        ),
         FixedService::Workspace => ServiceSpec::privileged(
             "/system/services/workspace.service",
             "/system/packages/workspace/manifest.toml",
@@ -156,12 +161,15 @@ pub(crate) fn driver_arguments(
 }
 
 pub(crate) fn fixed_service_arguments(
-    _service: FixedService,
+    service: FixedService,
     logger_endpoint: u64,
     ready_target: Option<ReadyTarget>,
 ) -> Vec<String> {
     let mut arguments = Vec::with_capacity(2);
     arguments.push(logger_endpoint.to_string());
+    if service == FixedService::StandardApplications {
+        arguments.push("--install-standard-apps".to_string());
+    }
     if let Some(target) = ready_target {
         arguments.push(alloc::format!(
             "--service-ready={}:{}",
@@ -182,6 +190,19 @@ pub(crate) fn mboot_agent_arguments(logger_endpoint: u64, stage_token: u64) -> V
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn standard_application_worker_is_the_unprivileged_store_without_a_window() {
+        let spec = fixed_service_spec(FixedService::StandardApplications);
+        assert_eq!(spec.path, "/system/applications/AppStore.app/entry.elf");
+        assert_eq!(spec.manifest_path, "/system/packages/appstore/manifest.toml");
+        assert_eq!(spec.execution_class, ExecutionClass::Unprivileged);
+        assert!(spec.security_identity);
+        assert_eq!(fixed_service_arguments(FixedService::StandardApplications, 42, None),
+            alloc::vec!["42".to_string(), "--install-standard-apps".to_string()]);
+        assert_eq!(fixed_service_arguments(FixedService::Binder, 42, None),
+            alloc::vec!["42".to_string()]);
+    }
 
     #[test]
     fn paths_classes_and_manifest_paths_match_fixed_service_policy() {

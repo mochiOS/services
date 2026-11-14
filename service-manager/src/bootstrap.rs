@@ -170,7 +170,15 @@ impl Runtime {
                     error
                 );
             })
-            .ok(),
+            .ok()
+            .map(|session| {
+                if let Err(error) = self.launch_session_image(
+                    FixedService::StandardApplications, identity, session_id, None,
+                ) {
+                    platform::logln!("service-manager.service: App Store setup spawn failed: {error:?}");
+                }
+                session
+            }),
             Err(error) => {
                 platform::logln!(
                     "service-manager.service: Binder.app spawn failed errno={}",
@@ -760,7 +768,8 @@ impl BootstrapOperations for Runtime {
             | FixedService::Binder
             | FixedService::Installer
             | FixedService::Update
-            | FixedService::Workspace => None,
+            | FixedService::Workspace
+            | FixedService::StandardApplications => None,
         };
         if matches!(service, FixedService::Display) && ready_target.is_none() {
             platform::logln!(
@@ -1176,6 +1185,7 @@ fn service_name(service: FixedService) -> &'static str {
         FixedService::Installer => "Installer.app",
         FixedService::Update => "update.service",
         FixedService::Workspace => "workspace.service",
+        FixedService::StandardApplications => "App Store setup",
     }
 }
 

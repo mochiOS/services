@@ -148,6 +148,20 @@ impl Prepared {
         deadline: u64,
         account: (u32, u64),
     ) -> Result<(), SysError> {
+        self.register(registry, peer, binding, deadline, account, false)
+    }
+
+    pub(crate) fn approve_provisioned(
+        self, registry: &Shared, peer: &Peer, binding: Binding,
+        deadline: u64, account: (u32, u64),
+    ) -> Result<(), SysError> {
+        self.register(registry, peer, binding, deadline, account, true)
+    }
+
+    fn register(
+        self, registry: &Shared, peer: &Peer, binding: Binding,
+        deadline: u64, account: (u32, u64), provisioning: bool,
+    ) -> Result<(), SysError> {
         let owner = consent_peer::capture(peer.instance.endpoint)?;
         if owner.instance != binding.requester
             || !p::handle::same_object(owner.process.0, peer.process.0)?
@@ -162,6 +176,10 @@ impl Prepared {
             return Err(SysError::from(NativeError::NotReady.into_raw()));
         }
         for entry in &registry.entries {
+            if provisioning && entry.provisioning
+                && wire::decode_plan(&entry.prepared.bytes, 0).map_err(|_| invalid())?.package_id
+                    == wire::decode_plan(&self.bytes, 0).map_err(|_| invalid())?.package_id
+            { return Err(denied()); }
             if p::handle::same_object(entry.prepared.plan.0, self.plan.0)? {
                 return Err(denied());
             }
@@ -172,11 +190,13 @@ impl Prepared {
             account,
             binding,
             deadline,
+            provisioning,
         });
         Ok(())
     }
 }
 struct Grant {
+    provisioning: bool,
     prepared: Prepared,
     owner: Peer,
     account: (u32, u64),
@@ -215,6 +235,7 @@ impl Registry {
         objects: &p::ipc::IpcObjectHandles,
         generation: u64,
         now: u64,
+        provisioning: &mut crate::standard_apps::Controller,
         session: impl FnOnce(&Peer) -> Result<Session, SysError>,
     ) -> Result<(), SysError> {
         let _package = service(sender)?;
@@ -237,18 +258,21 @@ impl Registry {
         }
         let entry = self.entries.swap_remove(matched.ok_or_else(denied)?);
         let current = consent_peer::capture(entry.owner.instance.endpoint)?;
+        let current_session = session(&current)?;
         if now >= entry.deadline
             || generation != entry.binding.policy_generation
             || current.instance != entry.binding.requester
             || !p::handle::same_object(current.process.0, objects.handles[1].handle)?
             || !p::handle::same_object(current.process.0, entry.owner.process.0)?
             || crate::execution_grant::requester_account(&current)? != entry.account
-            || session(&current)? != entry.binding.session
+            || current_session != entry.binding.session
             || p::capability::check_thread(current.instance.endpoint, entry.prepared.capability())
                 != Ok(1)
         {
             return Err(denied());
         }
+        provisioning.before_commit(&current, current_session, entry.account, now,
+            &entry.prepared.bytes, entry.provisioning)?;
         Ok(())
     }
 }
