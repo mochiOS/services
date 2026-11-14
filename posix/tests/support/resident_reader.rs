@@ -1,4 +1,5 @@
 use super::*;
+use mochios_posix_client::elf_mapping::Backend as _;
 use mochios_posix_client::{
     ObjectHandleAttachment,
     image_preparation::{self as input, Backend},
@@ -14,12 +15,18 @@ struct Reads {
     files: BTreeMap<u32, File>,
     next: u32,
     verified: usize,
+    reuse_initial: bool,
+    initial_base: u64,
 }
 thread_local! { static READS: RefCell<Reads> = RefCell::new(Reads::default()); }
 struct Reader;
 // libc malloc supplies 16-aligned owned storage; the fixture has no foreign
 // asynchronous callbacks. File references stay in the per-test thread's map.
 unsafe impl Backend for Reader {
+    fn resident_library(name: &[u8]) -> bool {
+        READS.with_borrow(|r| r.reuse_initial && name == b"libresident.so")
+    }
+
     fn critical<T>(f: impl FnOnce() -> T) -> T {
         f()
     }
@@ -199,4 +206,88 @@ fn different_roots_report_their_shared_dependency_before_a_second_mapping() {
     assert_eq!(next.retained(), 0);
     drop((first, next));
     READS.with_borrow(|r| assert!(r.files.is_empty()));
+}
+
+fn initial_exports(name: &[u8]) -> Option<(u64, u64)> {
+    let base = READS.with_borrow(|r| r.initial_base);
+    match name {
+        b"library_value" => Some((base + 16, 4)),
+        b"library_function" => Some((base, 0)),
+        _ => None,
+    }
+}
+
+#[test]
+fn authenticated_module_reuses_initial_tls_dependency_without_mapping_or_reinitializing_it() {
+    let fixture = Fixture::new(true);
+    let root = mochios_elf_signature::sign_adhoc(&fixture.bytes[0]).unwrap();
+    std::fs::write(fixture.directory.join("root.so"), root).unwrap();
+    // The initial module need not even remain available as a pathname. Its
+    // initialized image and TLS are owned by the process, not this late group.
+    std::fs::remove_file(fixture.directory.join("libresident.so")).unwrap();
+    let initial_host = Host::default();
+    let initial_range = Range { address: fixture.bases[1], length: 4096 };
+    initial_host.reserve(initial_range).unwrap();
+    initial_host.populate(initial_range).unwrap();
+    // A pinned initial function (return argument + 32) and initialized data.
+    initial_host.write(initial_range.address, &[0x89, 0xf8, 0x83, 0xc0, 32, 0xc3]).unwrap();
+    initial_host.write(initial_range.address + 16, &32i32.to_ne_bytes()).unwrap();
+    initial_host.protect(initial_range, 5).unwrap();
+    READS.with_borrow_mut(|r| *r = Reads { reuse_initial: true, initial_base: initial_range.address, ..Default::default() });
+    let mut library = input::resident::Library::<Reader, Host, 1>::default();
+    library.set_external_lookup(initial_exports).unwrap();
+    library.open(&Reader, fixture.directory.join("root.so").as_os_str().as_bytes(),
+        Default::default(), Default::default(), fixture.bases[0]).unwrap();
+    READS.with_borrow(|r| { assert_eq!(r.verified, 1); assert_eq!(r.files.len(), 1); });
+    library.install(Host::default).unwrap();
+    assert_eq!(library.retained(), 1);
+    library.initialize(invoke).unwrap();
+    let address = library.symbol(b"evaluate").unwrap().unwrap();
+    let evaluate: unsafe extern "C" fn(i32) -> i32 = unsafe { std::mem::transmute(address) };
+    assert_eq!(unsafe { evaluate(7) }, 82);
+    library.close(invoke).unwrap();
+    drop(library);
+    assert!(access_at(initial_range.address).is_some());
+    assert_eq!(unsafe { (initial_range.address as *const u8).add(16).cast::<i32>().read() }, 32);
+    initial_host.release(initial_range).unwrap();
+    READS.with_borrow(|r| assert!(r.files.is_empty()));
+}
+
+#[test]
+fn reusing_initial_dependency_never_skips_new_module_authentication() {
+    let fixture = Fixture::new(true);
+    READS.with_borrow_mut(|r| *r = Reads { reuse_initial: true, ..Default::default() });
+    let mut library = input::resident::Library::<Reader, Host, 1>::default();
+    library.set_external_lookup(initial_exports).unwrap();
+    assert_eq!(library.open(&Reader, fixture.directory.join("root.so").as_os_str().as_bytes(),
+        Default::default(), Default::default(), fixture.bases[0]), Err(13));
+    assert_eq!(library.retained(), 0);
+    drop(library);
+    READS.with_borrow(|r| assert!(r.files.is_empty()));
+}
+
+#[test]
+fn named_versions_cannot_be_satisfied_by_unversioned_initial_metadata() {
+    let fixture = Fixture::new(true);
+    let script = fixture.directory.join("versions.map");
+    std::fs::write(&script, "RESIDENT_1 { global: library_value; library_function; local: *; };\n").unwrap();
+    let sysroot = run(Command::new("rustc").args(["--print", "sysroot"]));
+    let linker = Path::new(sysroot.trim()).join("lib/rustlib/x86_64-unknown-linux-gnu/bin/rust-lld");
+    run(Command::new(&linker).args(["-flavor", "gnu", "-shared", "-soname", "libresident.so"])
+        .arg("--version-script").arg(&script).arg(fixture.directory.join("libresident.so.o"))
+        .arg("-o").arg(fixture.directory.join("libresident.so")));
+    run(Command::new(&linker).args(["-flavor", "gnu", "-shared", "-soname", "root.so"])
+        .arg(fixture.directory.join("root.so.o")).arg("-L").arg(&fixture.directory)
+        .arg("-l:libresident.so").arg("-o").arg(fixture.directory.join("root.so")));
+    let path = fixture.directory.join("root.so");
+    let bytes = std::fs::read(&path).unwrap();
+    std::fs::write(&path, mochios_elf_signature::sign_adhoc(&bytes).unwrap()).unwrap();
+    READS.with_borrow_mut(|r| *r = Reads { reuse_initial: true, ..Default::default() });
+    let mut library = input::resident::Library::<Reader, Host, 1>::default();
+    library.set_external_lookup(initial_exports).unwrap();
+    assert_eq!(library.open(&Reader, path.as_os_str().as_bytes(), Default::default(),
+        Default::default(), fixture.bases[0]), Err(mochios_posix_client::newlib_errno::ENOTSUP));
+    assert_eq!(library.retained(), 0);
+    drop(library);
+    READS.with_borrow(|r| { assert_eq!(r.verified, 1); assert!(r.files.is_empty()); });
 }
