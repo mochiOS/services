@@ -57,10 +57,9 @@ mod mem {{pub mod paging {{
         ranges = root.join("core/src/task/memory_range.rs")
     );
     let syscall = include_str!("../../../core/src/syscall/mod.rs");
-    program.push_str(probe::between(
-        syscall,
+    program.push_str(&probe::definition(
+        include_str!("../../../core/src/syscall/mod.rs"),
         "fn is_canonical_user_range(",
-        "fn current_process_name_for_log(",
     ));
     program.push_str("mod implementation { use mnu_abi::status::Error; const SUCCESS:u64=0;\n");
     let memory = include_str!("../../../core/src/syscall/memory.rs");
@@ -74,10 +73,9 @@ mod mem {{pub mod paging {{
         "fn memory_range_is_mapped(",
         "/// Observe only",
     ));
-    program.push_str(probe::between(
-        memory,
-        "pub fn check_range(",
-        "#[inline(never)]\nfn protect_memory_pages(",
+    program.push_str(&probe::definition(
+        include_str!("../../../core/src/syscall/memory.rs"),
+        "fn check_range(",
     ));
     program.push_str(r#"
 }

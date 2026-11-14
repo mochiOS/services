@@ -1,5 +1,8 @@
-//! Compile the actual fault classification and interrupt resolution branch.
-//! Mock only scheduling, backing resolution and exception delivery.
+#[allow(dead_code)]
+#[path = "support/native_error_probe.rs"]
+mod probe;
+// Compile the actual fault classification and interrupt resolution branch.
+// Mock only scheduling, backing resolution and exception delivery.
 use std::io::Write;
 use std::process::{Command, Stdio};
 
@@ -66,7 +69,7 @@ mod mnu_abi {
     pub enum MemoryFaultCause {Unmapped,AccessDenied,OutsideBacking,ResourceUnavailable,BackingFailure,Unresolved}
 }
 mod mem {pub mod vm_object {
-    #[derive(Clone,Copy,Debug,PartialEq,Eq)] pub enum VmPageError {OutsideBacking,Operation(u64)}
+    #[derive(Clone,Copy,Debug,PartialEq,Eq)] pub enum VmPageError {OutsideBacking,Operation(crate::result::OperationError)}
 }}
 mod syscall {
     pub mod process {
@@ -83,8 +86,8 @@ mod syscall {
         }
         use std::cell::Cell;
     }
-    pub fn prepare_user_exception(registers:&mut [u64;21], address:u64, cause:crate::mnu_abi::MemoryFaultCause)->bool {
-        assert_eq!(address,0x5000); registers[0]=0xdead;
+    pub fn prepare_user_exception(registers:&mut crate::cpu::context::PageFaultFrame, address:u64, cause:crate::mnu_abi::MemoryFaultCause)->bool {
+        assert_eq!(address,0x5000); registers.gprs.r15=0xdead;
         crate::DELIVERED.with(|slot|slot.set(Some(cause))); true
     }
 }
@@ -115,6 +118,7 @@ thread_local! {
 fn leave_to_user(entered:bool) {assert!(entered); LEAVES.with(|count|count.set(count.get()+1));}
 fn try_grow_user_stack(address:u64)->bool {assert_eq!(address,0x5000); GROWS.with(|count|count.set(count.get()+1)); false}
 fn actual_handler(registers:&mut [u64;21], is_user_mode:bool, copy_on_write_failed:bool) {
+    let registers=unsafe{&mut *(registers.as_mut_ptr().cast::<crate::cpu::context::PageFaultFrame>())};
     let faulting_addr=Address(0x5000);
     let error_code=x86_64::structures::idt::PageFaultErrorCode(3);
     let entered_from_user=is_user_mode;
@@ -140,30 +144,30 @@ fn run(outcome:Result<(),Fault>, expected_yields:usize, expected_cause:Option<Ca
 fn main() {
     run(Ok(()),0,None);
     let busy=mnu_abi::status::Error::NotReady.into_raw();
-    for fault in [Fault::Operation(busy),Fault::Backing(Backing::Operation(busy))] {
+    for fault in [Fault::Operation(crate::result::OperationError::from_wire(busy)),Fault::Backing(Backing::Operation(crate::result::OperationError::from_wire(busy)))] {
         assert!(fault.is_retryable());run(Err(fault),1,None);
     }
     for (error,cause) in [(mnu_abi::status::Error::ResourceUnavailable,Cause::ResourceUnavailable),
         (mnu_abi::status::Error::BackingFailure,Cause::BackingFailure),
         (mnu_abi::status::Error::AccessDenied,Cause::AccessDenied)] {
-        for fault in [Fault::Operation(error.into_raw()),Fault::Backing(Backing::Operation(error.into_raw()))] {
+        for fault in [Fault::Operation(crate::result::OperationError::from_wire(error.into_raw())),Fault::Backing(Backing::Operation(crate::result::OperationError::from_wire(error.into_raw())))] {
             assert!(!fault.is_retryable());run(Err(fault),0,Some(cause));
         }
     }
     for (fault,cause) in [
         (Fault::Unmapped,Cause::Unmapped), (Fault::AccessDenied,Cause::AccessDenied),
         (Fault::Backing(Backing::OutsideBacking),Cause::OutsideBacking),
-        (Fault::Backing(Backing::Operation((-5i64) as u64)),Cause::BackingFailure),
-        (Fault::Operation((-22i64) as u64),Cause::Unresolved),
+        (Fault::Backing(Backing::Operation(crate::result::OperationError::from_wire((-5i64) as u64))),Cause::BackingFailure),
+        (Fault::Operation(crate::result::OperationError::from_wire((-22i64) as u64)),Cause::Unresolved),
     ] {assert!(!fault.is_retryable());run(Err(fault),0,Some(cause));}
     // Opaque provider values are not native readiness or allocation signals.
     for raw in [-11i64,-12,-5,-22,-38] {
-        for (fault,cause) in [(Fault::Operation(raw as u64),Cause::Unresolved),
-            (Fault::Backing(Backing::Operation(raw as u64)),Cause::BackingFailure)] {
+        for (fault,cause) in [(Fault::Operation(crate::result::OperationError::from_wire(raw as u64)),Cause::Unresolved),
+            (Fault::Backing(Backing::Operation(crate::result::OperationError::from_wire(raw as u64))),Cause::BackingFailure)] {
             assert!(!fault.is_retryable());run(Err(fault),0,Some(cause));
         }
     }
-    OUTCOME.with(|slot|slot.set(Err(Fault::Operation(busy))));
+    OUTCOME.with(|slot|slot.set(Err(Fault::Operation(crate::result::OperationError::from_wire(busy)))));
     YIELDS.with(|slot|slot.set(0)); LEAVES.with(|slot|slot.set(0));
     FATAL.with(|slot|slot.set(0)); RESOLVES.with(|slot|slot.set(0));
     let mut registers=[0x77;21];
@@ -187,6 +191,15 @@ fn main() {
     ));
     std::fs::create_dir(&directory).unwrap();
     let binary = directory.join("probe");
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()
+        .unwrap();
+    program.push_str(&format!(
+        "mod cpu {{#[path={:?}]pub mod context;}}",
+        root.join("core/src/cpu/context.rs")
+    ));
+    program.push_str(&probe::operation_error());
     let mut compiler = Command::new("rustc")
         .args(["--edition=2024", "-Awarnings", "-"])
         .arg("-o")

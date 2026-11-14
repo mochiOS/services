@@ -109,8 +109,8 @@ mod task{{
  pub struct Borrowed;impl Borrowed{{pub fn virt_start(&self)->u64{{0}}pub fn end(&self)->Option<u64>{{Some(0)}}}}
  #[derive(Clone)]pub struct MemoryRegion{{pub address:u64,pub size:u64,pub access:u64,pub shared:bool,pub max:u64,pub object:Option<Arc<mem::vm_object::VmObject>>}}
  impl MemoryRegion{{
-  pub fn anonymous(a:u64,s:u64,access:u64,_:u64,_:bool,shared:bool)->Self{{Self{{address:a,size:s,access,shared,max:7,object:None}}}}
-  pub fn file_backed(a:u64,s:u64,access:u64,_:u64,o:Arc<mem::vm_object::VmObject>,_:u64,_:bool,shared:bool,max:u64)->Self{{Self{{address:a,size:s,access,shared,max,object:Some(o)}}}}
+  pub fn anonymous(a:u64,s:u64,access:u64,options:u64)->Self{{Self{{address:a,size:s,access,shared:options & 1 != 0,max:7,object:None}}}}
+  pub fn file_backed(a:u64,s:u64,access:u64,options:u64,o:Arc<mem::vm_object::VmObject>,_:u64,max:u64)->Self{{Self{{address:a,size:s,access,shared:options & 1 != 0,max,object:Some(o)}}}}
   pub fn start(&self)->u64{{self.address}}pub fn end(&self)->Option<u64>{{self.address.checked_add(self.size)}}
   pub fn len(&self)->u64{{self.size}}pub fn is_shared(&self)->bool{{self.shared}}pub fn permits_access(&self,a:u64)->bool{{self.access&a==a}}
   pub fn backing(&self)->&Self{{self}}pub fn file_object(&self)->Option<&Arc<mem::vm_object::VmObject>>{{self.object.as_ref()}}
@@ -217,6 +217,16 @@ fn main(){
  STATE.with_borrow(|p|{assert_eq!(p.regions.len(),1);assert!(p.regions[0].object.is_none());});
 }
 "#);
+    program.push_str(&probe::operation_error());
+    program.push_str(
+        r#"
+mod ipc {pub mod provider {
+ pub fn memory_object(owner:&u64)->Result<u64,crate::OperationError>{
+  crate::syscall::handle::provider_memory_object(owner).map_err(crate::OperationError::from_wire)
+ }
+}}
+"#,
+    );
     probe::run_with_toolchain(&program, "nightly-2026-07-16");
 }
 
@@ -310,5 +320,6 @@ fn main(){
  }
 }
 "#);
+
     probe::run(&program);
 }

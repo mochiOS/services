@@ -71,10 +71,9 @@ fn install(object: KernelObject, rights: HandleRights) {
 }
 "#,
     );
-    program.push_str(probe::between(
-        source,
-        "pub fn memory_object_length(",
-        "pub fn memory_object_resize(",
+    program.push_str(&probe::definition(
+        include_str!("../../../core/src/syscall/handle/memory.rs"),
+        "fn memory_object_length(",
     ));
     program.push_str(probe::between(
         source,

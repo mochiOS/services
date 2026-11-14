@@ -1,3 +1,6 @@
+#[allow(dead_code)]
+#[path = "support/native_error_probe.rs"]
+mod probe;
 use std::io::Write;
 use std::process::{Command, Stdio};
 
@@ -55,16 +58,16 @@ fn main() {
             assert!(page[length..].iter().all(|byte| *byte == 0));
         }
         object.outcome = Err((-5i64) as u64);
-        assert_eq!(object.page(7), Err(VmPageError::Operation((-5i64) as u64)));
+        assert_eq!(object.page(7), Err(VmPageError::Operation(crate::result::OperationError::from_wire((-5i64) as u64))));
         object.outcome = Err(syscall::EINVAL);
         // Compatibility-looking values from a backing are opaque. Only the
         // RAM implementation's native invalid-index result denotes its EOF.
-        assert_eq!(object.page(7), Err(VmPageError::Operation(syscall::EINVAL)));
+        assert_eq!(object.page(7), Err(VmPageError::Operation(crate::result::OperationError::from_wire(syscall::EINVAL))));
         for error in [mnu_abi::status::Error::InvalidArgument, mnu_abi::status::Error::ResourceUnavailable, mnu_abi::status::Error::BackingFailure] {
             object.outcome=Err(error.into_raw());
             let expected=match (&object.source,error) {
                 (VmObjectSource::Memory(_),mnu_abi::status::Error::InvalidArgument)=>VmPageError::OutsideBacking,
-                _=>VmPageError::Operation(error.into_raw()),
+                _=>VmPageError::Operation(crate::result::OperationError::from_wire(error.into_raw())),
             };
             assert_eq!(object.page(7),Err(expected));
         }
@@ -85,6 +88,7 @@ fn main() {
     ));
     std::fs::create_dir(&directory).unwrap();
     let binary = directory.join("probe");
+    program.push_str(&probe::operation_error());
     let mut compiler = Command::new("rustc")
         .args(["--edition=2024", "-Awarnings", "-", "-o"])
         .arg(&binary)

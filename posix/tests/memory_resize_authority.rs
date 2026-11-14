@@ -63,11 +63,27 @@ mod task {
         "#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]\npub struct ObjectHandle",
         "/// Kernel object identity",
     ));
-    program.push_str(probe::between(
-        source,
-        "pub fn memory_object_length(",
-        "pub fn read(",
-    ));
+    program.push_str(
+        &[
+            probe::definition(
+                include_str!("../../../core/src/syscall/handle/memory.rs"),
+                "fn memory_object_length(",
+            ),
+            probe::definition(
+                include_str!("../../../core/src/syscall/handle/memory.rs"),
+                "fn memory_object_resize(",
+            ),
+            probe::definition(
+                include_str!("../../../core/src/syscall/handle.rs"),
+                "fn object_native(",
+            ),
+            probe::definition(
+                include_str!("../../../core/src/syscall/handle.rs"),
+                "fn object_with_rights_native(",
+            ),
+        ]
+        .join("\n"),
+    );
     program.push_str(
         r#"
 fn main() {

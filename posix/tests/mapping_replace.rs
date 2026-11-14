@@ -138,13 +138,12 @@ fn reset()->task::Process {
     PAGES.with_borrow_mut(|p|*p=vec![0x1000,0x2000,0x4000,0x9000]);
     EVENTS.with_borrow_mut(|events|{events.clear();events.reserve(16);}); FAIL_SYNC.set(false);
     FAIL_WALK.set(false);HAS_ROOT.set(true);
-    let mut old=MemoryRegion::file_backed(0x1000,0x4000,3,2,
-        Arc::new(mem::vm_object::VmObject{busy:false}),8192,true,true,3);
+    let mut old=MemoryRegion::file_backed(0x1000, 0x4000, 3, 2, Arc::new(mem::vm_object::VmObject{busy:false}), 8192, 3);
     assert!(old.set_access(0x4000,0x1000,1));
     for p in 0..4 {old.mark_dirty_page(p);}
     task::Process{memory_regions:vec![old],dma:false,mmio:false}
 }
-fn replacement()->MemoryRegion {MemoryRegion::anonymous(0x2000,0x2000,3,0,true,false)}
+fn replacement()->MemoryRegion {MemoryRegion::anonymous(0x2000, 0x2000, 3, 0)}
 fn main() {
     use mem::mapping_replace::replace;
     let mut process=reset();
@@ -162,7 +161,7 @@ fn main() {
     for mode in 0..7 {
         let mut process=reset();
         process.dma=mode==0; process.mmio=mode==1;
-        if mode==2 {process.memory_regions[0]=MemoryRegion::file_backed(0x1000,0x4000,3,2,Arc::new(mem::vm_object::VmObject{busy:true}),0,true,true,3);}
+        if mode==2 {process.memory_regions[0]=MemoryRegion::file_backed(0x1000, 0x4000, 3, 2, Arc::new(mem::vm_object::VmObject{busy:true}), 0, 3);}
         FAIL_SYNC.set(mode==4);
         FAIL_WALK.set(mode==5);HAS_ROOT.set(mode!=6);
         let result=replace(&mut process,replacement(),Some(if mode==3 {4*4096}else{5*4096}));

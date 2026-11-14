@@ -196,5 +196,16 @@ fn main(){
     assert_eq!(memory.flush_range(u64::MAX,0),Ok(()));
 }
 "#);
+    program.push_str(&probe::operation_error());
+    program.push_str(r#"
+mod ipc { pub mod provider {
+    pub fn write_at(owner:&usize,offset:u64,input:&[u8])->Result<usize,crate::OperationError>{
+        crate::syscall::handle::provider_write_at(owner,offset,input).map_err(crate::OperationError::from_wire)
+    }
+    pub fn sync(owner:&usize)->Result<(),crate::OperationError>{
+        crate::syscall::handle::provider_sync(owner).map_err(crate::OperationError::from_wire)
+    }
+}}
+"#);
     probe::run_with_toolchain(&program, "nightly-2026-07-16");
 }

@@ -77,13 +77,16 @@ unsafe impl std::alloc::GlobalAlloc for Allocator {
     probe.push_str(&source[removal_start..removal_end]);
     probe.push_str("\n} }\n");
     probe.push_str(r#"
+fn apply_access(region:&mut MemoryRegion,start:u64,length:u64,access:u64)->bool {
+    match region.prepare_access(start,length,access) {
+        Ok(prepared)=>{region.publish_access(prepared);true},Err(_)=>false
+    }
+}
 fn main() {
     use mnu_abi::*;
     let object = Arc::new(mem::vm_object::VmObject);
-    let mut region = MemoryRegion::file_backed(0x1000, 0x4000,
-        MEMORY_ACCESS_READ | MEMORY_ACCESS_WRITE, MEMORY_MAP_SHARED,
-        object.clone(), 8192, true, true, MEMORY_ACCESS_READ | MEMORY_ACCESS_WRITE);
-    assert!(region.set_access(0x2000, 0x1000, MEMORY_ACCESS_READ));
+    let mut region = MemoryRegion::file_backed(0x1000, 0x4000, MEMORY_ACCESS_READ | MEMORY_ACCESS_WRITE, MEMORY_MAP_SHARED, object.clone(), 8192, MEMORY_ACCESS_READ | MEMORY_ACCESS_WRITE);
+    assert!(apply_access(&mut region,0x2000, 0x1000, MEMORY_ACCESS_READ));
     assert!(!region.allows_write_at(0x2000));
     assert!(region.allows_write_at(0x3000));
     for page in 0..4 { region.mark_dirty_page(page); }
@@ -103,26 +106,23 @@ fn main() {
     assert_eq!(slice.dirty_pages(), &[0, 1]);
     assert!(!slice.allows_write_at(0x2000));
     assert!(slice.allows_write_at(0x3000));
-    assert!(!slice.set_access(0x2000, 0x2000, MEMORY_ACCESS_EXECUTE));
+    assert!(!apply_access(&mut slice,0x2000, 0x2000, MEMORY_ACCESS_EXECUTE));
     assert!(!slice.allows_execute_at(0x3000));
-    assert!(slice.set_access(0x2000, 0x1000, MEMORY_ACCESS_READ | MEMORY_ACCESS_WRITE));
+    assert!(apply_access(&mut slice,0x2000, 0x1000, MEMORY_ACCESS_READ | MEMORY_ACCESS_WRITE));
     assert!(slice.allows_write_range(0x2000, 0x2000));
     assert_eq!(region.slice(0, 0x2000).unwrap_err(), MemoryRangeError::InvalidRange);
     assert_eq!(region.slice(0x2000, 0x2000).unwrap_err(), MemoryRangeError::InvalidRange);
-    let mut restricted = MemoryRegion::file_backed(0x1000, 0x2000,
-        MEMORY_ACCESS_READ, MEMORY_MAP_SHARED, object.clone(), 0,
-        false, true, MEMORY_ACCESS_READ);
-    assert!(!restricted.set_access(0x1000, 0x2000, MEMORY_ACCESS_WRITE));
+    let mut restricted = MemoryRegion::file_backed(0x1000, 0x2000, MEMORY_ACCESS_READ, MEMORY_MAP_SHARED, object.clone(), 0, MEMORY_ACCESS_READ);
+    assert!(!apply_access(&mut restricted,0x1000, 0x2000, MEMORY_ACCESS_WRITE));
     let mut restricted_slice = restricted.slice(0x2000, 0x3000).unwrap();
-    assert!(!restricted_slice.set_access(0x2000, 0x1000, MEMORY_ACCESS_WRITE));
-    let private = MemoryRegion::file_backed(0x1000, 0x2000,
-        MEMORY_ACCESS_READ | MEMORY_ACCESS_WRITE, 0, object, 0, true, false, MEMORY_ACCESS_ALL);
+    assert!(!apply_access(&mut restricted_slice,0x2000, 0x1000, MEMORY_ACCESS_WRITE));
+    let private = MemoryRegion::file_backed(0x1000, 0x2000, MEMORY_ACCESS_READ | MEMORY_ACCESS_WRITE, 0, object, 0, MEMORY_ACCESS_ALL);
     assert!(!private.is_shared());
-    assert!(!private.backing().file_shared());
-    let mut anonymous = MemoryRegion::anonymous(0x1000, 0x2000, MEMORY_ACCESS_WRITE, MEMORY_MAP_SHARED, true, true);
+    assert!(!private.is_shared());
+    let mut anonymous = MemoryRegion::anonymous(0x1000, 0x2000, MEMORY_ACCESS_WRITE, MEMORY_MAP_SHARED);
     assert!(anonymous.is_shared());
     if let MemoryBacking::Anonymous{data,..}=&mut anonymous.backing {*data=vec![7;8192];}
-    assert!(anonymous.set_access(0x1000,4096,MEMORY_ACCESS_READ));
+    assert!(apply_access(&mut anonymous,0x1000,4096,MEMORY_ACCESS_READ));
     for page in [0,1,17] {anonymous.mark_dirty_page(page);}
     for allocation in 0..3 {
         let live=LIVE.load(Ordering::Relaxed);FAIL_AFTER.set(Some(allocation));
@@ -130,11 +130,10 @@ fn main() {
     }
     let mut copied=anonymous.try_clone().unwrap();assert_eq!(copied.dirty_pages(),&[0,1,17]);assert_eq!(copied.access_ranges.len(),anonymous.access_ranges.len());
     for (a,b) in copied.access_ranges.iter().zip(&anonymous.access_ranges){assert_eq!((a.start,a.end,a.access),(b.start,b.end,b.access));}
-    if let MemoryBacking::Anonymous{data,writable,shared}=&mut copied.backing {assert_eq!(data,&vec![7;8192]);assert!(*writable);assert!(*shared);data[0]=9;}
+    if let MemoryBacking::Anonymous{data}=&mut copied.backing {assert_eq!(data,&vec![7;8192]);data[0]=9;}
     if let MemoryBacking::Anonymous{data,..}=&anonymous.backing {assert_eq!(data[0],7);}
     // Exercise the production dirty-page set with nonsequential/repeated faults.
-    let mut dirty = MemoryRegion::anonymous(0x1000, 16 * 4096,
-        MEMORY_ACCESS_READ | MEMORY_ACCESS_WRITE, 0, true, false);
+    let mut dirty = MemoryRegion::anonymous(0x1000, 16 * 4096, MEMORY_ACCESS_READ | MEMORY_ACCESS_WRITE, 0);
     for page in [9, 2, 15, 0, 9, 7, 2, 15, 1] { dirty.mark_dirty_page(page); }
     assert_eq!(dirty.dirty_pages(), &[0, 1, 2, 7, 9, 15]);
     let mut cloned = dirty.try_clone().unwrap();
@@ -150,8 +149,7 @@ fn main() {
     sliced.mark_dirty_page(1);
     assert_eq!(sliced.dirty_pages(), &[1]);
     // Large monotonic first-write workloads retain every page exactly once.
-    let mut sequential = MemoryRegion::anonymous(0x1000, 100_000 * 4096,
-        MEMORY_ACCESS_READ | MEMORY_ACCESS_WRITE, 0, true, false);
+    let mut sequential = MemoryRegion::anonymous(0x1000, 100_000 * 4096, MEMORY_ACCESS_READ | MEMORY_ACCESS_WRITE, 0);
     for page in 0..100_000 { sequential.mark_dirty_page(page); }
     for page in (0..100_000).rev() { sequential.mark_dirty_page(page); }
     assert_eq!(sequential.dirty_pages().len(), 100_000);
@@ -168,8 +166,7 @@ fn main() {
     assert!(!removed[0].allows_write_at(0x2000));
     assert_eq!(process.prepare_remove_memory_range(u64::MAX, 4096).unwrap_err(), MemoryRangeError::InvalidRange);
     assert_eq!(process.prepare_remove_memory_range(0x1000, 0).unwrap_err(), MemoryRangeError::InvalidRange);
-    let invalid_offset = MemoryRegion::file_backed(0x1000,0x2000,
-        MEMORY_ACCESS_READ,0,Arc::new(mem::vm_object::VmObject),u64::MAX,false,false,MEMORY_ACCESS_READ);
+    let invalid_offset = MemoryRegion::file_backed(0x1000, 0x2000, MEMORY_ACCESS_READ, 0, Arc::new(mem::vm_object::VmObject), u64::MAX, MEMORY_ACCESS_READ);
     assert_eq!(invalid_offset.slice(0x2000,0x3000).unwrap_err(),MemoryRangeError::InvalidRange);
 }
 "#);

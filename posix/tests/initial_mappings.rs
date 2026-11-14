@@ -18,11 +18,7 @@ fn native_creation_prepares_mappings_after_tls_and_before_process_publication() 
     let mappings = body
         .find("initial_mappings::prepare(new_pt_phys, startup, &mut deferred_zero_regions)")
         .unwrap();
-    assert!(
-        body.find("map_initial_tls(new_pt_phys, aslr_seed)")
-            .unwrap()
-            < mappings
-    );
+    assert!(body.find("map_initial_tls(&mut edit, aslr_seed)").unwrap() < mappings);
     assert!(
         mappings
             < body
@@ -114,7 +110,7 @@ mod task {
         pub fn end(&self) -> Option<u64> {
             self.start.checked_add(self.length)
         }
-        pub fn anonymous(start: u64, length: u64, _: u64, _: u64, _: bool, _: bool) -> Self {
+        pub fn anonymous(start: u64, length: u64, _: u64, _: u64) -> Self {
             Self {
                 start,
                 length,
@@ -129,8 +125,6 @@ mod task {
             _: u64,
             object: Arc<Object>,
             _: u64,
-            _: bool,
-            _: bool,
             max: u64,
         ) -> Self {
             Self {

@@ -95,10 +95,9 @@ mod task {
 }
 use task::{HandleRights,KernelObject,ObjectHandleEntry};
 "#);
-    program.push_str(probe::between(
-        include_str!("../../../core/src/syscall/handle.rs"),
-        "pub fn memory_object_create(",
-        "pub fn memory_object_length(",
+    program.push_str(&probe::definition(
+        include_str!("../../../core/src/syscall/handle/memory.rs"),
+        "fn memory_object_create(",
     ));
     program.push_str(r#"
 fn reset(){

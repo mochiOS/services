@@ -13,7 +13,7 @@ fn anonymous_faults_prepare_no_heap_page_and_file_faults_keep_their_backing_byte
     let select = probe::between(
         source,
         "let source: &[u8] = match (pager.as_ref(), page.as_ref())",
-        "let install = ||",
+        "let mut install =",
     );
     let mut program = String::from(
         r#"
@@ -41,7 +41,7 @@ unsafe impl GlobalAlloc for Allocator {
     unsafe fn dealloc(&self,p:*mut u8,layout:Layout){unsafe{System.dealloc(p,layout)}}
 }
 #[global_allocator]static ALLOCATOR:Allocator=Allocator;
-#[derive(Debug,PartialEq)]enum MemoryFault{Operation(u64),Backing(u64)}
+#[derive(Debug,PartialEq)]enum MemoryFault{Operation(mnu_abi::status::Error),Backing(u64)}
 struct Object{bytes:Arc<[u8;4096]>,generation:u64,error:Option<u64>}
 impl Object {
     fn page(&self,index:u64)->Result<Arc<[u8;4096]>,u64>{

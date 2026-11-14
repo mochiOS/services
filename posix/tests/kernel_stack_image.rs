@@ -126,7 +126,7 @@ fn partial_mapping_and_translation_failures_never_detach_the_running_stack() {
                     backend.fail_translate = address;
                 }
             }
-            assert!(production::prepare_kernel_stack_user_table(BASE, 8192).is_none());
+            assert!(unsafe { production::prepare_kernel_stack_user_table(BASE, 8192) }.is_none());
             assert_original();
         }
     }
@@ -136,20 +136,23 @@ fn partial_mapping_and_translation_failures_never_detach_the_running_stack() {
 fn later_preparation_failure_drops_only_the_new_alias_and_restores_stack_ownership() {
     let _serial = reset();
     let failed: Result<(), u64> = (|| {
-        let _prepared = production::prepare_kernel_stack_user_table(BASE, 8192).unwrap();
+        let _prepared = unsafe { production::prepare_kernel_stack_user_table(BASE, 8192) }.unwrap();
         assert_eq!(KSTACK_SLOTS.lock()[0].user_page_table, 4096);
         assert_eq!(KSTACK_SLOTS.lock()[0].mapped_pages, KSTACK_SLOT_RESERVED);
         assert_eq!(BACKEND.lock().unwrap().maps.len(), 6);
         Err(mnu_abi::status::Error::BackingFailure.into_raw()) // A borrowed-PTE transaction can still fail here.
     })();
-    assert_eq!(failed, Err(mnu_abi::status::Error::BackingFailure.into_raw()));
+    assert_eq!(
+        failed,
+        Err(mnu_abi::status::Error::BackingFailure.into_raw())
+    );
     assert_original();
 }
 
 #[test]
 fn commit_alone_detaches_old_aliases_and_publishes_new_owner() {
     let _serial = reset();
-    let prepared = production::prepare_kernel_stack_user_table(BASE, 8192).unwrap();
+    let prepared = unsafe { production::prepare_kernel_stack_user_table(BASE, 8192) }.unwrap();
     assert!(!BACKEND.lock().unwrap().detached.contains(&4096));
     prepared.commit();
     assert_eq!(
@@ -169,11 +172,11 @@ fn commit_alone_detaches_old_aliases_and_publishes_new_owner() {
 fn invalid_or_busy_stack_targets_leave_ownership_and_mappings_unchanged() {
     let _serial = reset();
     for (base, target) in [(BASE, 0), (BASE, 8193), (BASE, 4096), (BASE + 1, 8192)] {
-        assert!(production::prepare_kernel_stack_user_table(base, target).is_none());
+        assert!(unsafe { production::prepare_kernel_stack_user_table(base, target) }.is_none());
         assert_original();
     }
     KSTACK_SLOTS.lock()[0].mapped_pages = KSTACK_SLOT_RESERVED;
-    assert!(production::prepare_kernel_stack_user_table(BASE, 8192).is_none());
+    assert!(unsafe { production::prepare_kernel_stack_user_table(BASE, 8192) }.is_none());
 }
 
 #[test]
