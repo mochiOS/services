@@ -2,6 +2,9 @@ use std::fs;
 use std::io::Write;
 use std::process::{Command, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
+#[allow(dead_code)]
+#[path = "support/native_error_probe.rs"]
+mod native_probe;
 
 struct Temporary(std::path::PathBuf);
 
@@ -29,7 +32,7 @@ fn production_region_preserves_authority_offsets_and_access_when_sliced() {
         .unwrap();
     let mut probe = format!(
         "extern crate alloc; use alloc::sync::Arc;\n\
-         mod mem {{ pub mod vm_object {{ #[derive(Debug)] pub struct VmObject; impl VmObject {{pub fn page_is_resident(&self,_:u64)->Result<bool,crate::mnu_abi::status::Error>{{Ok(false)}}}} }} }}\n\
+         mod mem {{ pub use crate::scan_budget; pub mod paging {{pub fn is_user_range_mapped_in_table(_:u64,_:u64,length:u64)->bool{{assert!(crate::VM_LOCKED.get());assert_eq!(length,1);crate::PTE_QUERIES.set(crate::PTE_QUERIES.get()+1);crate::RESIDENT.get()}}}} pub mod vm_object {{ #[derive(Debug)] pub struct VmObject; impl VmObject {{pub fn page_is_resident(&self,_:u64)->Result<bool,crate::mnu_abi::status::Error>{{Ok(false)}}}} }} }}\n\
          mod mnu_abi {{ pub const MEMORY_ACCESS_READ:u64={};\n\
          pub const MEMORY_ACCESS_WRITE:u64={}; pub const MEMORY_ACCESS_EXECUTE:u64={};\n\
          pub const MEMORY_ACCESS_ALL:u64={}; pub const MEMORY_MAP_SHARED:u64={}; pub mod status {{\n{status}\n}} }}\n",
@@ -56,6 +59,36 @@ unsafe impl std::alloc::GlobalAlloc for Allocator {
 "#);
     probe.push_str(&source[definitions_start..definitions_end]);
     probe.push_str(&source[implementation_start..implementation_end]);
+    let budget = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../core/src/mem/scan_budget.rs")
+        .canonicalize()
+        .unwrap();
+    probe.push_str(&format!("#[path={budget:?}]pub mod scan_budget;\n"));
+    probe.push_str(r#"
+thread_local!{
+ static VM_LOCKED:Cell<bool>=const{Cell::new(false)};
+ static RESIDENT:Cell<bool>=const{Cell::new(false)};
+ static PTE_QUERIES:Cell<usize>=const{Cell::new(0)};
+}
+mod task{
+ pub struct Process{pub regions:Vec<crate::MemoryRegion>}
+ impl Process{pub fn page_table(&self)->Option<u64>{Some(7)}pub fn memory_regions(&self)->&[crate::MemoryRegion]{&self.regions}}
+ thread_local!{pub static PROCESS:std::cell::RefCell<Process>=const{std::cell::RefCell::new(Process{regions:Vec::new()})};}
+ pub struct Thread;impl Thread{pub fn process_id(&self)->u64{1}}
+ pub fn current_thread_id()->Option<u64>{Some(1)}
+ pub fn with_thread<T>(_:u64,body:impl FnOnce(&Thread)->T)->Option<T>{Some(body(&Thread))}
+ pub fn with_process<T>(_:u64,body:impl FnOnce(&Process)->T)->Option<T>{
+  assert!(!crate::VM_LOCKED.replace(true));let result=PROCESS.with_borrow(body);assert!(crate::VM_LOCKED.replace(false));Some(result)
+ }
+}
+"#);
+    for declaration in ["pub fn validate_user_ptr(", "fn is_canonical_user_range("] {
+        probe.push_str(&native_probe::definition(
+            include_str!("../../../core/src/syscall/mod.rs"),
+            declaration,
+        ));
+        probe.push('\n');
+    }
     // Also compile the production two-phase removal planner. Metadata remains
     // unchanged while PTE revocation can still fail; commit happens afterward.
     probe.push_str("mod memory_range {\n");
@@ -168,6 +201,26 @@ fn main() {
     assert_eq!(process.prepare_remove_memory_range(0x1000, 0).unwrap_err(), MemoryRangeError::InvalidRange);
     let invalid_offset = MemoryRegion::file_backed(0x1000, 0x2000, MEMORY_ACCESS_READ, 0, Arc::new(mem::vm_object::VmObject), u64::MAX, MEMORY_ACCESS_READ);
     assert_eq!(invalid_offset.slice(0x2000,0x3000).unwrap_err(),MemoryRangeError::InvalidRange);
+    // Execute the real validator and metadata together: a lazy TiB takes one
+    // interval step, and a hidden PROT_NONE page is never skipped or rescued
+    // by an old resident mapping.
+    task::PROCESS.with_borrow_mut(|p|p.regions=vec![MemoryRegion::anonymous(0x10000,1<<40,3,0)]);
+    assert!(validate_user_ptr(0x10000,1<<40));assert_eq!(PTE_QUERIES.get(),0);
+    task::PROCESS.with_borrow_mut(|p|assert!(apply_access(&mut p.regions[0],0x30000,4096,0)));
+    RESIDENT.set(true);
+    assert!(!validate_user_ptr(0x10000,1<<40));assert_eq!(PTE_QUERIES.get(),0);
+    assert!(validate_user_ptr(0x10000,0x20000));
+    assert!(validate_user_ptr(0x31000,(1<<40)-0x21000));
+    task::PROCESS.with_borrow_mut(|p|p.regions.clear());
+    assert!(validate_user_ptr(0x10000,8192));assert_eq!(PTE_QUERIES.get(),2);
+    RESIDENT.set(false);assert!(!validate_user_ptr(0x10000,4096));
+    RESIDENT.set(true);PTE_QUERIES.set(0);
+    assert!(!validate_user_ptr(0x10000,1<<40));assert!(PTE_QUERIES.get()<=4096);
+    task::PROCESS.with_borrow_mut(|p|for index in 0..20_000{p.regions.push(MemoryRegion::anonymous(0x10000+index*8192,4096,3,0));});
+    PTE_QUERIES.set(0);
+    assert!(!validate_user_ptr(0x10000+19_999*8192,4096));assert_eq!(PTE_QUERIES.get(),0);
+    for (pointer,length) in [(0,1),(u64::MAX,2),((1<<47)-1,2)]{assert!(!validate_user_ptr(pointer,length));}
+    assert!(!VM_LOCKED.get());
 }
 "#);
     let nonce = SystemTime::now()

@@ -16,7 +16,7 @@ const BASE:u64=4096;
 struct State {authorized:bool,fill_error_at:Option<usize>,copy_error:Option<Error>,fills:usize,copies:Vec<(u64,usize)>,bytes:Vec<u8>}
 impl Default for State {fn default()->Self{Self{authorized:true,fill_error_at:None,copy_error:None,fills:0,copies:vec![],bytes:vec![0x71;1024]}}}
 thread_local!{static STATE:RefCell<State>=RefCell::new(State::default());}
-fn validate_user_ptr(pointer:u64,length:u64)->bool{pointer>=BASE&&pointer.checked_add(length).is_some_and(|end|end<=BASE+1024)}
+fn is_canonical_user_range(pointer:u64,length:u64)->bool{pointer!=0&&pointer.checked_add(length.saturating_sub(1)).is_some_and(|end|end<(1<<47))}
 mod capability {#[derive(Debug,PartialEq)] pub enum Capability{SystemRandomRead}}
 mod syscall {
     pub mod security {pub fn caller_has_any_capability(caps:&[crate::capability::Capability])->bool{
@@ -24,6 +24,7 @@ mod syscall {
     }}
     pub fn copy_to_user_native(pointer:u64,bytes:&[u8])->Result<(),crate::Error>{
         crate::STATE.with_borrow_mut(|s|{s.copies.push((pointer,bytes.len()));if let Some(error)=s.copy_error{return Err(error);}
+            if pointer<crate::BASE||pointer+bytes.len()as u64>crate::BASE+s.bytes.len()as u64{return Err(crate::Error::InvalidAddress);}
             let start=(pointer-crate::BASE)as usize;s.bytes[start..start+bytes.len()].copy_from_slice(bytes);Ok(())
         })
     }
@@ -33,7 +34,7 @@ mod random {pub fn fill(bytes:&mut[u8])->Result<(),()>{
     crate::STATE.with_borrow_mut(|s|{let index=s.fills;s.fills+=1;if s.fill_error_at==Some(index){return Err(());}bytes.fill(0x5a);Ok(())})
 }}
 mod implementation {
-    use crate::{mnu_abi,validate_user_ptr};
+    use crate::{mnu_abi,is_canonical_user_range};
 "#);
     program.push_str(probe::between(
         source,
@@ -45,15 +46,20 @@ mod implementation {
 fn main(){
     use implementation::random_fill;
     STATE.set(State::default());assert_eq!(random_fill(0,0),0);STATE.with_borrow(|s|assert_eq!(s.fills,0));
-    for (pointer,length,expected) in [(0,1,Error::InvalidAddress),(BASE,u64::MAX,Error::LimitExceeded),(BASE+1023,2,Error::InvalidAddress)] {
+    for (pointer,length,expected) in [(0,1,Error::InvalidAddress),(BASE,u64::MAX,Error::LimitExceeded),((1<<47)-1,2,Error::InvalidAddress)] {
         STATE.set(State::default());assert_eq!(random_fill(pointer,length),expected.into_raw());
         STATE.with_borrow(|s|{assert_eq!(s.fills,0);assert!(s.copies.is_empty());});
     }
+    STATE.set(State::default());assert_eq!(random_fill(BASE+1023,2),Error::InvalidAddress.into_raw());
+    STATE.with_borrow(|s|{assert_eq!(s.fills,1);assert_eq!(s.copies.len(),1);assert_eq!(s.bytes,vec![0x71;1024]);});
     STATE.set(State{authorized:false,..State::default()});
     for (pointer,length) in [(BASE,641),(0,0),(0,u64::MAX)] {assert_eq!(random_fill(pointer,length),Error::AccessDenied.into_raw());}
     STATE.with_borrow(|s|{assert_eq!(s.fills,0);assert!(s.copies.is_empty());assert_eq!(s.bytes,vec![0x71;1024]);});
     STATE.set(State::default());assert_eq!(random_fill(BASE,641),641);
     STATE.with_borrow(|s|{assert_eq!(s.fills,3);assert_eq!(s.copies,[(BASE,256),(BASE+256,256),(BASE+512,129)]);assert_eq!(s.bytes[..641],vec![0x5a;641]);assert_eq!(s.bytes[641..],vec![0x71;383]);});
+    STATE.set(State{bytes:vec![0x71;128*1024],..State::default()});
+    assert_eq!(random_fill(BASE,128*1024),64*1024);
+    STATE.with_borrow(|s|{assert_eq!(s.fills,256);assert_eq!(s.copies.len(),256);assert!(s.bytes[64*1024..].iter().all(|&b|b==0x71));});
     for fail_at in [0,1] {
         STATE.set(State{fill_error_at:Some(fail_at),..State::default()});assert_eq!(random_fill(BASE,641),Error::NotReady.into_raw());
         STATE.with_borrow(|s|{assert_eq!(s.fills,fail_at+1);assert_eq!(s.copies.len(),fail_at);});
@@ -64,6 +70,44 @@ fn main(){
     }
 }
 "#);
+    probe::run(&program);
+
+    // The public all-or-error helper retries native short transfers and must
+    // reject a stalled/malformed backend rather than loop or skip bytes.
+    let mut program = String::from(
+        r#"
+extern crate alloc;
+#[derive(Default)]struct State{replies:std::collections::VecDeque<Result<u64,u64>>,calls:Vec<(u64,u64)>}
+thread_local!{static STATE:std::cell::RefCell<State>=std::cell::RefCell::new(State::default());}
+mod syscall{
+ pub type SysResult<T>=Result<T,u64>;
+ pub enum SyscallNumber{RandomFill}
+ pub enum NativeError{BackingFailure}
+ impl NativeError{pub fn into_raw(self)->u64{99}}
+ pub fn call2(_:SyscallNumber,address:u64,length:u64)->SysResult<u64>{crate::STATE.with_borrow_mut(|s|{s.calls.push((address,length));s.replies.pop_front().expect("unexpected call")})}
+}
+"#,
+    );
+    program.push_str(&probe::definition(
+        include_str!("../../../user/crates/platform/src/lib.rs"),
+        "pub mod random {",
+    ));
+    program.push_str(
+        r#"
+fn main(){
+ let mut buffer=[0u8;70_000];let base=buffer.as_mut_ptr()as u64;
+ STATE.set(State{replies:vec![Ok(65_536),Ok(4464)].into(),..State::default()});
+ assert_eq!(random::fill(&mut buffer),Ok(()));
+ STATE.with_borrow(|s|assert_eq!(s.calls,[(base,70_000),(base+65_536,4464)]));
+ for reply in [Ok(0),Ok(70_001),Err(77)]{
+  STATE.set(State{replies:vec![reply].into(),..State::default()});
+  assert_eq!(random::fill(&mut buffer),Err(if reply==Err(77){77}else{99}));
+  STATE.with_borrow(|s|assert_eq!(s.calls.len(),1));
+ }
+ STATE.set(State::default());assert_eq!(random::fill(&mut []),Ok(()));
+}
+"#,
+    );
     probe::run(&program);
 }
 

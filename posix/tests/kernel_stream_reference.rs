@@ -48,9 +48,11 @@ mod io {
     pub const EACCES: u64 = crate::Error::AccessDenied.into_raw();
     const ENOTSUP: u64 = (-95i64) as u64;
     fn read_pipe(id: usize, options: u64, pointer: u64, len: u64) -> u64 {
+        if !crate::syscall::validate_user_ptr(pointer,len.min(64*1024)){return EFAULT;}
         assert_eq!((id, options, pointer), (42, HANDLE_OPTION_NONBLOCKING, 1)); len
     }
     fn write_pipe(id: usize, options: u64, pointer: u64, len: u64, complete: bool) -> u64 {
+        if !crate::syscall::validate_user_ptr(pointer,len.min(64*1024)){return EFAULT;}
         assert_eq!((id, options, pointer, complete), (42, 0, 1, true)); len
     }
 "#,

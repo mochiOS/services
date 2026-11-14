@@ -145,6 +145,8 @@ fn main(){
     }
     reset(0);assert_eq!(syscall::fs::read(0,2),2);assert_eq!(syscall::fs::remaining(),b"c");
     OUTPUT.with_borrow(|out|assert_eq!(out,b"ab"));assert_eq!(WAKES.get(),1);
+    reset(0);assert_eq!(syscall::fs::read(0,u64::MAX),3);
+    assert_eq!(FAULTS.get(),1);OUTPUT.with_borrow(|out|assert_eq!(out,b"abc"));
     reset(4);assert_eq!(syscall::fs::read(0,5),3);
     OUTPUT.with_borrow(|out|assert_eq!(out,b"XYZ"));assert!(syscall::fs::remaining().is_empty());
     reset(5);assert_eq!(syscall::fs::read(0,5),0);assert_eq!(COPIES.get(),0);
