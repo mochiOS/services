@@ -84,9 +84,9 @@ fn main() {
 
 #[test]
 fn outgoing_reference_is_released_only_after_assembly_switches_stacks() {
-    let context = include_str!("../../../core/src/task/context.rs");
+    let context = include_str!("../../../core/src/arch/x86_64/context.rs");
     let assembly = context
-        .split("pub unsafe extern \"C\" fn switch_context(")
+        .split("pub unsafe extern \"sysv64\" fn switch_context(")
         .nth(1)
         .unwrap()
         .split("pub unsafe fn switch_to_thread(")
@@ -95,7 +95,7 @@ fn outgoing_reference_is_released_only_after_assembly_switches_stacks() {
     assert!(
         assembly.find("mov rsp, [rsi + 0x00]").unwrap() < assembly.find("xchg [rdx], rcx").unwrap()
     );
-    let switching = context
+    let switching = include_str!("../../../core/src/task/context.rs")
         .split("crate::percpu::begin_thread_switch(")
         .nth(1)
         .unwrap();

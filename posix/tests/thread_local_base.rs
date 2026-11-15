@@ -36,12 +36,15 @@ mod task {
         super::RETAINED.get().then(|| operation(&mut Thread))
     }
 }
-mod cpu {
-    pub unsafe fn write_fs_base(base: u64) {
-        assert!(super::DISABLED.get());
-        assert_eq!(super::SAVED.get(), base);
-        super::LIVE.set(base);
-        super::WRITES.with_borrow_mut(|writes| writes.push(base));
+mod arch {
+    pub use crate::instructions::interrupts;
+    pub mod tls {
+        pub unsafe fn write_user_base(base: u64) {
+            assert!(crate::DISABLED.get());
+            assert_eq!(crate::SAVED.get(), base);
+            crate::LIVE.set(base);
+            crate::WRITES.with_borrow_mut(|writes| writes.push(base));
+        }
     }
 }
 // The operation validates a register value, not mapped user storage. Address

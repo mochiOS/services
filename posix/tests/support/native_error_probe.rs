@@ -92,6 +92,22 @@ pub fn constants(program: &mut String, source: &str, names: &[&str]) {
     }
 }
 
+/// Use the production x86 FP adapter and register image in host fixtures.
+/// The extra context code may inspect private reserved bytes in that module.
+pub fn kernel_fp_modules(root: &std::path::Path, extra_context: &str) -> String {
+    let context = include_str!("../../../../core/src/arch/x86_64/context.rs");
+    let fp = between(context, "const FXSAVE_AREA_SIZE:", "/// CPU コンテキスト");
+    let diagnostic = definition(
+        include_str!("../../../../core/src/util/process_diagnostics.rs"),
+        "pub struct Exception",
+    );
+    format!(
+        "mod arch {{pub mod context {{{fp}\n{extra_context}\n}}\n#[path={:?}]pub mod exception;\n#[path={:?}]pub mod fp;\n}}\nmod util {{pub mod process_diagnostics {{{diagnostic}\n}}}}\n",
+        root.join("core/src/arch/x86_64/exception.rs"),
+        root.join("core/src/arch/x86_64/fp.rs")
+    )
+}
+
 struct Temporary(std::path::PathBuf);
 impl Drop for Temporary {
     fn drop(&mut self) {

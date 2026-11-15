@@ -34,17 +34,12 @@ thread_local! {
         "#[path={:?}]mod abi;pub use abi::*;\n",
         root.join("core/crates/abi/src/lib.rs")
     ));
-    program.push_str("mod task {pub mod context {\n");
-    program.push_str(probe::between(
-        include_str!("../../../core/src/task/context.rs"),
-        "const FXSAVE_AREA_SIZE:",
-        "/// CPU コンテキスト",
-    ));
-    program.push_str("}\nmod thread {\n");
+    program.push_str(&probe::kernel_fp_modules(&root, ""));
+    program.push_str("mod task {pub mod context {pub(crate) use crate::arch::context::FxSaveArea;pub(crate) use crate::arch::fp::State as FloatingPointState;}\nmod thread {pub use crate::arch::exception::UserUpcallContext;\n");
     program.push_str(probe::between(
         thread,
         "const THREAD_UPCALL_QUEUE_CAPACITY:",
-        "// L4 風",
+        "/// スレッド終了時",
     ));
     program.push_str(r#"
 pub struct Thread{state:ThreadUpcallState}

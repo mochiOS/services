@@ -31,8 +31,9 @@ pub mod mem {
         }
     }
 }
-pub mod cpu {
-    pub fn write_fs_base(_: u64) {}
+pub mod arch {
+    pub use crate::instructions::interrupts;
+    pub mod tls {pub unsafe fn write_user_base(_: u64) {}}
 }
 pub mod task {
     pub mod thread {

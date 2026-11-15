@@ -60,7 +60,7 @@ fn production_resume_cannot_be_preempted_between_cr3_switch_and_iret() {
     );
     // Negative control: the original late CLI must lose the selected CR3
     // under the same modeled interrupt, so this test cannot pass vacuously.
-    let vulnerable = source.replace("x86_64::instructions::interrupts::disable();", "");
+    let vulnerable = source.replace("crate::arch::interrupts::disable();", "");
     std::fs::write(&path, fixture.replace("/* PRODUCTION */", &vulnerable)).unwrap();
     let result = Command::new("rustc")
         .args(["--edition=2021", "-Awarnings"])

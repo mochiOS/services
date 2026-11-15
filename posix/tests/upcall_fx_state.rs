@@ -1,17 +1,20 @@
 use std::io::Write;
 use std::process::{Command, Stdio};
+#[allow(dead_code)]
+#[path = "support/native_error_probe.rs"]
+mod probe;
 
 #[test]
 fn actual_upcall_state_restores_fx_only_for_its_valid_one_shot_return() {
-    let context = include_str!("../../../core/src/task/context.rs");
-    let start = context.find("const FXSAVE_AREA_SIZE:").unwrap();
-    let end = context.find("/// CPU コンテキスト").unwrap();
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()
+        .unwrap();
     let thread = include_str!("../../../core/src/task/thread.rs");
     let first = thread.find("const THREAD_UPCALL_QUEUE_CAPACITY:").unwrap();
-    let last = thread.find("// L4 風").unwrap();
-    let mut program = String::from("mod task { pub mod context {\n");
-    program.push_str(&context[start..end]);
-    program.push_str(
+    let last = thread.find("/// スレッド終了時").unwrap();
+    let mut program = probe::kernel_fp_modules(
+        &root,
         r#"
 pub fn verify_reserved_snapshot_bytes() {
     let state=FxSaveArea {bytes:[0xa7;512]};
@@ -27,7 +30,7 @@ pub fn verify_reserved_snapshot_bytes() {
 }
 "#,
     );
-    program.push_str("\n} pub mod thread {\n");
+    program.push_str("\nmod task {pub mod context {pub(crate) use crate::arch::context::FxSaveArea;pub(crate) use crate::arch::fp::State as FloatingPointState;pub use crate::arch::context::verify_reserved_snapshot_bytes;} pub mod thread {pub use crate::arch::exception::UserUpcallContext;\n");
     program.push_str(&thread[first..last]);
     program.push_str(
         r#"
@@ -180,7 +183,25 @@ pub fn probe() {
         "{}",
         String::from_utf8_lossy(&result.stderr)
     );
-    let without_restore = program.replace("self.saved_fx_state.restore_current();", "");
+    // The adapter is loaded by path, so inline its unchanged production source
+    // for the negative control and remove only the actual restore operation.
+    let adapter = std::fs::read_to_string(root.join("core/src/arch/x86_64/fp.rs")).unwrap();
+    let path_module = format!(
+        "#[path={:?}]pub mod fp;",
+        root.join("core/src/arch/x86_64/fp.rs")
+    );
+    let adapter = adapter
+        .lines()
+        .filter(|line| !line.starts_with("//!"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let without_restore = program.replace(
+        &path_module,
+        &format!(
+            "pub mod fp {{{}}}",
+            adapter.replace("self.inner.restore_current();", "")
+        ),
+    );
     assert_ne!(without_restore, program);
     let negative = run(&without_restore);
     std::fs::remove_dir_all(&directory).unwrap();
@@ -192,7 +213,7 @@ pub fn probe() {
 
 #[test]
 fn fx_state_layout_and_native_probe_numbers_match_current_abi() {
-    let context = include_str!("../../../core/src/task/context.rs");
+    let context = include_str!("../../../core/src/arch/x86_64/context.rs");
     assert!(context.contains("#[repr(C, align(16))]"));
     assert!(context.contains("FXSAVE_AREA_SIZE: usize = 512"));
     assert!(context.contains("offset_of!(Context, fx_state) == 0x60"));
