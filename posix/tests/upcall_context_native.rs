@@ -34,7 +34,7 @@ thread_local! {
         "#[path={:?}]mod abi;pub use abi::*;\n",
         root.join("core/crates/abi/src/lib.rs")
     ));
-    program.push_str(&probe::kernel_fp_modules(&root, ""));
+    program.push_str(&probe::kernel_fp_modules(&root, "", true));
     program.push_str("mod task {pub mod context {pub(crate) use crate::arch::context::FxSaveArea;pub(crate) use crate::arch::fp::State as FloatingPointState;}\nmod thread {pub use crate::arch::exception::UserUpcallContext;\n");
     program.push_str(probe::between(
         thread,

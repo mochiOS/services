@@ -1,14 +1,19 @@
 use std::io::Write;
 use std::process::{Command, Stdio};
+#[allow(dead_code)]
+#[path = "support/native_error_probe.rs"]
+mod probe;
 
 #[test]
 fn actual_exception_delivery_preserves_snapshot_and_rejects_kernel_or_invalid_contexts() {
-    let thread = include_str!("../../../core/src/task/thread.rs");
-    let begin = thread.find("pub struct UserUpcallContext {").unwrap();
-    let end = begin + thread[begin..].find("\n}\n").unwrap() + 3;
     let source = include_str!("../../../core/src/syscall/upcall.rs");
-    let mut program = String::from("#[derive(Clone,Copy,Debug,PartialEq,Eq)]\n");
-    program.push_str(&thread[begin..end]);
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()
+        .unwrap();
+    let mut program = probe::kernel_abi(&root);
+    program.push_str(&probe::kernel_fp_modules(&root, "", true));
+    program.push_str("mod cpu {pub use crate::arch::exception as context;}\nuse cpu::context::UserUpcallContext;\nmod time {pub fn monotonic_nanoseconds()->u64{123}}\n");
     program.push_str(r#"
 thread_local! {
     static MODE:std::cell::Cell<u8>=const {std::cell::Cell::new(0)};
@@ -20,20 +25,20 @@ fn copy_to_user_native(address:u64, bytes:&[u8])->Result<(),()> {
     METADATA.with(|v|v.set(Some((address,u64::from_ne_bytes(bytes.try_into().unwrap())))));
     Ok(())
 }
-mod mnu_abi {
-    pub const THREAD_UPCALL_KIND_EXCEPTION:u64=1;
-    #[repr(u64)] pub enum MemoryFaultCause { AccessDenied=2 }
-}
 mod task {
     pub fn current_thread_id()->Option<u64> {if crate::MODE.with(|v|v.get())==3 {None}else{Some(11)}}
     pub struct Thread;
     pub struct Delivery { pub entry:u64,pub stack_top:u64,pub payload:u64,pub token:u64 }
     impl Thread {
+        pub fn note_exception(&mut self, value:crate::util::process_diagnostics::Exception) {
+            assert_eq!((value.timestamp_ns,value.vector,value.cause,value.error_code),(123,14,2,6));
+            assert_eq!((value.instruction,value.stack_pointer,value.address),(0x4000,0x8000,0x5000));
+        }
         pub fn begin_exception_upcall(&mut self,context:crate::UserUpcallContext,vector:u64)->Option<Delivery> {
             assert_eq!(vector,14);
             if matches!(crate::MODE.with(|v|v.get()),1..=3) {return None;}
             crate::SAVED.with(|v|v.set(Some(context)));
-            Some(Delivery{entry:0x1000,stack_top:0x9000,payload:vector,token:77})
+            Some(Delivery{entry:0x1000,stack_top:0x9008,payload:vector,token:77})
         }
     }
     pub fn with_thread_mut<T>(id:u64,body:impl FnOnce(&mut Thread)->T)->Option<T> {
@@ -44,6 +49,7 @@ mod task {
     program.push_str("mod actual { use super::*;\n");
     for name in [
         "prepare_user_exception",
+        "prepare_fault_delivery",
         "valid_user_return",
         "read_interrupt_context",
         "write_interrupt_context",
@@ -54,33 +60,37 @@ mod task {
     }
     program.push_str(
         r#"
+fn deliver(raw:&mut [u64;21],address:u64,cause:mnu_abi::MemoryFaultCause)->bool {
+    // SAFETY: The production repr(C) frame contains exactly these 21 u64 words.
+    prepare_user_exception(unsafe {&mut *(raw.as_mut_ptr().cast::<cpu::context::PageFaultFrame>())},address,cause)
+}
 pub fn verify() {
     let mut raw=core::array::from_fn::<_,21,_>(|i|0x100+i as u64);
     raw[15]=6;raw[16]=0x4000;raw[17]=0x23;raw[18]=0x10702;raw[19]=0x8000;raw[20]=0x1b;
     let original=raw;
     for mode in 1..=3 {
         MODE.with(|v|v.set(mode));
-        assert!(!prepare_user_exception(&mut raw,0x5000,mnu_abi::MemoryFaultCause::AccessDenied));assert_eq!(raw,original);
+        assert!(!deliver(&mut raw,0x5000,mnu_abi::MemoryFaultCause::AccessDenied));assert_eq!(raw,original);
         assert_eq!(METADATA.with(|v|v.get()),None);
     }
     MODE.with(|v|v.set(0));
     for (slot,value) in [(17,8),(16,0),(19,0xffff800000000000)] {
         raw=original;raw[slot]=value;let invalid=raw;
-        assert!(!prepare_user_exception(&mut raw,0x5000,mnu_abi::MemoryFaultCause::AccessDenied));assert_eq!(raw,invalid);
+        assert!(!deliver(&mut raw,0x5000,mnu_abi::MemoryFaultCause::AccessDenied));assert_eq!(raw,invalid);
     }
     MODE.with(|v|v.set(4));raw=original;
-    assert!(!prepare_user_exception(&mut raw,0x5000,mnu_abi::MemoryFaultCause::AccessDenied));
+    assert!(!deliver(&mut raw,0x5000,mnu_abi::MemoryFaultCause::AccessDenied));
     assert_eq!(raw,original);assert_eq!(METADATA.with(|v|v.get()),None);
     MODE.with(|v|v.set(0));
     raw=original;
-    assert!(prepare_user_exception(&mut raw,0x5000,mnu_abi::MemoryFaultCause::AccessDenied));
-    assert_eq!(METADATA.with(|v|v.get()),Some((0x9008,2)));
+    assert!(deliver(&mut raw,0x5000,mnu_abi::MemoryFaultCause::AccessDenied));
+    assert_eq!(METADATA.with(|v|v.get()),Some((0x9010,2)));
     let saved=SAVED.with(|v|v.get().unwrap());
     assert_eq!((saved.user_rip,saved.user_rsp,saved.user_rflags),(0x4000,0x8000,original[18]));
     assert_eq!((saved.rcx,saved.r11,saved.rax),(original[13],original[4],original[14]));
     let mut expected=original;
     expected[8]=14;expected[9]=77;expected[12]=1;expected[13]=0x5000;
-    expected[7]=6;expected[6]=0x4000;expected[16]=0x1000;expected[19]=0x9000;
+    expected[7]=6;expected[6]=0x4000;expected[16]=0x1000;expected[19]=0x9008;
     expected[18]&=!((1<<10)|(1<<8)|(1<<16));
     assert_eq!(raw,expected);
 }
@@ -142,7 +152,7 @@ fn native_exception_entry_is_opt_in_and_runs_after_vm_recovery_without_posix_pol
     }
     assert!(entry.find("\"add rsp, 8\"").unwrap() < entry.find("\"iretq\"").unwrap());
     assert!(entry.contains("\"and rsp, -16\""));
-    assert!(entry.contains("kpti_enter_for_trap(raw[17] & 3 == 3)"));
+    assert!(entry.contains("kpti_enter_for_trap(raw.iret.cs & 3 == 3)"));
     let idt = include_str!("../../../core/src/interrupt/idt.rs");
     let body = idt
         .split("pub(super) fn page_fault_handler(")
@@ -164,7 +174,10 @@ fn native_exception_entry_is_opt_in_and_runs_after_vm_recovery_without_posix_pol
         ("INSTALL", mnu_abi::SyscallNumber::ThreadUpcallInstall),
         ("RETURN", mnu_abi::SyscallNumber::ThreadUpcallReturn),
         ("INSPECT", mnu_abi::SyscallNumber::ThreadUpcallInspect),
-        ("RETURN_CONTEXT", mnu_abi::SyscallNumber::ThreadUpcallReturnContext),
+        (
+            "RETURN_CONTEXT",
+            mnu_abi::SyscallNumber::ThreadUpcallReturnContext,
+        ),
     ] {
         assert!(probe.contains(&format!("{name} = {}", value as u64)));
     }
@@ -183,7 +196,7 @@ fn production_fault_causes_preserve_origin_instead_of_guessing_from_errno() {
         r#"
 mod mem { pub mod vm_object {
     #[derive(Clone,Copy,Debug,PartialEq,Eq)]
-    pub enum VmPageError { OutsideBacking, Operation(u64) }
+    pub enum VmPageError { OutsideBacking, Operation(crate::result::OperationError) }
 } }
 mod mnu_abi {
 #[repr(u64)] #[derive(Debug,PartialEq,Eq)]
@@ -195,7 +208,9 @@ mod mnu_abi {
     program.push_str("\npub mod status {\n");
     program.push_str(include_str!("../../../core/crates/abi/src/status.rs"));
     program.push_str("\n}\n");
-    program.push_str("}\n#[derive(Debug,PartialEq,Eq)]\n");
+    program.push_str("}\n");
+    program.push_str(&probe::operation_error());
+    program.push_str("#[derive(Clone,Copy,Debug,PartialEq,Eq)]\n");
     let start = process.find("pub(crate) enum MemoryFault {").unwrap();
     let end = process[start..].find("/// Resolves one page,").unwrap() + start;
     program.push_str(&process[start..end]);
@@ -210,6 +225,7 @@ fn main() {
     // Legacy numeric errno values must not be interpreted as native fault
     // categories. Only explicit native tags carry resource/retry semantics.
     for error in [(-5i64) as u64,(-22i64) as u64,(-13i64) as u64,(-12i64) as u64,(-11i64) as u64] {
+        let error=OperationError::from_wire(error);
         assert_eq!(MemoryFault::Backing(VmPageError::Operation(error)).cause(),BackingFailure);
         assert_eq!(MemoryFault::Operation(error).cause(),Unresolved);
         assert!(!MemoryFault::Operation(error).is_retryable());
@@ -217,8 +233,8 @@ fn main() {
     for (error,cause) in [(mnu_abi::status::Error::ResourceUnavailable,ResourceUnavailable),
         (mnu_abi::status::Error::BackingFailure,BackingFailure),
         (mnu_abi::status::Error::AccessDenied,AccessDenied)] {
-        assert_eq!(MemoryFault::Operation(error.into_raw()).cause(),cause);
-        assert_eq!(MemoryFault::Backing(VmPageError::Operation(error.into_raw())).cause(),cause);
+        assert_eq!(MemoryFault::Operation(error.into()).cause(),cause);
+        assert_eq!(MemoryFault::Backing(VmPageError::Operation(error.into())).cause(),cause);
     }
 }
 "#,

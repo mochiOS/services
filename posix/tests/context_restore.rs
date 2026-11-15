@@ -1,31 +1,20 @@
 use std::io::Write;
 use std::process::{Command, Stdio};
+#[allow(dead_code)]
+#[path = "support/native_error_probe.rs"]
+mod probe;
 
 #[test]
 fn production_restore_copies_before_commit_and_rejects_invalid_self_contexts() {
     let source = include_str!("../../../core/src/syscall/upcall.rs");
-    let thread = include_str!("../../../core/src/cpu/context.rs");
-    let abi = include_str!("../../../core/crates/abi/src/lib.rs");
-    let mut program = String::new();
-    let start = thread.find("pub struct UserUpcallContext {").unwrap();
-    let end = start + thread[start..].find("\n}\n").unwrap() + 3;
-    program.push_str("#[derive(Clone, Copy, Debug, PartialEq, Eq)]\n");
-    program.push_str(&thread[start..end]);
-    program.push_str("mod mnu_abi {\n");
-    program.push_str("pub mod status {\n");
-    program.push_str(include_str!("../../../core/crates/abi/src/status.rs"));
-    program.push_str("}\n");
-    for name in [
-        "pub struct ThreadInitialRegisters {",
-        "pub struct ThreadUpcallSnapshot {",
-    ] {
-        let start = abi.find(name).unwrap();
-        let end = start + abi[start..].find("\n}\n").unwrap() + 3;
-        program.push_str("#[repr(C)] #[derive(Clone, Copy, Debug, PartialEq, Eq)]\n");
-        program.push_str(&abi[start..end]);
-    }
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()
+        .unwrap();
+    let mut program = probe::kernel_abi(&root);
+    program.push_str(&probe::kernel_fp_modules(&root, "", true));
+    program.push_str("use arch::exception::UserUpcallContext;\n");
     program.push_str(r#"
-}
 const INVALID_ARGUMENT:u64=mnu_abi::status::Error::InvalidArgument.into_raw();
 const INVALID_ADDRESS:u64=mnu_abi::status::Error::InvalidAddress.into_raw();
 const NOT_READY:u64=mnu_abi::status::Error::NotReady.into_raw();const SUCCESS:u64=0;

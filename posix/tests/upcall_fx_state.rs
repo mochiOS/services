@@ -29,6 +29,7 @@ pub fn verify_reserved_snapshot_bytes() {
     assert_eq!(state.bytes,[0xa7;512]);
 }
 "#,
+        false,
     );
     program.push_str("\nmod task {pub mod context {pub(crate) use crate::arch::context::FxSaveArea;pub(crate) use crate::arch::fp::State as FloatingPointState;pub use crate::arch::context::verify_reserved_snapshot_bytes;} pub mod thread {pub use crate::arch::exception::UserUpcallContext;\n");
     program.push_str(&thread[first..last]);

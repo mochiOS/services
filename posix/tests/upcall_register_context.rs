@@ -1,5 +1,8 @@
 use std::io::Write;
 use std::process::{Command, Stdio};
+#[allow(dead_code)]
+#[path = "support/native_error_probe.rs"]
+mod probe;
 
 #[test]
 fn production_interrupt_register_conversion_preserves_every_word_and_validates_return_addresses() {
@@ -8,21 +11,9 @@ fn production_interrupt_register_conversion_preserves_every_word_and_validates_r
         .join("../..")
         .canonicalize()
         .unwrap();
-    let mut program = format!(
-        "mod cpu {{ #[path={:?}]pub mod context; }}\nuse cpu::context::UserUpcallContext;\n",
-        root.join("core/src/cpu/context.rs")
-    );
-    let abi = include_str!("../../../core/crates/abi/src/lib.rs");
-    program.push_str("mod mnu_abi {\n");
-    for declaration in [
-        "pub struct ThreadInitialRegisters {",
-        "pub struct ThreadUpcallSnapshot {",
-    ] {
-        let start = abi.find(declaration).unwrap();
-        let end = start + abi[start..].find("\n}\n").unwrap() + 3;
-        program.push_str(&abi[start..end]);
-    }
-    program.push_str("}\n");
+    let mut program = probe::kernel_abi(&root);
+    program.push_str(&probe::kernel_fp_modules(&root, "", true));
+    program.push_str("mod cpu {pub use crate::arch::exception as context;}\nuse cpu::context::UserUpcallContext;\n");
     for name in [
         "valid_user_return",
         "read_interrupt_context",
@@ -38,9 +29,10 @@ fn production_interrupt_register_conversion_preserves_every_word_and_validates_r
         r#"
 fn main() {
     let mut frame = core::array::from_fn::<_,20,_>(|index|index as u64+100);
+    frame[16]=0x23;frame[19]=0x1b;
     let original=frame;
     let mut frame:cpu::context::InterruptFrame=unsafe{core::mem::transmute(frame)};
-    let context=read_interrupt_context(&frame);
+    let context=read_interrupt_context(&frame).unwrap();
     let snapshot=snapshot_context(context,[0xa7;512]);
     let registers=snapshot.registers;
     assert_eq!([snapshot.instruction,snapshot.stack_pointer,snapshot.rflags,snapshot.argument],
@@ -59,7 +51,7 @@ fn main() {
     updated.rcx=0x1122334455667788; updated.r11=0x8877665544332211;
     updated.user_rip=0x400000;updated.user_rsp=0x7fff0000;
     write_interrupt_context(&mut frame,updated);
-    assert_eq!(read_interrupt_context(&frame),updated);
+    assert_eq!(read_interrupt_context(&frame),Some(updated));
     assert_eq!(frame.iret.cs,original[16]);assert_eq!(frame.iret.ss,original[19]);
     assert!(valid_user_return(&updated));
     for address in [0x800000000000u64,0xffff800000000000,u64::MAX] {
@@ -156,7 +148,7 @@ fn both_native_entries_use_one_upcall_state_and_only_full_restore_uses_iret() {
             < resume.find("resume_usermode").unwrap()
     );
     assert!(resume.contains("context.syscall_registers()"));
-    let contexts = include_str!("../../../core/src/cpu/context.rs");
+    let contexts = include_str!("../../../core/src/arch/x86_64/exception.rs");
     assert!(contexts.contains("rcx: self.rcx"));
     assert!(contexts.contains("r11: self.r11"));
     let entry = include_str!("../../../core/src/syscall/mod.rs");

@@ -197,7 +197,7 @@ fn main() {
         .unwrap();
     program.push_str(&format!(
         "mod cpu {{#[path={:?}]pub mod context;}}",
-        root.join("core/src/cpu/context.rs")
+        root.join("core/src/arch/x86_64/exception.rs")
     ));
     program.push_str(&probe::operation_error());
     let mut compiler = Command::new("rustc")
