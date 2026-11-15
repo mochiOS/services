@@ -12,7 +12,7 @@ fn resumed_register_value_flows_from_the_native_caller() {
     assert!(thread.contains("pub fn new_user_resume("));
     assert!(thread.contains("resume_usermode(user_context, rax, fs_base)"));
     assert!(!thread.contains("new_fork_child"));
-    let usermode = include_str!("../../../core/src/task/usermode.rs");
+    let usermode = include_str!("../../../core/src/arch/x86_64/task_usermode.rs");
     let resume = &usermode[usermode.find("pub unsafe fn resume_usermode(").unwrap()..];
     assert!(resume.contains("\"mov rax, [rax + {rax_offset}]\""));
     assert!(!resume.contains("xor eax, eax"));

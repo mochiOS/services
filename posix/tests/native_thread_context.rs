@@ -1,4 +1,4 @@
-use mochi_user_platform::syscall::ThreadCreateContext;
+use mnu_abi::ThreadCreateContext;
 
 #[test]
 fn native_thread_context_has_stable_zero_extended_layout() {
@@ -36,7 +36,7 @@ fn native_thread_context_keeps_runtime_tls_opaque() {
 
 #[test]
 fn initial_thread_argument_cannot_alias_iret_frame_scratch_registers() {
-    let source = include_str!("../../../core/src/task/usermode.rs");
+    let source = include_str!("../../../core/src/arch/x86_64/task_usermode.rs");
     let initial_entry = source.split("/// GDTR").next().unwrap();
     assert!(initial_entry.contains("in(\"rdi\") user_arg0"));
     assert!(!initial_entry.contains("arg0 = in(reg)"));
@@ -52,7 +52,7 @@ fn explicit_initial_registers_are_independent_of_privileged_flags() {
     assert!(create.contains("rcx: registers.rcx"));
     assert!(create.contains("r11: registers.r11"));
     assert!(create.contains("registers.rax,"));
-    let restore = include_str!("../../../core/src/task/usermode.rs");
+    let restore = include_str!("../../../core/src/arch/x86_64/task_usermode.rs");
     for register in ["rcx", "r11", "rax"] {
         assert!(restore.contains(&format!(
             "\"mov {register}, [{0} + {{{register}_offset}}]\"",

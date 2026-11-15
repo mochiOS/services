@@ -2,7 +2,7 @@ use std::process::Command;
 
 #[test]
 fn user_return_masks_interrupts_before_identity_or_address_space_changes() {
-    let source = include_str!("../../../core/src/task/usermode.rs");
+    let source = include_str!("../../../core/src/arch/x86_64/task_usermode.rs");
     for name in ["jump_to_usermode", "resume_usermode"] {
         let body = source
             .split(&format!("pub unsafe fn {name}("))
@@ -22,7 +22,7 @@ fn user_return_masks_interrupts_before_identity_or_address_space_changes() {
 
 #[test]
 fn production_resume_cannot_be_preempted_between_cr3_switch_and_iret() {
-    let source = include_str!("../../../core/src/task/usermode.rs")
+    let source = include_str!("../../../core/src/arch/x86_64/task_usermode.rs")
         .replace("//! ユーザーモード実行サポート", "")
         .replace("use core::arch::asm;", "");
     // Only the privileged instructions are replaced. Metadata lookup and the
