@@ -6,8 +6,8 @@ fn resumed_register_value_flows_from_the_native_caller() {
     assert!(dispatch.contains("exec::process_create_syscall(arg0, arg1, arg2)"));
     let exec = include_str!("../../../core/src/syscall/exec.rs");
     assert!(exec.contains("Thread::new_user_resume("));
-    assert!(exec.contains("let r = context.registers;"));
-    assert!(exec.contains("        r.rax,"));
+    assert!(exec.contains("crate::arch::thread::initial_context(&context)"));
+    assert!(exec.contains("        result,\n        context.thread_local_base,"));
     let thread = include_str!("../../../core/src/task/thread.rs");
     assert!(thread.contains("pub fn new_user_resume("));
     assert!(thread.contains("resume_usermode(user_context, rax, fs_base)"));

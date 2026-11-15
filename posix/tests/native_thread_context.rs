@@ -48,10 +48,13 @@ fn explicit_initial_registers_are_independent_of_privileged_flags() {
     let create = source.split("pub fn thread_create(").nth(1).unwrap();
     assert!(create.contains("context.flags != 0"));
     assert!(create.contains("context.reserved != [0; 3]"));
-    assert!(create.contains("rflags: 0x202"));
-    assert!(create.contains("rcx: registers.rcx"));
-    assert!(create.contains("r11: registers.r11"));
-    assert!(create.contains("registers.rax,"));
+    assert!(create.contains("crate::arch::thread::initial_context(&context)"));
+    assert!(create.contains("        result,\n        context.thread_local_base,"));
+    let conversion = include_str!("../../../core/src/arch/x86_64/thread.rs");
+    assert!(conversion.contains("rflags: 0x202"));
+    assert!(conversion.contains("rcx: registers.rcx"));
+    assert!(conversion.contains("r11: registers.r11"));
+    assert!(conversion.contains("registers.rax,"));
     let restore = include_str!("../../../core/src/arch/x86_64/task_usermode.rs");
     for register in ["rcx", "r11", "rax"] {
         assert!(restore.contains(&format!(
