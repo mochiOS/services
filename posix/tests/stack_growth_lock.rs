@@ -3,11 +3,11 @@ use std::process::{Command, Stdio};
 
 #[test]
 fn production_stack_growth_serializes_admission_and_preserves_reservations() {
-    let source = include_str!("../../../core/src/interrupt/idt.rs");
+    let source = include_str!("../../../core/src/interrupt/user_stack.rs");
     let start = source
         .find("fn try_grow_user_stack(fault_addr: u64) -> bool {")
         .unwrap();
-    let end = source[start..].find("/// x87").unwrap() + start;
+    let end = source[start..].find("\n}\n").unwrap() + start + 3;
     let mut program = String::from(
         r#"
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -39,6 +39,18 @@ mod task {
         let value=PROCESS.with(|p| f(&mut p.borrow_mut()));
         crate::LOCKED.store(false,crate::Ordering::Release); Some(value)
     }
+    pub mod process {
+        pub struct Edit;
+        impl Edit {
+            pub fn map_segment(&mut self,start:u64,file:u64,length:u64,bytes:&[u8],write:bool,exec:bool)->Result<(),()> {
+                crate::locked();
+                crate::mem::paging::map_and_copy_segment_to(4096,start,file,length,bytes,write,exec)
+            }
+        }
+        pub fn with_process_vm<T>(id:u64,f:impl FnOnce(&mut super::Process,&mut Edit)->T)->Option<T> {
+            super::with_process_mut(id,|process|f(process,&mut Edit))
+        }
+    }
 }
 mod mem {pub mod paging {
     pub fn is_user_range_occupied_in_table(table:u64,start:u64,length:u64)->bool {
@@ -50,9 +62,19 @@ mod mem {pub mod paging {
         assert_eq!(start+length,crate::BOTTOM);crate::MAPS.fetch_add(1,crate::Ordering::AcqRel);
         if crate::MODE.load(crate::Ordering::Acquire)==6 {Err(())} else {Ok(())}
     }
-}}
+}
+pub mod user_stack { @STACK_ADMISSION@ }
+}
 "#,
     );
+    let admission = include_str!("../../../core/src/mem/user_stack.rs")
+        .split_once('\n')
+        .unwrap()
+        .1
+        .split("/// Find the largest")
+        .next()
+        .unwrap();
+    program = program.replace("@STACK_ADMISSION@", admission);
     program.push_str(&source[start..end]);
     program.push_str(r#"
 fn main() {

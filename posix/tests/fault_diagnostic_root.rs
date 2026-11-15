@@ -98,7 +98,7 @@ fn user_fault_paths_do_not_walk_active_kernel_cr3_after_entering_kpti() {
         .split("fn page_fault_handler(")
         .nth(1)
         .unwrap()
-        .split("fn try_grow_user_stack(")
+        .split("fn x87_floating_point_handler(")
         .next()
         .unwrap();
     assert!(fault.contains("translate_current_user_fault(table, faulting_addr.as_u64())"));
