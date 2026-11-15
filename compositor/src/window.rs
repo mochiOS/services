@@ -64,11 +64,17 @@ impl Default for Window {
 }
 
 impl Window {
+    pub(crate) fn scale_factor(&self) -> f32 {
+        self.decoration_scale.clamp(metrics::MIN_SCALE, metrics::MAX_SCALE) as f32 / metrics::SCALE_UNIT as f32
+    }
+    pub(crate) fn shadow_margin(&self) -> u32 {
+        (WINDOW_SHADOW_MARGIN as f32 * self.scale_factor()).ceil() as u32
+    }
     pub(crate) fn corner_radius(&self) -> f32 {
         if self.state == crate::protocol::WINDOW_STATE_MAXIMIZED {
             0.0
         } else {
-            WINDOW_CORNER_RADIUS
+            WINDOW_CORNER_RADIUS * self.scale_factor()
         }
     }
     pub(crate) const fn empty() -> Self {
@@ -404,5 +410,22 @@ mod integrated_frame_tests {
         window.configured_height = 480;
         let frame = window_frame_rect(&content, &window);
         assert_eq!((frame.width, frame.height), (640, 480));
+    }
+}
+
+#[cfg(test)]
+mod dpi_geometry_tests {
+    use super::*;
+    #[test]
+    fn window_geometry_uses_the_same_scale_as_decoration() {
+        for percent in [75, 100, 125, 150, 200] {
+            let mut window=Window::empty();
+            window.decoration_scale=metrics::SCALE_UNIT*percent/100;
+            let scale=window.scale_factor();
+            assert!((window.corner_radius()-WINDOW_CORNER_RADIUS*scale).abs()<0.0001);
+            assert!(window.shadow_margin() as f32 >= 20.0*scale);
+            window.state=crate::protocol::WINDOW_STATE_MAXIMIZED;
+            assert_eq!(window.corner_radius(),0.0);
+        }
     }
 }

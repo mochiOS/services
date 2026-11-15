@@ -472,7 +472,7 @@ pub(crate) fn composite_and_present(
                 && radius != 0.0
                 && !shadow_drawn[window_index]
             {
-                draw_window_shadow(frame, frame_w, frame_h, present_rect, frame_rect, active);
+                draw_window_shadow(frame, frame_w, frame_h, present_rect, frame_rect, active, windows[window_index].scale_factor());
                 shadow_drawn[window_index] = true;
             }
             let surface_left = surface.x.max(0) as i64;
@@ -494,8 +494,9 @@ pub(crate) fn composite_and_present(
             }
             let coverage_mask =
                 window_style.map(|(_, frame, _, radius)| RoundedCoverage::new(frame, radius));
-            let border_mask = window_style.map(|(_, frame, _, radius)| {
-                RoundedCoverage::new(inset_rect(frame, 1), (radius - 1.0).max(0.0))
+            let border_mask = window_style.map(|(index, frame, _, radius)| {
+                let width = windows[index].scale_factor().ceil() as u32;
+                RoundedCoverage::new(inset_rect(frame, width), (radius - width as f32).max(0.0))
             });
             for dy in copy_top as usize..copy_bottom as usize {
                 let sy = (dy as i64).saturating_sub(surface.y as i64) as usize;
@@ -655,6 +656,7 @@ fn draw_window_shadow(
     damage: Rect,
     window_frame: Rect,
     active: bool,
+    scale: f32,
 ) {
     let layers: &[WindowShadow] = if active {
         &ACTIVE_WINDOW_SHADOW
@@ -668,7 +670,8 @@ fn draw_window_shadow(
             frame_height,
             damage,
             window_frame,
-            *shadow,
+            shadow.scaled(scale),
+            WINDOW_CORNER_RADIUS * scale,
         );
     }
 }
@@ -680,6 +683,7 @@ fn draw_shadow(
     damage: Rect,
     window_frame: Rect,
     shadow: WindowShadow,
+    corner_radius: f32,
 ) {
     let layer_count = shadow.blur_radius.max(2).min(u32::from(shadow.alpha));
     let weight_sum = (1..=layer_count)
@@ -721,10 +725,10 @@ fn draw_shadow(
             frame_height,
             damage,
             shadow_rect,
-            WINDOW_CORNER_RADIUS + expansion as f32,
+            corner_radius + expansion as f32,
             alpha as u8,
             window_frame,
-            WINDOW_CORNER_RADIUS,
+            corner_radius,
         );
     }
 }

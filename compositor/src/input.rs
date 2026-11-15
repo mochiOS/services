@@ -13,7 +13,7 @@ use crate::state::{MAX_DIMENSION, ModalSession};
 use crate::surface::surface_extent;
 use crate::surface::{Surface, SurfaceHandle, SurfaceRole, read_current_pixel};
 use crate::window::{
-    WINDOW_SHADOW_MARGIN, Window, WindowId, content_surface_index_for_window,
+    Window, WindowId, content_surface_index_for_window,
     point_inside_window_frame, window_frame_rect, window_index_by_id,
 };
 
@@ -1403,7 +1403,7 @@ fn apply_pointer_grab(
             return None;
         }
         let old =
-            window_frame_rect(&surfaces[content_index], window).expanded(WINDOW_SHADOW_MARGIN);
+            window_frame_rect(&surfaces[content_index], window).expanded(window.shadow_margin());
         window.configured_width = width;
         window.configured_height = height;
         if left {
@@ -1421,7 +1421,7 @@ fn apply_pointer_grab(
         crate::window::send_window_metadata(window, surfaces, window.decorator_endpoint);
         return merge_damage(
             Some(old),
-            window_frame_rect(&surfaces[content_index], window).expanded(WINDOW_SHADOW_MARGIN),
+            window_frame_rect(&surfaces[content_index], window).expanded(window.shadow_margin()),
         );
     }
     let next_x = grab
@@ -1434,12 +1434,12 @@ fn apply_pointer_grab(
         return None;
     }
     let old_frame =
-        window_frame_rect(&surfaces[content_index], window).expanded(WINDOW_SHADOW_MARGIN);
+        window_frame_rect(&surfaces[content_index], window).expanded(window.shadow_margin());
     surfaces[content_index].x = next_x;
     surfaces[content_index].y = next_y;
     crate::window::reposition_window_surfaces(surfaces, window);
     let new_frame =
-        window_frame_rect(&surfaces[content_index], window).expanded(WINDOW_SHADOW_MARGIN);
+        window_frame_rect(&surfaces[content_index], window).expanded(window.shadow_margin());
     merge_damage(Some(old_frame), new_frame)
 }
 

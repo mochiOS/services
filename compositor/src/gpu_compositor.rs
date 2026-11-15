@@ -203,6 +203,7 @@ struct WindowChrome {
     id: WindowId,
     frame: Rect,
     radius: f32,
+    scale: f32,
     active: bool,
 }
 
@@ -315,6 +316,7 @@ impl GpuCompositor {
                         id: window.id,
                         frame: window_frame_rect(content, window),
                         radius: window.corner_radius(),
+                        scale: window.scale_factor(),
                         active: self.active_window == Some(window.id),
                     })
                 })
@@ -1066,7 +1068,7 @@ fn append_window_chrome(output: &mut Vec<Vertex>, chrome: &WindowChrome, shadow:
         ],
         chrome.radius,
     );
-    let segments = polygon_segments(chrome.radius + 20.0);
+    let segments = polygon_segments(chrome.radius + 20.0 * chrome.scale);
     if shadow {
         if chrome.radius == 0.0 {
             return;
@@ -1077,6 +1079,7 @@ fn append_window_chrome(output: &mut Vec<Vertex>, chrome: &WindowChrome, shadow:
             &crate::window_elevation::INACTIVE
         };
         for layer in layers.iter().rev() {
+            let layer = layer.scaled(chrome.scale);
             // A middle stop softens the falloff without multiplying full shapes.
             let contour = |fraction: f32| {
                 let mut points = Vec::new();
@@ -1098,7 +1101,7 @@ fn append_window_chrome(output: &mut Vec<Vertex>, chrome: &WindowChrome, shadow:
         let mut outside = Vec::new();
         let mut inside = Vec::new();
         shape.for_each_offset_point(segments, 0.0, |p| outside.push(p));
-        shape.for_each_offset_point(segments, -1.0, |p| inside.push(p));
+        shape.for_each_offset_point(segments, -chrome.scale, |p| inside.push(p));
         let alpha = if chrome.active {
             crate::window_elevation::BORDER_ALPHA
         } else {
@@ -1468,6 +1471,7 @@ mod tests {
                 height: 300,
             },
             radius: crate::window_elevation::CORNER_RADIUS,
+            scale: 1.0,
             active: true,
         };
         let mut shadow = Vec::new();
