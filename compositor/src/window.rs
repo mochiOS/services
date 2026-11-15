@@ -55,6 +55,7 @@ pub(crate) struct Window {
     pub(crate) title_len: u8,
     pub(crate) title: [u8; MAX_WINDOW_TITLE_BYTES],
     pub(crate) presentation: Option<crate::window_management::Presentation>,
+    pub(crate) opening: mochios_viewkit_gpu_protocol::window_motion::Opening,
 }
 
 impl Default for Window {
@@ -110,6 +111,7 @@ impl Window {
             title_len: 0,
             title: [0; MAX_WINDOW_TITLE_BYTES],
             presentation: None,
+            opening: mochios_viewkit_gpu_protocol::window_motion::Opening::visible(),
         }
     }
 }

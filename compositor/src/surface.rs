@@ -1262,6 +1262,7 @@ pub(crate) fn handle_request(
             if let Some(slot) = window_slot {
                 windows[slot] = Window::empty();
                 windows[slot].live = true;
+                windows[slot].opening = mochios_viewkit_gpu_protocol::window_motion::Opening::pending();
                 windows[slot].id = window_id;
                 windows[slot].token = window_token;
                 windows[slot].content = handle;

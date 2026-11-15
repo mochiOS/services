@@ -454,6 +454,9 @@ pub(crate) fn composite_and_present(
             if !surface_has_current_pixels(surface) {
                 continue;
             }
+            let opacity = window_index_by_id(windows, surface.window)
+                .map_or(255, |index| windows[index].opening.opacity());
+            if opacity == 0 { continue; }
             let window_style =
                 window_index_by_id(windows, surface.window).and_then(|window_index| {
                     let window = &windows[window_index];
@@ -472,7 +475,7 @@ pub(crate) fn composite_and_present(
                 && radius != 0.0
                 && !shadow_drawn[window_index]
             {
-                draw_window_shadow(frame, frame_w, frame_h, present_rect, frame_rect, active, windows[window_index].scale_factor());
+                draw_window_shadow(frame, frame_w, frame_h, present_rect, frame_rect, active, windows[window_index].scale_factor(), opacity);
                 shadow_drawn[window_index] = true;
             }
             let surface_left = surface.x.max(0) as i64;
@@ -519,10 +522,10 @@ pub(crate) fn composite_and_present(
                     let Some(slot) = frame.get_mut(dst) else {
                         return errno_status(crate::protocol::SIZE_LIMIT);
                     };
-                    *slot = blend_surface_pixel(*slot, pixel, surface.current_format, coverage);
+                    *slot = blend_surface_pixel(*slot, pixel, surface.current_format, scaled_coverage(coverage, opacity));
                     if let Some(mask) = &border_mask {
                         let inner_coverage = mask.at(dx as i32, dy as i32);
-                        let border_coverage = coverage.saturating_sub(inner_coverage);
+                        let border_coverage = scaled_coverage(coverage.saturating_sub(inner_coverage), opacity);
                         if border_coverage != 0 {
                             let alpha = ((u32::from(
                                 if window_style.is_some_and(|(_, _, active, _)| active) {
@@ -645,6 +648,45 @@ pub(crate) fn composite_and_present(
 }
 
 type WindowShadow = crate::window_elevation::Layer;
+fn scaled_coverage(coverage: u8, opacity: u8) -> u8 {
+    if opacity == 255 {
+        return coverage;
+    }
+    ((u16::from(coverage) * u16::from(opacity) + 127) / 255) as u8
+}
+
+#[cfg(test)]
+mod opening_coverage_tests {
+    use super::*;
+    #[test]
+    fn reveal_preserves_edge_coverage_and_the_opaque_cpu_result() {
+        for coverage in 0..=255 {
+            assert_eq!(scaled_coverage(coverage, 0), 0);
+            assert_eq!(scaled_coverage(coverage, 255), coverage);
+            let mut previous = 0;
+            for opacity in 0..=255 {
+                let next = scaled_coverage(coverage, opacity);
+                assert!(next >= previous && next <= coverage);
+                previous = next;
+            }
+        }
+        let background = 0xffffffff;
+        let pixel = 0xffff0000;
+        let format = crate::protocol::PIXEL_FORMAT_ARGB8888_PREMULTIPLIED;
+        assert_eq!(
+            blend_surface_pixel(background, pixel, format, scaled_coverage(255, 0)),
+            background
+        );
+        assert_eq!(
+            blend_surface_pixel(background, pixel, format, scaled_coverage(255, 255)),
+            blend_surface_pixel(background, pixel, format, 255)
+        );
+        assert_eq!(
+            blend_surface_pixel(background, pixel, format, scaled_coverage(255, 128)),
+            0xffff7f7f
+        );
+    }
+}
 const INACTIVE_WINDOW_SHADOW: [WindowShadow; 1] = crate::window_elevation::INACTIVE;
 const ACTIVE_WINDOW_SHADOW: [WindowShadow; 2] = crate::window_elevation::ACTIVE;
 
@@ -656,6 +698,7 @@ fn draw_window_shadow(
     window_frame: Rect,
     active: bool,
     scale: f32,
+    opacity: u8,
 ) {
     let layers: &[WindowShadow] = if active {
         &ACTIVE_WINDOW_SHADOW
@@ -669,7 +712,7 @@ fn draw_window_shadow(
             frame_height,
             damage,
             window_frame,
-            shadow.scaled(scale),
+            WindowShadow { alpha: scaled_coverage(shadow.alpha, opacity), ..shadow.scaled(scale) },
             WINDOW_CORNER_RADIUS * scale,
         );
     }

@@ -668,7 +668,43 @@ pub(crate) fn run() -> ! {
     let mut pending_buf = [0u8; 4128];
     let mut frame = PendingPresent::default();
     let mut next_client_cleanup = 0;
+    let mut next_opening_frame = 0;
     loop {
+        let mut opening_active = false;
+        if let Ok(now) = platform::time::monotonic_milliseconds() {
+            let tick = now >= next_opening_frame;
+            for window in state.windows.iter_mut().filter(|window| window.live) {
+                let content =
+                    crate::window::content_surface_index_for_window(&state.surfaces, window);
+                let ready = content.is_some_and(|index| {
+                    state.surfaces[index].visible
+                        && crate::surface::surface_has_current_pixels(&state.surfaces[index])
+                });
+                let immediate = window.presentation.is_some()
+                    || content.is_some_and(|index| state.surfaces[index].protected_presentation);
+                if tick && window.opening.advance(now, ready, immediate) {
+                    if let Some(index) =
+                        crate::window::content_surface_index_for_window(&state.surfaces, window)
+                    {
+                        let damage =
+                            crate::window::window_frame_rect(&state.surfaces[index], window)
+                                .expanded(window.shadow_margin());
+                        frame.queue(Some(damage), false);
+                    }
+                }
+                opening_active |= ready && window.opening.pending_frames();
+            }
+            if tick {
+                next_opening_frame = now
+                    .saturating_add(mochios_viewkit_gpu_protocol::window_motion::FRAME_INTERVAL_MS);
+            }
+        } else {
+            for window in state.windows.iter_mut().filter(|window| window.live) {
+                if window.opening.advance(0, true, true) {
+                    frame.queue(None, false);
+                }
+            }
+        }
         // Reuse normal event-loop wakeups; do not poll an idle desktop.
         if let Ok(now) = platform::time::monotonic_milliseconds() {
             if now >= next_client_cleanup {
@@ -730,7 +766,7 @@ pub(crate) fn run() -> ! {
             buf[..len].copy_from_slice(&pending_buf[..len]);
             msg
         } else {
-            let received = if state.boot_scene.is_some() {
+            let received = if state.boot_scene.is_some() || opening_active {
                 platform::ipc::try_wait_object_handles(buf, &mut handles.0)
             } else {
                 platform::ipc::wait_object_handles(endpoint, buf, &mut handles.0)
@@ -738,7 +774,7 @@ pub(crate) fn run() -> ! {
             match received {
                 Ok(msg) => msg,
                 Err(_) => {
-                    if state.boot_scene.is_some() {
+                    if state.boot_scene.is_some() || opening_active {
                         let _ = platform::thread::sleep_milliseconds(4);
                     } else {
                         platform::thread::yield_now();
