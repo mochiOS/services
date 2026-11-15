@@ -18,6 +18,8 @@ use status::Error;
 use capability::Capability;
 use util::console;
 use std::cell::{{Cell, RefCell}};
+use core::fmt;
+use core::fmt::Write;
 const SUCCESS:u64=0;
 thread_local! {{
     static ALLOWED:Cell<bool>=const{{Cell::new(true)}};
@@ -30,6 +32,9 @@ thread_local! {{
     static IRQS_OFF:Cell<bool>=const{{Cell::new(false)}};
     static LIMIT:Cell<usize>=const{{Cell::new(usize::MAX)}};
     static YIELDS:Cell<usize>=const{{Cell::new(0)}};
+    static HYPER_OUTPUT:RefCell<Vec<u8>>=const{{RefCell::new(Vec::new())}};
+    static HYPER_FAIL:Cell<bool>=const{{Cell::new(false)}};
+    static HYPER_CALLS:Cell<usize>=const{{Cell::new(0)}};
 }}
 mod capability {{
     #[derive(Debug,PartialEq)] pub enum Capability{{KernelDebug}}
@@ -85,7 +90,14 @@ mod mem {{pub mod paging {{
 }}}}
 mod hypervisor_guest {{
     pub fn is_active()->bool{{false}}
-    pub fn invoke(_:crate::hypervisor::HypercallNumber,_:u64,_:u64,_:u64)->u64{{panic!("unexpected hypercall")}}
+    pub fn invoke(_:crate::hypervisor::HypercallNumber,address:u64,length:u64,reserved:u64)->u64{{
+        assert_eq!(reserved,0);assert!(length>0&&length<=1024);
+        assert!(address%4096+length<=4096);crate::HYPER_CALLS.set(crate::HYPER_CALLS.get()+1);
+        if crate::HYPER_FAIL.get(){{return u64::MAX;}}
+        // Only the actual writer's retained stack buffer reaches this mock transport.
+        let bytes=unsafe{{std::slice::from_raw_parts(address as *const u8,length as usize)}};
+        crate::HYPER_OUTPUT.with_borrow_mut(|out|out.extend_from_slice(bytes));0
+    }}
 }}
 mod hypervisor {{pub const HYPERCALL_SUCCESS:u64=0;pub enum HypercallNumber{{ConsoleWrite}}}}
 mod util {{pub mod console {{
@@ -96,13 +108,27 @@ mod util {{pub mod console {{
     }}}}
     pub struct SerialLock;pub static SERIAL:SerialLock=SerialLock;
     impl SerialLock{{pub fn try_lock(&self)->Option<Serial>{{assert!(crate::IRQS_OFF.get());Some(Serial)}}}}
+    @DIRECT@
 }}}}
 "#,
         status = root.join("core/crates/abi/src/status.rs"),
         arm_ports = root.join("core/src/arch/aarch64/port_io.rs")
     );
     let source = include_str!("../../../core/src/syscall/io.rs");
+    program = program.replace(
+        "@DIRECT@",
+        probe::between(
+            include_str!("../../../core/src/util/console.rs"),
+            "pub fn try_write_direct(",
+            "struct HypervisorConsole",
+        ),
+    );
     program.push_str(&source[source.find("fn caller_has_port_io_access(").unwrap()..]);
+    program.push_str(probe::between(
+        include_str!("../../../core/src/util/console.rs"),
+        "struct HypervisorConsole",
+        "/// シリアル出力マクロ",
+    ));
     program.push_str(r#"
 fn reset(input:&[u8]){
     ALLOWED.set(true);INPUT.with_borrow_mut(|value|*value=input.to_vec());
@@ -110,6 +136,14 @@ fn reset(input:&[u8]){
     LIMIT.set(usize::MAX);YIELDS.set(0);
 }
 fn main(){
+    let text="x".repeat(8193);let mut writer=HypervisorConsole::new();
+    writer.write_str(&text).unwrap();writer.flush().unwrap();
+    assert_eq!(HYPER_OUTPUT.with_borrow(Clone::clone),text.as_bytes());
+    assert!(HYPER_CALLS.get()>=9);assert_eq!(writer.len,0);
+    HYPER_FAIL.set(true);HYPER_OUTPUT.with_borrow_mut(Vec::clear);
+    let mut writer=HypervisorConsole::new();writer.write_str("failure").unwrap();
+    assert_eq!(writer.flush(),Err(Error::BackingFailure));
+    assert!(HYPER_OUTPUT.with_borrow(|out|out.is_empty()));HYPER_FAIL.set(false);
     reset(b"abc");assert_eq!(debug_write(1,3),3);assert_eq!(COPIES.get(),1);
     assert_eq!(OUTPUT.with_borrow(Clone::clone),b"abc");
     reset(&[0xff,0]);assert_eq!(debug_write(1,2),2);
