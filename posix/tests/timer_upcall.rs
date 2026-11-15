@@ -3,10 +3,13 @@ use std::process::{Command, Stdio};
 
 #[test]
 fn actual_timer_body_delivers_after_scheduling_and_before_leaving_kernel_address_space() {
-    let timer = include_str!("../../../core/src/interrupt/timer.rs");
+    let timer = include_str!("../../../core/src/arch/x86_64/timer.rs");
     let start = timer.find("extern \"sysv64\" fn handle_timer(").unwrap();
     let end = start + timer[start..].find("\n}\n").unwrap() + 3;
-    let mut program = String::from(
+    let mut program = String::from("mod native_frame {\n");
+    program.push_str(include_str!("../../../core/src/arch/x86_64/exception.rs"));
+    program.push_str("\n}\nmod cpu { pub mod context { pub use crate::native_frame::InterruptFrame; } }\n");
+    program.push_str(
         r#"
 thread_local! {
     static EVENTS:std::cell::RefCell<Vec<&'static str>>=const{std::cell::RefCell::new(Vec::new())};
@@ -15,7 +18,7 @@ thread_local! {
     static SWITCH:std::cell::Cell<bool>=const{std::cell::Cell::new(false)};
 }
 fn event(value:&'static str){EVENTS.with(|v|v.borrow_mut().push(value));}
-fn send_eoi(vector:u8){assert_eq!(vector,32);event("pic");}
+mod interrupt {pub fn send_eoi(vector:u8){assert_eq!(vector,32);crate::event("pic");}}
 mod performance {pub enum CounterMetric{TimerInterrupts}pub fn increment(_:CounterMetric,count:u64){assert_eq!(count,1);crate::event("metric");}}
 mod hypervisor_guest {pub fn is_active()->bool{crate::PV.with(|v|v.get())}}
 mod percpu {pub fn current_cpu_id()->usize{crate::CPU.with(|v|v.get())}}
@@ -31,9 +34,9 @@ mod syscall {
         pub fn kpti_leave_after_trap(user:bool){crate::event(if user{"leave-user"}else{"leave-kernel"});}
     }
     pub mod upcall {
-        pub fn prepare_interrupt_return(frame:&mut[u64;20]){
+        pub fn prepare_interrupt_return(frame:&mut crate::native_frame::InterruptFrame){
             crate::event("prepare");
-            if frame[16]&3==3 {frame[15]=0x5555;frame[8]=0xa7;}
+            if frame.iret.cs&3==3 {frame.iret.rip=0x5555;frame.gprs.rdi=0xa7;}
         }
     }
 }
@@ -43,7 +46,7 @@ mod actual {
     );
     program.push_str(&timer[start..end]);
     program.push_str(r#"
-pub fn run(frame:&mut[u64;20],local:bool){handle_timer(frame,local)}
+pub fn run(frame:&mut[u64;20],local:bool){handle_timer(frame.as_mut_ptr().cast(),local)}
 }
 fn main(){
     for local in [false,true] {for pv in [false,true] {for cpu in [0,1] {
@@ -101,7 +104,7 @@ fn main(){
 
 #[test]
 fn both_idt_entries_share_the_full_gpr_frame_and_clear_direction_before_rust() {
-    let timer = include_str!("../../../core/src/interrupt/timer.rs");
+    let timer = include_str!("../../../core/src/arch/x86_64/timer.rs");
     let save = timer
         .split("core::arch::naked_asm!(")
         .nth(1)

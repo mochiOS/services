@@ -9,7 +9,13 @@ fn native_counter_accumulates_concurrent_threads_and_survives_retirement() {
         .find("#[derive(Clone, Copy, Debug, PartialEq, Eq)]")
         .unwrap()
         + start;
-    let mut program = String::from(
+    let authority = include_str!("../../../core/src/task/authority_transition.rs");
+    let authority = authority.split("const FROZEN").nth(1).unwrap()
+        .split("pub(crate) struct Mutation").next().unwrap();
+    let mut program = String::from("mod authority_transition {\nuse core::sync::atomic::{AtomicU64, Ordering};\nconst FROZEN");
+    program.push_str(authority);
+    program.push_str("\n}\n");
+    program.push_str(
         r#"
 mod native {
 use std::sync::{Arc, atomic::{AtomicU8, AtomicU64, Ordering}};
@@ -105,7 +111,7 @@ fn timer_records_both_clocks_and_native_readers_use_stable_owner_accounting() {
         .unwrap();
     assert!(tick.contains("self.cpu_ticks.saturating_add(1)"));
     assert!(tick.contains("process.note_cpu_tick(user_mode)"));
-    assert!(tick.contains("self.process_object.as_ref()"));
+    assert!(tick.contains("if let Some(process) = &self.process_object"));
     let push = thread
         .split("pub fn push(")
         .nth(1)
@@ -135,7 +141,7 @@ fn timer_records_both_clocks_and_native_readers_use_stable_owner_accounting() {
 
 #[test]
 fn both_timer_sources_classify_the_interrupted_cpu_mode_before_switching_address_spaces() {
-    let source = include_str!("../../../core/src/interrupt/timer.rs");
+    let source = include_str!("../../../core/src/arch/x86_64/timer.rs");
     assert!(source.contains("timer_entry!(timer_interrupt_handler, 0)"));
     assert!(source.contains("timer_entry!(local_timer_interrupt_handler, 1)"));
     let handler = source
@@ -145,9 +151,9 @@ fn both_timer_sources_classify_the_interrupted_cpu_mode_before_switching_address
         .split("/// 現在")
         .next()
         .unwrap();
-    let mode = handler.find("frame[16] & 3 == 3").unwrap();
+    let mode = handler.find("frame.iret.cs & 3 == 3").unwrap();
     assert!(mode < handler.find("kpti_enter_for_trap(user_mode)").unwrap());
-    assert!(mode < handler.find("frame[16] =").unwrap());
+    assert!(mode < handler.find("frame.iret.cs =").unwrap());
     assert!(handler.contains("scheduler_tick(user_mode)"));
     let scheduler = include_str!("../../../core/src/task/scheduler.rs");
     let tick = scheduler
