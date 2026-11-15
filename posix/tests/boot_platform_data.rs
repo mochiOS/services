@@ -205,6 +205,7 @@ fn actual_platform_backend_uses_only_selected_metadata_and_keeps_read_only_grant
 #![allow(dead_code)]
 #[path={:?}]mod abi;pub use abi::*;
 #[path={:?}]mod protocol;pub use protocol::*;
+#[path={:?}]mod address;
 use abi::hypervisor::{{HypercallNumber,GRANT_REF_INVALID}};
 use protocol::{{INSTALL_METADATA_PAGE as MDRIVER_INSTALL_METADATA_PAGE,DOMAIN_ID as MDRIVER_DOMAIN_ID}};
 use std::{{cell::Cell,ptr::copy_nonoverlapping}};
@@ -213,23 +214,38 @@ thread_local!{{
  static RESULT:Cell<u64>=const{{Cell::new(73)}};
  static CALLS:Cell<usize>=const{{Cell::new(0)}};
  static ADDRESS:Cell<u64>=const{{Cell::new(0)}};
+ static WINDOW:Cell<(u64,u64)>=const{{Cell::new((0,0))}};
+ static OFFSET:Cell<Option<u64>>=const{{Cell::new(None)}};
 }}
-mod mnu{{pub mod init{{pub mod boot_data{{pub fn platform_data()->Option<&'static[u8]>{{crate::DATA.get()}}}}}}}}
+mod mnu{{
+ pub mod init{{pub mod boot_data{{pub fn platform_data()->Option<&'static[u8]>{{crate::DATA.get()}}}}}}
+ pub mod mem{{pub mod paging{{pub fn physical_memory_offset()->Option<u64>{{crate::OFFSET.get()}}}}}}
+ pub mod arch{{pub mod memory{{pub use crate::address::VirtAddr;}}}}
+}}
 mod hypervisor_guest{{
+ pub fn grant_window()->Option<(u64,u64)>{{Some(crate::WINDOW.get())}}
  pub fn invoke(number:crate::HypercallNumber,address:u64,domain:u64,flags:u64)->u64{{
   assert_eq!(number as u64,crate::HypercallNumber::GrantCreate as u64);
   assert_eq!(address,crate::ADDRESS.get());assert_eq!(domain,u64::from(crate::MDRIVER_DOMAIN_ID));assert_eq!(flags,0);
-  let bytes=unsafe{{std::slice::from_raw_parts(address as *const u8,4096)}};
+  let mapped=crate::grant_pointer(address,4096).unwrap();
+  assert_ne!(mapped as u64,address,"GPA was mistaken for a kernel pointer");
+  let bytes=unsafe{{std::slice::from_raw_parts(mapped,4096)}};
   assert_eq!(&bytes[..32],&[0x5a;32]);assert!(bytes[32..].iter().all(|byte|*byte==0));
   crate::CALLS.set(crate::CALLS.get()+1);crate::RESULT.get()
  }}
 }}
-#[derive(Debug,PartialEq)]enum Error{{Protocol,Hypercall}}
+#[derive(Debug,PartialEq)]enum Error{{Protocol,Hypercall,MissingGrantWindow}}
 struct Client{{ring_address:u64,install_metadata_reference:Option<u32>,poisoned:bool,scoped:Option<()>}}
 "#,
         root.join("core/crates/abi/src/lib.rs"),
-        root.join("boot/crates/mdriver-protocol/src/lib.rs")
+        root.join("boot/crates/mdriver-protocol/src/lib.rs"),
+        root.join("core/src/arch/aarch64/memory/address.rs")
     );
+    program.push_str(probe::between(
+        include_str!("../../../boot/src/mdriver.rs"),
+        "fn grant_pointer(",
+        "fn connect_client(",
+    ));
     program.push_str(probe::between(
         include_str!("../../../boot/src/mdriver.rs"),
         "fn install_metadata_reference(",
@@ -238,8 +254,19 @@ struct Client{{ring_address:u64,install_metadata_reference:Option<u32>,poisoned:
     program.push_str(r#"
 fn main(){
  let mut page=vec![0xa5u8;((MDRIVER_INSTALL_METADATA_PAGE+1)*4096)as usize];
- let mut client=Client{ring_address:page.as_mut_ptr()as u64,install_metadata_reference:None,poisoned:false,scoped:None};
+ let mut client=Client{ring_address:0x1000,install_metadata_reference:None,poisoned:false,scoped:None};
+ WINDOW.set((client.ring_address,page.len() as u64));
+ let offset=page.as_mut_ptr() as u64-client.ring_address;
+ OFFSET.set(Some(offset));
  ADDRESS.set(client.ring_address+MDRIVER_INSTALL_METADATA_PAGE*4096);
+ for (address,length) in [(0xfff,1),(0x1000+page.len() as u64,1),(u64::MAX-1,4),(0x1000,0),(0x1000,usize::MAX)]{
+  assert_eq!(grant_pointer(address,length),Err(Error::Protocol));
+ }
+ OFFSET.set(None);assert_eq!(grant_pointer(ADDRESS.get(),4096),Err(Error::MissingGrantWindow));
+ for bad in [u64::MAX,0x0001_0000_0000_0000]{
+  OFFSET.set(Some(bad));assert_eq!(grant_pointer(ADDRESS.get(),4096),Err(Error::Protocol));
+ }
+ OFFSET.set(Some(offset));
  for data in [None,Some(&[0x5a;31][..]),Some(&[0x5a;33][..])]{
   DATA.set(data);assert_eq!(install_metadata_reference(&mut client),Err(Error::Protocol));
   assert_eq!(CALLS.get(),0);assert!(page.iter().all(|byte|*byte==0xa5));
