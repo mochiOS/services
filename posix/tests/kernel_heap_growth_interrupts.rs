@@ -19,14 +19,14 @@ thread_local! {
     static ALLOCATED:Cell<usize>=const{Cell::new(0)};
     static FREED:Cell<usize>=const{Cell::new(0)};
 }
-mod x86_64 {pub mod instructions {pub mod interrupts {
+mod arch {pub mod interrupts {
     pub fn without_interrupts<T>(body:impl FnOnce()->T)->T{
         let previous=crate::IRQ.replace(false);
         let result=body();
         assert_eq!(crate::LOCKS.get(),0,"do not restore IRQs while a mapping lock is live");
         crate::IRQ.set(previous);result
     }
-}}}
+}}
 struct Lock<T>(UnsafeCell<T>);
 unsafe impl<T> Sync for Lock<T>{}
 impl<T> Lock<T>{
