@@ -123,3 +123,18 @@ fn obsolete_timezone_pointer_is_never_accessed() {
     assert_eq!((output.tv_sec, output.tv_usec), (1, 999_999));
     assert_eq!(ERRNO.get(), 71);
 }
+
+#[test]
+fn generic_newlib_syscall_uses_the_same_checked_clock_adapter() {
+    let mut output = Timeval { tv_sec: 0, tv_usec: 0 };
+    assert_eq!(implementation::_gettimeofday(&mut output, 1usize as *mut c_void), 0);
+    assert_eq!((output.tv_sec, output.tv_usec), (1, 999_999));
+    assert_eq!(ERRNO.get(), 71);
+    assert_eq!(implementation::_gettimeofday(1usize as *mut _, std::ptr::null_mut()), -1);
+    assert_eq!(ERRNO.get(), EFAULT);
+    CLOCK.set(Err(5));
+    output.tv_sec = 17;
+    assert_eq!(implementation::_gettimeofday(&mut output, std::ptr::null_mut()), -1);
+    assert_eq!(ERRNO.get(), 5);
+    assert_eq!(output.tv_sec, 17);
+}
