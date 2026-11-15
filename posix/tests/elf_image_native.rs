@@ -13,8 +13,9 @@ fn native_program() -> String {
         .join("../..")
         .canonicalize()
         .unwrap();
-    let mut program = String::from(
-        "#![allow(dead_code)]\nextern crate alloc;\nextern crate self as mnu_abi;\nmod status {\n",
+    let mut program = format!(
+        "#![allow(dead_code)]\nextern crate alloc;\nextern crate self as mnu_abi;\npub const NATIVE_ELF_MACHINE: u16 = {};\nmod status {{\n",
+        mnu_abi::NATIVE_ELF_MACHINE,
     );
     program.push_str(include_str!("../../../core/crates/abi/src/status.rs"));
     program.push_str("}\nmod elf {\n");
@@ -243,9 +244,6 @@ fn main() {{
     metadata(&data, address, loads, false);
 }}
 "#));
-    program.push_str(&probe::definition(
-        include_str!("../../../core/src/result.rs"),
-        "impl From<Kernel> for mnu_abi::status::Error {",
-    ));
+    // native_program already includes the production error conversion.
     probe::run(&program);
 }
