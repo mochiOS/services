@@ -191,11 +191,20 @@ struct SurfaceGeometryKey {
     window_clip: Option<WindowClip>,
 }
 
-#[derive(Clone, PartialEq)]
+#[derive(Clone)]
 struct WindowClip {
+    coverage: Option<std::sync::Arc<mochios_viewkit_gpu_protocol::coverage::Clip>>,
     polygon: Vec<(f32, f32)>,
     bounds: [f32; 4],
     interior: [f32; 4],
+}
+
+impl PartialEq for WindowClip {
+    fn eq(&self, other: &Self) -> bool {
+        self.bounds == other.bounds
+            && self.interior == other.interior
+            && self.polygon == other.polygon
+    }
 }
 
 #[derive(Clone, PartialEq)]
@@ -818,29 +827,49 @@ fn rounded_rect_polygon(rect: Rect, radius: f32) -> WindowClip {
     use mochios_viewkit_gpu_protocol::continuous_corner::{RoundedRect, polygon_segments};
     // The compositor operates in physical pixels. Cache the local contour so
     // moving a window only translates points; resize keys are bounded to 64.
-    static CACHE: std::sync::Mutex<Vec<([u32; 3], Vec<(f32, f32)>)>> =
+    static CACHE: std::sync::Mutex<Vec<([u32; 3], Vec<(f32, f32)>, Option<std::sync::Arc<mochios_viewkit_gpu_protocol::coverage::Clip>>)>> =
         std::sync::Mutex::new(Vec::new());
     let shape = RoundedRect::uniform([0.0, 0.0, rect.width as f32, rect.height as f32], radius);
     let radius = shape.radii[0];
     let key = [rect.width, rect.height, radius.to_bits()];
     let mut cache = CACHE.lock().unwrap_or_else(|e| e.into_inner());
-    let local = if let Some((_, points)) = cache.iter().find(|(k, _)| *k == key) {
-        points.clone()
+    let (local, coverage) = if let Some((_, points, coverage)) =
+        cache.iter().find(|(k, _, _)| *k == key)
+    {
+        (points.clone(), coverage.clone())
     } else {
         let mut points = Vec::new();
         shape.for_each_point(polygon_segments(radius), |p| points.push(p));
         if cache.len() == 64 {
             cache.remove(0);
         }
-        cache.push((key, points.clone()));
-        points
+        let coverage =
+            mochios_viewkit_gpu_protocol::coverage::Clip::new(&points).map(std::sync::Arc::new);
+        // Both the contour and AA regions belong to the same bounded shape cache.
+        let cost =
+            |p: &Vec<(f32, f32)>,
+             c: &Option<std::sync::Arc<mochios_viewkit_gpu_protocol::coverage::Clip>>| {
+                p.capacity() * 8 + c.as_ref().map(|c| c.storage_bytes()).unwrap_or(0)
+            };
+        let mut used: usize = cache.iter().map(|(_, p, c)| cost(p, c)).sum();
+        let bytes = cost(&points, &coverage);
+        while !cache.is_empty() && used + bytes > 4 * 1024 * 1024 {
+            let (_, p, c) = cache.remove(0);
+            used = used.saturating_sub(cost(&p, &c));
+        }
+        if bytes <= 4 * 1024 * 1024 {
+            cache.push((key, points.clone(), coverage.clone()));
+        }
+        (points, coverage)
     };
     let left = rect.x as f32;
     let top = rect.y as f32;
     let right = left + rect.width as f32;
     let bottom = top + rect.height as f32;
+    let polygon: Vec<_> = local.into_iter().map(|p| (p.0 + left, p.1 + top)).collect();
     WindowClip {
-        polygon: local.into_iter().map(|p| (p.0 + left, p.1 + top)).collect(),
+        coverage,
+        polygon,
         bounds: [left, top, right, bottom],
         interior: [left + radius, top + radius, right - radius, bottom - radius],
     }
@@ -929,7 +958,7 @@ fn append_window_clipped_triangle(
     damage: Rect,
     window_clip: Option<&WindowClip>,
 ) {
-    let (outside, inside) = triangle_rect_bounds(&triangle, damage);
+    let (outside, _) = triangle_rect_bounds(&triangle, damage);
     if outside {
         return;
     }
@@ -954,48 +983,25 @@ fn append_window_clipped_triangle(
     }
     let [left, top, right, bottom] = window_clip.bounds;
     let [inner_left, inner_top, inner_right, inner_bottom] = window_clip.interior;
-    let inside_bounds = min_x >= left && min_y >= top && max_x <= right && max_y <= bottom;
+    let inside_bounds =
+        min_x >= left + 0.5 && min_y >= top + 0.5 && max_x <= right - 0.5 && max_y <= bottom - 0.5;
     let inside_core =
         min_x >= inner_left && max_x <= inner_right || min_y >= inner_top && max_y <= inner_bottom;
     if inside_bounds && inside_core {
         append_clipped_triangle(output, triangle, damage);
         return;
     }
-    let window_clip = &window_clip.polygon;
-    let mut window_inside = true;
-    for index in 0..window_clip.len() {
-        let start = window_clip[index];
-        let end = window_clip[(index + 1) % window_clip.len()];
-        let count = triangle
-            .iter()
-            .filter(|vertex| edge_distance(**vertex, start, end) >= -edge_epsilon(start, end))
-            .count();
-        if count == 0 {
-            return;
-        }
-        window_inside &= count == 3;
-    }
-    if inside && window_inside {
-        output.extend_from_slice(&triangle);
-        return;
-    }
     let mut damage_clipped = Vec::new();
     append_clipped_triangle(&mut damage_clipped, triangle, damage);
     for triangle in damage_clipped.chunks_exact(3) {
-        let mut polygon = triangle.to_vec();
-        for index in 0..window_clip.len() {
-            let edge_start = window_clip[index];
-            let edge_end = window_clip[(index + 1) % window_clip.len()];
-            polygon = clip_convex_edge(polygon, edge_start, edge_end);
-            if polygon.len() < 3 {
-                break;
-            }
-        }
-        if polygon.len() < 3 {
-            continue;
-        }
-        for index in 1..polygon.len() - 1 {
-            output.extend_from_slice(&[polygon[0], polygon[index], polygon[index + 1]]);
+        use mochios_viewkit_gpu_protocol::coverage::Vertex as CoverageVertex;
+        let input=core::array::from_fn(|i| {let v=triangle[i]; CoverageVertex {position:[v.x-left,v.y-top],uv:[v.u,v.v],color:v.color}});
+        if let Some(covered)=window_clip.coverage.as_ref().and_then(|c| c.triangle(input,0.5)) {
+            output.extend(covered.into_iter().flatten().map(|v| Vertex {x:v.position[0]+left,y:v.position[1]+top,u:v.uv[0],v:v.uv[1],color:v.color}));
+        } else {
+            // A malformed or over-budget clip must not publish an unclipped
+            // surface. The validated continuous rectangle cannot reach this.
+            return;
         }
     }
 }
@@ -1068,7 +1074,17 @@ fn append_window_chrome(output: &mut Vec<Vertex>, chrome: &WindowChrome, shadow:
         ],
         chrome.radius,
     );
-    let segments = polygon_segments(chrome.radius + 20.0 * chrome.scale);
+    let extent = if shadow {
+        crate::window_elevation::ACTIVE
+            .iter()
+            .chain(crate::window_elevation::INACTIVE.iter())
+            .map(|layer| (layer.blur_radius + layer.spread) as f32)
+            .fold(0., f32::max)
+            * chrome.scale
+    } else {
+        0.5
+    };
+    let segments = polygon_segments(chrome.radius + extent);
     if shadow {
         if chrome.radius == 0.0 {
             return;
@@ -1080,35 +1096,33 @@ fn append_window_chrome(output: &mut Vec<Vertex>, chrome: &WindowChrome, shadow:
         };
         for layer in layers.iter().rev() {
             let layer = layer.scaled(chrome.scale);
-            // A middle stop softens the falloff without multiplying full shapes.
-            let contour = |fraction: f32| {
-                let mut points = Vec::new();
-                shape.for_each_offset_point(
-                    segments,
-                    (layer.blur_radius + layer.spread) as f32 * fraction,
-                    |(x, y)| points.push((x, y + layer.offset_y as f32 * fraction)),
-                );
+            let contour=|fraction:f32| {
+                let mut points=Vec::new();
+                shape.for_each_offset_point(segments,layer.spread as f32+layer.blur_radius as f32*fraction,
+                    |(x,y)|points.push((x,y+layer.offset_y as f32)));
                 points
             };
-            let inside = contour(0.0);
-            let middle = contour(0.4);
-            let outside = contour(1.0);
-            let alpha = layer.alpha as f32 / 255.0;
-            append_contour_ring(output, &inside, &middle, alpha, alpha * 0.35);
-            append_contour_ring(output, &middle, &outside, alpha * 0.35, 0.0);
+            let alpha=layer.alpha as f32/255.0;
+            let mut inside=contour(0.0);
+            for stop in 1..=3 {
+                let a=(stop-1) as f32/3.0;let b=stop as f32/3.0;let outside=contour(b);
+                append_contour_ring(output,&inside,&outside,
+                    alpha*mochios_viewkit_gpu_protocol::raster_quality::shadow_falloff(a),
+                    alpha*mochios_viewkit_gpu_protocol::raster_quality::shadow_falloff(b));
+                inside=outside;
+            }
         }
     } else {
-        let mut outside = Vec::new();
-        let mut inside = Vec::new();
-        shape.for_each_offset_point(segments, 0.0, |p| outside.push(p));
-        shape.for_each_offset_point(segments, -chrome.scale, |p| inside.push(p));
-        let alpha = if chrome.active {
-            crate::window_elevation::BORDER_ALPHA
-        } else {
-            crate::window_elevation::INACTIVE_BORDER_ALPHA
-        } as f32
-            / 255.0;
-        append_contour_ring(output, &inside, &outside, alpha, alpha);
+        let contour=|offset:f32| {let mut points=Vec::new();shape.for_each_offset_point(segments,offset,|p|points.push(p));points};
+        let aa=0.5f32.min(chrome.scale*0.5);
+        let outer_fade=contour(0.5);
+        let outer=contour(-aa);
+        let inner=contour(-chrome.scale+aa);
+        let inner_fade=contour(-chrome.scale-0.5);
+        let alpha = if chrome.active {crate::window_elevation::BORDER_ALPHA} else {crate::window_elevation::INACTIVE_BORDER_ALPHA} as f32/255.;
+        append_contour_ring(output,&outer,&outer_fade,alpha,0.);
+        append_contour_ring(output,&inner,&outer,alpha,alpha);
+        append_contour_ring(output,&inner_fade,&inner,0.,alpha);
     }
 }
 
@@ -1502,7 +1516,12 @@ mod tests {
         let mut border = Vec::new();
         append_window_chrome(&mut border, &chrome, false);
         assert!(!border.is_empty());
-        assert!(border.iter().all(|v| v.color[3] == crate::window_elevation::INACTIVE_BORDER_ALPHA as f32 / 255.));
+        assert!(border.iter().all(|v| v.color[3] >= 0.
+            && v.color[3] <= crate::window_elevation::INACTIVE_BORDER_ALPHA as f32 / 255.));
+        assert!(
+            border.iter().any(|v| v.color[3] == 0.),
+            "stroke boundaries have explicit coverage on non-MSAA targets"
+        );
         chrome.radius = 0.;
         shadow.clear();
         append_window_chrome(&mut shadow, &chrome, true);
@@ -2127,16 +2146,23 @@ mod tests {
             Some(&clip),
         );
         assert!(!output.is_empty());
+        let shape = mochios_viewkit_gpu_protocol::continuous_corner::RoundedRect::uniform(
+            [0., 0., 100., 100.],
+            20.,
+        );
         assert!(output.iter().all(|vertex| {
-            mochios_viewkit_gpu_protocol::continuous_corner::RoundedRect::uniform(
-                [0.0, 0.0, 100.0, 100.0],
-                20.0,
-            )
-            .contains((
-                vertex.x + (50.0 - vertex.x) * 0.0001,
-                vertex.y + (50.0 - vertex.y) * 0.0001,
-            ))
+            if shape.contains((vertex.x,vertex.y)) {return true;}
+            let distance=clip.polygon.iter().zip(clip.polygon.iter().cycle().skip(1)).take(clip.polygon.len()).map(|(a,b)| {
+                let dx=b.0-a.0;let dy=b.1-a.1;let square=dx*dx+dy*dy;
+                let t=if square>0.0 {((vertex.x-a.0)*dx+(vertex.y-a.1)*dy)/square}else{0.0}.clamp(0.,1.);
+                ((vertex.x-a.0-t*dx).powi(2)+(vertex.y-a.1-t*dy).powi(2)).sqrt()
+            }).fold(f32::INFINITY,f32::min);
+            distance<=0.73 && vertex.color[3]<=0.51
         }));
+        assert!(
+            output.iter().any(|v| v.color[3] > 0.0 && v.color[3] < 1.0),
+            "native non-MSAA path needs fractional coverage"
+        );
         assert!(
             !output
                 .iter()

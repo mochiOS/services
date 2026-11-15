@@ -495,8 +495,7 @@ pub(crate) fn composite_and_present(
             let coverage_mask =
                 window_style.map(|(_, frame, _, radius)| RoundedCoverage::new(frame, radius));
             let border_mask = window_style.map(|(index, frame, _, radius)| {
-                let width = windows[index].scale_factor().ceil() as u32;
-                RoundedCoverage::new(inset_rect(frame, width), (radius - width as f32).max(0.0))
+                InsetCoverage::new(frame,radius,windows[index].scale_factor())
             });
             for dy in copy_top as usize..copy_bottom as usize {
                 let sy = (dy as i64).saturating_sub(surface.y as i64) as usize;
@@ -685,35 +684,19 @@ fn draw_shadow(
     shadow: WindowShadow,
     corner_radius: f32,
 ) {
-    let layer_count = shadow.blur_radius.max(2).min(u32::from(shadow.alpha));
-    let weight_sum = (1..=layer_count)
-        .map(|layer| {
-            layer_count
-                .saturating_mul(4)
-                .saturating_sub(layer.saturating_mul(3))
-        })
-        .sum::<u32>();
-    let mut remaining_alpha = u32::from(shadow.alpha);
-    for layer in (1..=layer_count).rev() {
-        let expansion = shadow.spread.saturating_add(
-            shadow
-                .blur_radius
-                .saturating_mul(layer)
-                .saturating_add(layer_count - 1)
-                / layer_count,
-        );
-        let weight = layer_count
-            .saturating_mul(4)
-            .saturating_sub(layer.saturating_mul(3));
-        let mut alpha = u32::from(shadow.alpha)
-            .saturating_mul(weight)
-            .saturating_add(weight_sum / 2)
-            / weight_sum;
-        alpha = alpha.min(remaining_alpha);
-        if layer == 1 {
-            alpha = remaining_alpha;
-        }
-        remaining_alpha = remaining_alpha.saturating_sub(alpha);
+    use mochios_viewkit_gpu_protocol::raster_quality::{
+        incremental_alpha, shadow_falloff, source_over,
+    };
+    let layer_count = shadow.blur_radius.clamp(2, 32);
+    let mut accumulated = 0u8;
+    for layer in (0..layer_count).rev() {
+        let progress = layer as f32 / layer_count as f32;
+        let expansion = shadow
+            .spread
+            .saturating_add((shadow.blur_radius as f32 * progress).round() as u32);
+        let target = (shadow.alpha as f32 * shadow_falloff(progress)).round() as u8;
+        let alpha = incremental_alpha(target, accumulated);
+        accumulated = source_over([0, 0, 0, accumulated], [0, 0, 0, alpha], 255)[3];
         if alpha == 0 {
             continue;
         }
@@ -916,6 +899,126 @@ impl RoundedCoverage {
             return corner[cy * self.side + cx];
         }
         rounded_rect_coverage(self.rect, self.radius, x, y)
+    }
+}
+
+// Inner stroke coverage uses the same normal-offset half-planes as GPU rings.
+// Fractional DPI must not round a 1.25px stroke up to an opaque 2px stroke.
+struct InsetCoverage {
+    rect: Rect,
+    width: f32,
+    side: usize,
+    corner: Option<std::sync::Arc<[u8]>>,
+    clip: std::sync::Arc<mochios_viewkit_gpu_protocol::coverage::Clip>,
+}
+thread_local! {
+    static INSET_MASKS:std::cell::RefCell<std::collections::VecDeque<([u32;2],std::sync::Arc<[u8]>,std::sync::Arc<mochios_viewkit_gpu_protocol::coverage::Clip>)>>=
+        const {std::cell::RefCell::new(std::collections::VecDeque::new())};
+}
+impl InsetCoverage {
+    fn new(rect: Rect, radius: f32, width: f32) -> Self {
+        use mochios_viewkit_gpu_protocol::{
+            continuous_corner::{RoundedRect, polygon_segments},
+            coverage::Clip,
+        };
+        let radius = radius
+            .max(0.0)
+            .min(rect.width.min(rect.height) as f32 * 0.5);
+        let side = (radius + width).ceil().max(1.) as usize;
+        let key = [radius.to_bits(), width.to_bits()];
+        let cached = INSET_MASKS.with(|cache| {
+            let mut cache = cache.borrow_mut();
+            let i = cache.iter().position(|(k, _, _)| *k == key)?;
+            let entry = cache.remove(i)?;
+            let result = (entry.1.clone(), entry.2.clone());
+            cache.push_back(entry);
+            Some(result)
+        });
+        if let Some((corner, clip)) = cached {
+            return Self {
+                rect,
+                width,
+                side,
+                corner: Some(corner),
+                clip,
+            };
+        }
+        let shape = RoundedRect::uniform([0., 0., side as f32 * 2., side as f32 * 2.], radius);
+        let mut polygon = Vec::new();
+        shape.for_each_point(polygon_segments(radius), |p| polygon.push(p));
+        let clip =
+            std::sync::Arc::new(Clip::new(&polygon).expect("bounded window corner geometry"));
+        let sample = |x: i32, y: i32| {
+            let mut count = 0u32;
+            for sy in [0.125, 0.375, 0.625, 0.875] {
+                for sx in [0.125, 0.375, 0.625, 0.875] {
+                    if clip.contains_interior([x as f32 + sx, y as f32 + sy], width) {
+                        count += 1;
+                    }
+                }
+            }
+            ((count * 255 + 8) / 16) as u8
+        };
+        let corner = (side <= MAX_CACHED_CORNER).then(|| {
+            INSET_MASKS.with(|cache| {
+                let mut cache = cache.borrow_mut();
+                let data: std::sync::Arc<[u8]> = (0..side * side)
+                    .map(|i| sample((i % side) as i32, (i / side) as i32))
+                    .collect::<Vec<_>>()
+                    .into();
+                if cache.len() == COVERAGE_CACHE_CAPACITY {
+                    cache.pop_front();
+                }
+                cache.push_back((key, data.clone(), clip.clone()));
+                data
+            })
+        });
+        Self {
+            rect,
+            width,
+            side,
+            corner,
+            clip,
+        }
+    }
+    fn at(&self, x: i32, y: i32) -> u8 {
+        let dx = i64::from(x) - i64::from(self.rect.x);
+        let dy = i64::from(y) - i64::from(self.rect.y);
+        let w = i64::from(self.rect.width);
+        let h = i64::from(self.rect.height);
+        if dx < 0
+            || dy < 0
+            || dx >= w
+            || dy >= h
+            || w as f32 <= self.width * 2.
+            || h as f32 <= self.width * 2.
+        {
+            return 0;
+        }
+        let cx = dx.min(w - 1 - dx) as usize;
+        let cy = dy.min(h - 1 - dy) as usize;
+        if cx < self.side && cy < self.side {
+            if let Some(mask) = &self.corner {
+                return mask[cy * self.side + cx];
+            }
+            let mut count = 0u32;
+            for sy in [0.125, 0.375, 0.625, 0.875] {
+                for sx in [0.125, 0.375, 0.625, 0.875] {
+                    if self
+                        .clip
+                        .contains_interior([cx as f32 + sx, cy as f32 + sy], self.width)
+                    {
+                        count += 1;
+                    }
+                }
+            }
+            return ((count * 255 + 8) / 16) as u8;
+        }
+        let axis = |d: i64, size: i64| {
+            ((d + 1) as f32 - self.width).clamp(0., 1.)
+                * ((size - d) as f32 - self.width).clamp(0., 1.)
+        };
+        (255. * axis(dx, w) * axis(dy, h)).round() as u8
     }
 }
 
@@ -1236,6 +1339,51 @@ mod coverage_cache_tests {
                 "window coverage cached={cached}: {:?}, checksum={checksum}",
                 start.elapsed()
             );
+        }
+    }
+}
+
+#[cfg(test)]
+mod fractional_border_tests {
+    use super::*;
+    #[test]
+    fn fractional_inner_edges_and_cached_corners_follow_physical_dpi() {
+        let frame = Rect {
+            x: 40,
+            y: 20,
+            width: 300,
+            height: 200,
+        };
+        for width in [0.75f32, 1., 1.25, 1.5, 2.] {
+            let a = InsetCoverage::new(frame, 26.5 * width, width);
+            let moved = InsetCoverage::new(
+                Rect {
+                    x: -30,
+                    y: 80,
+                    ..frame
+                },
+                26.5 * width,
+                width,
+            );
+            assert!(std::sync::Arc::ptr_eq(
+                a.corner.as_ref().unwrap(),
+                moved.corner.as_ref().unwrap()
+            ));
+            assert_eq!(
+                a.at(40, 120),
+                ((1. - width).clamp(0., 1.) * 255.).round() as u8
+            );
+            assert_eq!(
+                a.at(41, 120),
+                ((2. - width).clamp(0., 1.) * 255.).round() as u8
+            );
+            assert_eq!(a.at(190, 120), 255);
+            assert_eq!(a.at(40, 20), 0);
+            for y in 0..56 {
+                for x in 0..56 {
+                    assert_eq!(a.at(40 + x, 20 + y), moved.at(-30 + x, 80 + y));
+                }
+            }
         }
     }
 }

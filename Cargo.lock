@@ -4883,6 +4883,10 @@ dependencies = [
 ]
 
 [[patch.unused]]
+name = "mnu"
+version = "0.1.0"
+
+[[patch.unused]]
 name = "mochi-user-newlib-runtime"
 version = "0.1.0"
 
@@ -4900,8 +4904,4 @@ version = "0.1.0"
 
 [[patch.unused]]
 name = "mochios-tls-stream-ffi"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "mnu"
 version = "0.1.0"
