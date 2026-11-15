@@ -151,7 +151,7 @@ fn both_native_entries_use_one_upcall_state_and_only_full_restore_uses_iret() {
     let contexts = include_str!("../../../core/src/arch/x86_64/exception.rs");
     assert!(contexts.contains("rcx: self.rcx"));
     assert!(contexts.contains("r11: self.r11"));
-    let entry = include_str!("../../../core/src/syscall/mod.rs");
+    let entry = include_str!("../../../core/src/arch/x86_64/syscall.rs");
     assert!(entry.contains("upcall::prepare_interrupt_return(frame)"));
     assert!(entry.contains("\"cld\",\n        \"call {int80_handler}\""));
 }
