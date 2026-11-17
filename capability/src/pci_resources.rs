@@ -38,7 +38,8 @@ fn write(address: u32, offset: u16, value: u32) -> Result<(), SysError> {
     )?;
     platform::syscall::call3(SyscallNumber::PortOut, 0xcfc, u64::from(value), 4).map(|_| ())
 }
-fn owned_by_mboot() -> bool {
+#[cfg(target_arch = "x86_64")]
+fn legacy_config_available() -> bool {
     // mBoot's hardware domain owns physical configuration. Never probe it
     // from the System domain, whose devices use the mediated transport.
     let leaf = unsafe { core::arch::x86_64::__cpuid(0x4000_0000) };
@@ -46,7 +47,13 @@ fn owned_by_mboot() -> bool {
     vendor[..4].copy_from_slice(&leaf.ebx.to_le_bytes());
     vendor[4..8].copy_from_slice(&leaf.ecx.to_le_bytes());
     vendor[8..].copy_from_slice(&leaf.edx.to_le_bytes());
-    vendor == *b"MochiOSmBoot"
+    vendor != *b"MochiOSmBoot"
+}
+#[cfg(not(target_arch = "x86_64"))]
+fn legacy_config_available() -> bool {
+    // The legacy CF8/CFC configuration mechanism is x86-specific. Native
+    // Hardware Domain resources must be mediated by their actual owner.
+    false
 }
 fn class(address: u32, id: u32) -> Result<Option<&'static str>, SysError> {
     let class = read(address, 8)? >> 8;
@@ -148,7 +155,7 @@ fn probe(address: u32, capability: &'static str) -> Result<Device, SysError> {
 }
 pub(crate) fn initialize() -> Result<(), SysError> {
     let mut devices = Vec::new();
-    if !owned_by_mboot() {
+    if legacy_config_available() {
         for bus in 0..256u32 {
             for slot in 0..32u32 {
                 let first = (bus << 16) | (slot << 11);
