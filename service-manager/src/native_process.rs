@@ -20,9 +20,21 @@ impl NativeProcess {
         setup: impl FnOnce(platform::handle::Handle) -> Result<(), platform::syscall::SysError>,
         rollback: impl FnOnce(Self),
     ) -> Result<Self, platform::syscall::SysError> {
+        Self::create_from(
+            || platform::process::create_stopped(image, metadata),
+            setup,
+            rollback,
+        )
+    }
+
+    pub(crate) fn create_from(
+        create: impl FnOnce() -> Result<platform::handle::Handle, platform::syscall::SysError>,
+        setup: impl FnOnce(platform::handle::Handle) -> Result<(), platform::syscall::SysError>,
+        rollback: impl FnOnce(Self),
+    ) -> Result<Self, platform::syscall::SysError> {
         let (handle, process_id) = mochios_posix_client::process_creation::create_with_rollback(
             || {
-                platform::process::create_stopped(image, metadata).inspect_err(|error| {
+                create().inspect_err(|error| {
                     statusln!(
                         "service-manager.service: native launch create failed status={}",
                         error.raw()

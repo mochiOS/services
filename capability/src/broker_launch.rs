@@ -24,14 +24,22 @@ fn require_capabilities(sender: u64) -> Result<(), SysError> {
     Ok(())
 }
 
-pub(crate) fn resolve(
+pub(crate) struct Plan {
+    pub(crate) verified: crate::resolver::VerifiedManifest,
+    pub(crate) caps: Vec<String>,
+    pub(crate) class: p::service::ExecutionClass,
+    peer: crate::consent_peer::Peer,
+    role: Role,
+}
+
+pub(crate) fn select(
     index: &PackageIndex,
     trusted: &TrustedImages,
     sender: u64,
     class: u64,
     path: &str,
     read: FileReader,
-) -> Result<(Vec<String>, Vec<String>), SysError> {
+) -> Result<Plan, SysError> {
     require_capabilities(sender)?;
     let peer = consent_peer::capture(sender)?;
     let role = trusted.role(&peer)?.ok_or_else(denied)?;
@@ -62,21 +70,43 @@ pub(crate) fn resolve(
         return Err(denied());
     }
     let caps = verified.decide_capabilities(path)?.into_allowed()?;
-    let identity = &verified.identity;
+    Ok(Plan {
+        verified,
+        caps,
+        class,
+        peer,
+        role,
+    })
+}
+
+impl Plan {
+    pub(crate) fn recheck(&self, trusted: &TrustedImages, sender: u64) -> Result<(), SysError> {
+        let current = consent_peer::capture(sender)?;
+        if current.instance != self.peer.instance
+            || current.context != self.peer.context
+            || !p::handle::same_object(current.process.0, self.peer.process.0)?
+            || trusted.role(&current)? != Some(self.role)
+        {
+            return Err(denied());
+        }
+        require_capabilities(sender)
+    }
+}
+
+pub(crate) fn resolve(
+    index: &PackageIndex,
+    trusted: &TrustedImages,
+    sender: u64,
+    class: u64,
+    path: &str,
+    read: FileReader,
+) -> Result<(Vec<String>, Vec<String>), SysError> {
+    let plan = select(index, trusted, sender, class, path, read)?;
+    let identity = &plan.verified.identity;
     let mut fields = Vec::new();
     resolver::encode_identity_args(identity, &mut fields);
-    let image = verified.read_image(path, read)?;
-    // Retain the Process reference while I/O runs, then reject an image or
-    // authority change before publishing a one-shot permit for this sender.
-    let current = consent_peer::capture(sender)?;
-    if current.instance != peer.instance
-        || current.context != peer.context
-        || !p::handle::same_object(current.process.0, peer.process.0)?
-        || trusted.role(&current)? != Some(role)
-    {
-        return Err(denied());
-    }
-    require_capabilities(sender)?;
-    resolver::authorize_spawn_image(sender, path, identity, &caps, class, &image)?;
-    Ok((fields, caps))
+    let image = plan.verified.read_image(path, read)?;
+    plan.recheck(trusted, sender)?;
+    resolver::authorize_spawn_image(sender, path, identity, &plan.caps, plan.class, &image)?;
+    Ok((fields, plan.caps))
 }

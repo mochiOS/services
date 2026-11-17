@@ -4,13 +4,12 @@ use mochi_user_platform as platform;
 #[path = "../../posix/tests/support/native_unix_extension_launcher.rs"]
 pub(super) mod native_unix_extension_launcher;
 
-use crate::launch_arguments::encode_native_launch;
 use crate::native_process::NativeProcess;
 use crate::service_config::{
     DRIVERS, FixedService, ReadyTarget, ServiceSpec, driver_arguments, fixed_service_arguments,
     fixed_service_spec, mboot_agent_arguments,
 };
-use crate::spawn_support::{prepare_execution_image, resolve_execution_security, sys_error};
+use crate::spawn_support::{create_native_process, sys_error};
 
 use crate::launch_rollback::retain_failed_launch;
 pub(crate) use crate::launch_rollback::{has_failed_launch_cleanup, retry_failed_launch_cleanup};
@@ -34,19 +33,13 @@ fn spawn(
     spec: ServiceSpec,
     arguments: &[alloc::string::String],
 ) -> Result<u64, mochi_user_syscall::SysError> {
-    let mut random = [0; 16];
-    platform::random::fill(&mut random)?;
     let label = spec
         .path
         .rsplit('/')
         .next()
         .ok_or_else(|| sys_error(mochi_user_syscall::EINVAL))?;
-    let metadata = encode_native_launch(spec.path, label, arguments, random)
-        .map_err(|_| sys_error(mochi_user_syscall::EINVAL))?;
-    let image = prepare_execution_image(spec.path, spec.execution_class)?;
-    let process = NativeProcess::create_with_rollback(
-        image.handle(),
-        &metadata,
+    let process = NativeProcess::create_from(
+        || create_native_process(spec.path, label, spec.execution_class, arguments),
         |_| Ok(()),
         reap_namespace_launch,
     )?;
@@ -240,12 +233,8 @@ fn spawn_native(
         return Err(sys_error(mochi_user_syscall::EAGAIN));
     }
     use mochios_posix_client::{
-        Client, ClientError, ObjectHandleAttachment, OpenAtBase, SyscallEndpointTransport,
+        Client, ClientError, ObjectHandleAttachment, SyscallEndpointTransport,
     };
-    let mut random = [0; 16];
-    platform::random::fill(&mut random)?;
-    let metadata = encode_native_launch(spec.path, label, arguments, random)
-        .map_err(|_| sys_error(mochi_user_syscall::EINVAL))?;
     let client = Client::new(SyscallEndpointTransport::new(posix_endpoint));
     let client_error = |error| match error {
         ClientError::Transport(error) => error,
@@ -260,51 +249,27 @@ fn spawn_native(
             statusln!("service-manager.service: {label} session registration failed: {error:?}");
         })
         .map_err(client_error)?;
-    let image = client
-        .open_at(
-            OpenAtBase::ProcessRoot,
-            mochios_posix_protocol::OPEN_READ,
-            0,
-            spec.path,
-        )
-        .inspect_err(|error| {
-            statusln!("service-manager.service: {label} image open failed: {error:?}");
-        })
-        .map_err(client_error)?;
-    // The source reference comes only from this IPC attachment, not a PID/FD
-    // capture API. Always release it, including authorization/create failure.
-    let result = (|| {
-        resolve_execution_security(spec.path, spec.execution_class).inspect_err(|error| {
-            statusln!(
-                "service-manager.service: {label} execution authorization failed status={}",
-                error.raw()
-            );
-        })?;
-        // Fixed system services run as POSIX root by userspace policy. Register
-        // their environment and parent before execution; never derive it from
-        // the new native task's default kernel credentials. Native capability
-        // authorization above remains independent of these POSIX IDs.
-        NativeProcess::create_with_rollback(
-            image.handle,
-            &metadata,
-            |handle| {
-                client
-                    .register_spawned_child(
-                        ObjectHandleAttachment {
-                            handle,
-                            rights: mnu_abi::HANDLE_RIGHT_WAIT | mnu_abi::HANDLE_RIGHT_SIGNAL,
-                        },
-                        0,
-                        0,
-                        &[],
-                    )
-                    .map_err(client_error)
-            },
-            |process| retain_failed_launch(process, posix_endpoint),
-        )
-    })();
-    let _ = platform::handle::close(image.handle);
-    result
+    // Fixed system services run as POSIX root by userspace policy. Register
+    // their environment and parent before execution; never derive it from
+    // the new native task's default kernel credentials. Native capability
+    // authorization above remains independent of these POSIX IDs.
+    NativeProcess::create_from(
+        || create_native_process(spec.path, label, spec.execution_class, arguments),
+        |handle| {
+            client
+                .register_spawned_child(
+                    ObjectHandleAttachment {
+                        handle,
+                        rights: mnu_abi::HANDLE_RIGHT_WAIT | mnu_abi::HANDLE_RIGHT_SIGNAL,
+                    },
+                    0,
+                    0,
+                    &[],
+                )
+                .map_err(client_error)
+        },
+        |process| retain_failed_launch(process, posix_endpoint),
+    )
 }
 
 pub(crate) fn spawn_mboot_agent(
@@ -347,10 +312,8 @@ pub(crate) fn spawn_user_session(
             mochios_posix_protocol::process_domain::TOKEN_RIGHTS,
         ));
     }
-    let path = core::str::from_utf8(
-        mochios_posix_client::configuration::DEFAULT_EXECUTABLE_PATH,
-    )
-    .map_err(|_| sys_error(mochi_user_syscall::EINVAL))?;
+    let path = core::str::from_utf8(mochios_posix_client::configuration::DEFAULT_EXECUTABLE_PATH)
+        .map_err(|_| sys_error(mochi_user_syscall::EINVAL))?;
     arguments.push(alloc::format!("{ENVIRONMENT_PREFIX}PATH={path}"));
     if let Some(user) = session_user(identity.uid) {
         arguments.push(alloc::format!("{SESSION_USER_ARG_PREFIX}{}", user.name));
@@ -369,7 +332,13 @@ pub(crate) fn spawn_user_session(
     let endpoint = posix_endpoint
         .filter(|endpoint| *endpoint != 0)
         .ok_or_else(|| sys_error(mochi_user_syscall::EINVAL))?;
-    spawn_native_session(fixed_service_spec(service), &arguments, identity, endpoint, domain)
+    spawn_native_session(
+        fixed_service_spec(service),
+        &arguments,
+        identity,
+        endpoint,
+        domain,
+    )
 }
 
 fn spawn_native_session(
@@ -383,7 +352,7 @@ fn spawn_native_session(
         return Err(sys_error(mochi_user_syscall::EAGAIN));
     }
     use mochios_posix_client::{
-        Client, ClientError, ObjectHandleAttachment, OpenAtBase, SyscallEndpointTransport,
+        Client, ClientError, ObjectHandleAttachment, SyscallEndpointTransport,
     };
     let client = Client::new(SyscallEndpointTransport::new(endpoint));
     let convert = |error| match error {
@@ -392,48 +361,30 @@ fn spawn_native_session(
         _ => sys_error(mochi_user_syscall::EIO),
     };
     client.register_session().map_err(convert)?;
-    let mut random = [0; 16];
-    platform::random::fill(&mut random)?;
     let label = spec
         .path
         .rsplit('/')
         .find(|part| part.ends_with(".app"))
         .or_else(|| spec.path.rsplit('/').next())
         .unwrap_or("session");
-    let metadata = encode_native_launch(spec.path, label, arguments, random)
-        .map_err(|_| sys_error(mochi_user_syscall::EINVAL))?;
-    let image = client
-        .open_at(
-            OpenAtBase::ProcessRoot,
-            mochios_posix_protocol::OPEN_READ,
-            0,
-            spec.path,
-        )
-        .map_err(convert)?;
-    let result = (|| {
-        resolve_execution_security(spec.path, spec.execution_class)?;
-        NativeProcess::create_with_rollback(
-            image.handle,
-            &metadata,
-            |handle| {
-                client
-                    .register_spawned_child_in_domain(
-                        domain,
-                        ObjectHandleAttachment {
-                            handle,
-                            rights: mnu_abi::HANDLE_RIGHT_WAIT | mnu_abi::HANDLE_RIGHT_SIGNAL,
-                        },
-                        identity.uid,
-                        identity.gid,
-                        &[],
-                    )
-                    .map_err(convert)
-            },
-            |process| retain_failed_launch(process, endpoint),
-        )
-    })();
-    let _ = platform::handle::close(image.handle);
-    result
+    NativeProcess::create_from(
+        || create_native_process(spec.path, label, spec.execution_class, arguments),
+        |handle| {
+            client
+                .register_spawned_child_in_domain(
+                    domain,
+                    ObjectHandleAttachment {
+                        handle,
+                        rights: mnu_abi::HANDLE_RIGHT_WAIT | mnu_abi::HANDLE_RIGHT_SIGNAL,
+                    },
+                    identity.uid,
+                    identity.gid,
+                    &[],
+                )
+                .map_err(convert)
+        },
+        |process| retain_failed_launch(process, endpoint),
+    )
 }
 
 fn append_posix_handle(arguments: &mut Vec<String>, endpoint: Option<platform::handle::Handle>) {

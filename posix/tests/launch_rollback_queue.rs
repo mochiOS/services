@@ -1,3 +1,4 @@
+macro_rules! statusln { ($($arg:tt)*) => { eprintln!($($arg)*) }; }
 extern crate alloc;
 extern crate self as mochi_user_platform;
 extern crate self as mochi_user_syscall;

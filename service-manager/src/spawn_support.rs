@@ -7,20 +7,18 @@ const CAPABILITY_SERVICE_NAME: &str = "capability.service";
 const PACKAGE_SERVICE_NAME: &str = "package.service";
 const SIGNATURE_SERVICE_NAME: &str = "signature.service";
 
-pub(crate) fn prepare_execution_image(
+pub(crate) fn create_native_process(
     path: &str,
+    label: &str,
     class: platform::service::ExecutionClass,
-) -> Result<platform::capability::PreparedExecutionImage, mochi_user_syscall::SysError> {
+    arguments: &[String],
+) -> Result<u32, mochi_user_syscall::SysError> {
     let endpoint = platform::process::find_by_name(CAPABILITY_SERVICE_NAME)?;
     if endpoint == 0 {
         return Err(sys_error(mochi_user_syscall::ENOENT));
     }
-    let endpoint = u32::try_from(endpoint).map_err(|_| {
-        mochi_user_syscall::SysError::from_raw(
-            mochi_user_syscall::NativeError::LimitExceeded.into_raw() as i64,
-        )
-    })?;
-    platform::capability::prepare_execution_image(endpoint, path, class)
+    let endpoint = u32::try_from(endpoint).map_err(|_| sys_error(mochi_user_syscall::EINVAL))?;
+    mochios_posix_client::native_launch::create_stopped(endpoint, path, label, class, arguments)
 }
 
 pub(crate) fn errno(error: mochi_user_syscall::SysError) -> u64 {

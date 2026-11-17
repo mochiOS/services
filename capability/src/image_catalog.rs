@@ -204,7 +204,7 @@ impl Catalog {
         root_path: &str,
     ) -> Result<Self, syscall::SysError> {
         let binary = verified.manifest.binary(root_path).ok_or_else(denied)?;
-        if binary.kind.as_deref() != Some("service") {
+        if !matches!(binary.kind.as_deref(), Some("service" | "driver" | "application")) {
             return Err(denied());
         }
         let root = image(&verified.manifest, binary)?;

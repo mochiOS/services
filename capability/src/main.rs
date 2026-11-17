@@ -16,6 +16,7 @@ mod image_catalog;
 mod resource_tokens;
 mod executable_tokens;
 mod native_bootstrap;
+mod native_launch;
 mod prepared_image;
 mod broker_launch;
 mod object_image;

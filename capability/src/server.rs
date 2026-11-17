@@ -1195,6 +1195,25 @@ pub(crate) fn serve_capability_requests(mut state: CapabilityServiceState) -> ! 
             }
             continue;
         }
+        if opcode == platform::capability::native_launch::OPCODE {
+            let result = crate::native_launch::create(&state, sender, slice, &attached, authorization_reader);
+            close_received_handles(&attached);
+            match result {
+                Ok(process) => {
+                    let mut objects = platform::ipc::IpcObjectHandles::default();
+                    objects.count = 1;
+                    objects.handles[0] = platform::ipc::IpcObjectHandle {
+                        handle: process, reserved: 0,
+                        rights: platform::handle::HANDLE_RIGHT_WAIT | platform::handle::HANDLE_RIGHT_SIGNAL | platform::handle::HANDLE_RIGHT_DUPLICATE | platform::handle::HANDLE_RIGHT_TRANSFER,
+                    };
+                    if platform::ipc::reply_object_handles(sender, &0u64.to_le_bytes(), &objects).is_err() {
+                        crate::native_bootstrap::discard_stopped(process);
+                    } else { let _ = platform::handle::close(process); }
+                }
+                Err(error) => capability_reply(sender, error_status(error)),
+            }
+            continue;
+        }
         if attached.count != 0 || !attached.is_user_delivery() {
             close_received_handles(&attached);
             capability_reply(sender, mochi_user_syscall::EINVAL);

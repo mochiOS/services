@@ -1,9 +1,7 @@
-use crate::spawn_support::{resolve_execution_security, sys_error};
+use crate::spawn_support::{resolve_capabilities, sys_error};
 use alloc::{string::ToString, vec::Vec};
 use mochi_user_platform as platform;
-use mochios_posix_client::{
-    Client, ClientError, ObjectHandleAttachment, OpenAtBase, SyscallEndpointTransport,
-};
+use mochios_posix_client::{Client, ClientError, ObjectHandleAttachment, SyscallEndpointTransport};
 
 pub(crate) struct DriverProcess {
     handle: platform::handle::Handle,
@@ -70,8 +68,6 @@ pub(crate) fn spawn(
         mochios_posix_client::launch_arguments::INHERITED_HANDLE_PREFIX,
         mochios_posix_protocol::CONTROL_HANDLE_KEY
     ));
-    let mut random = [0; 16];
-    platform::random::fill(&mut random)?;
     let label = entry_path
         .rsplit('/')
         .find(|part| part.ends_with(".driver"))
@@ -79,24 +75,14 @@ pub(crate) fn spawn(
         .ok_or_else(|| sys_error(mochi_user_syscall::EINVAL))?;
     let client = Client::new(SyscallEndpointTransport::new(posix_endpoint));
     client.register_session().map_err(client_error)?;
-    let image = client
-        .open_at(
-            OpenAtBase::ProcessRoot,
-            mochios_posix_protocol::OPEN_READ,
-            0,
-            entry_path,
-        )
-        .map_err(client_error)?;
     let result = (|| {
         // Keep the driver's unprivileged execution class. Authorization binds
         // the actual image digest; legacy identity strings never become argv.
-        let capabilities = resolve_execution_security(
-            entry_path,
-            platform::service::ExecutionClass::Unprivileged,
-        )?;
-        if capabilities.split(|byte| *byte == 0).any(|name| {
-            matches!(name, b"device.input" | b"input.keyboard" | b"input.pointer")
-        }) {
+        let capabilities = resolve_capabilities(entry_path)?;
+        if capabilities
+            .split(|byte| *byte == 0)
+            .any(|name| matches!(name, b"device.input" | b"input.keyboard" | b"input.pointer"))
+        {
             // Input authority follows the verified launch capabilities, never
             // an argv flag or a driver basename. Children cannot redelegate it.
             arguments.push(alloc::format!(
@@ -106,12 +92,22 @@ pub(crate) fn spawn(
                 mnu_abi::HANDLE_RIGHT_SEND,
             ));
         }
-        let metadata = mochios_posix_client::launch_arguments::encode_native_launch(
-            entry_path, label, &arguments, random,
-        )
-        .map_err(|_| sys_error(mochi_user_syscall::EINVAL))?;
+        let endpoint = platform::process::find_by_name("capability.service")?;
+        let endpoint =
+            u32::try_from(endpoint).map_err(|_| sys_error(mochi_user_syscall::EINVAL))?;
+        if endpoint == 0 {
+            return Err(sys_error(mochi_user_syscall::ENOENT));
+        }
         let (handle, process_id) = mochios_posix_client::process_creation::create_with_rollback(
-            || platform::process::create_stopped(image.handle, &metadata),
+            || {
+                mochios_posix_client::native_launch::create_stopped(
+                    endpoint,
+                    entry_path,
+                    label,
+                    platform::service::ExecutionClass::Unprivileged,
+                    &arguments,
+                )
+            },
             |handle| {
                 client
                     .register_spawned_child(
@@ -136,6 +132,5 @@ pub(crate) fn spawn(
         statusln!("drivers.service: native driver created path={entry_path} pid={process_id}");
         Ok(DriverProcess { handle })
     })();
-    let _ = platform::handle::close(image.handle);
     result
 }

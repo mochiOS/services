@@ -1,3 +1,4 @@
+macro_rules! statusln { ($($arg:tt)*) => { eprintln!($($arg)*) }; }
 extern crate self as mochi_user_platform;
 
 use std::sync::Mutex;
@@ -160,11 +161,11 @@ fn fixed_services_register_userspace_posix_state_before_resume_with_rollback() {
         .split("pub(crate) fn spawn_mboot_agent(")
         .next()
         .unwrap();
-    let authorize = native
-        .find("resolve_execution_security(spec.path, spec.execution_class)")
-        .unwrap();
-    assert!(authorize < native.find("NativeProcess::create_with_rollback").unwrap());
-    assert!(native.contains("NativeProcess::create_with_rollback"));
+    assert!(native.contains("NativeProcess::create_from"));
+    assert!(native.contains("create_native_process(spec.path, label, spec.execution_class, arguments)"));
+    let broker = include_str!("../../capability/src/native_launch.rs");
+    assert!(broker.contains("plan.recheck(&state.trusted_images, sender)?"));
+    assert!(broker.contains("crate::resolver::authorize_spawn_image("));
     assert!(!native.contains("create_and_resume"));
     assert!(!native.contains("thread_security_context"));
     let compact: String = native
@@ -186,7 +187,7 @@ fn fixed_services_register_userspace_posix_state_before_resume_with_rollback() {
         include_str!("../../service-manager/src/bootstrap.rs")
             .contains("service_launcher::retry_failed_launch_cleanup();")
     );
-    assert!(native.contains("close(image.handle)"));
+    assert!(!native.contains("client.open_at("));
 }
 
 #[test]
