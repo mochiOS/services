@@ -1,5 +1,5 @@
-//! Initial trusted launch before a POSIX endpoint exists. Package and image
-//! authorization remain with the caller; mnu receives only objects/metadata.
+//! Shared measured native launch, also available before POSIX starts. Package
+//! authorization remains with the caller; mnu receives only objects/metadata.
 
 use mochi_user_platform as platform;
 use mochios_posix_client::image_preparation::{Environment, Preparation};
@@ -72,11 +72,26 @@ pub(crate) fn create_stopped(
         .map_err(crate::app_image::status)?;
     let mut random = [0; 16];
     platform::random::fill(&mut random)?;
+    // Reuse exactly the application broker's measured bundle authority. Keep
+    // its owner alive until native creation has captured every delegated ref.
+    let resources = crate::resource_tokens::issue(catalog, prepared.bytes)?;
+    let mut startup_arguments = arguments.to_vec();
+    if let Some(resources) = &resources {
+        for grant in resources.handles() {
+            startup_arguments.push(alloc::format!(
+                "{}{}:{}:{}",
+                mochios_posix_client::launch_arguments::INHERITED_HANDLE_PREFIX,
+                grant.key,
+                grant.source,
+                grant.rights
+            ));
+        }
+    }
     let mut metadata_owner = mochios_posix_client::startup_metadata::Owner::default();
     let metadata = mochios_posix_client::launch_arguments::encode_native_launch_with_metadata(
         path,
         label,
-        arguments,
+        &startup_arguments,
         random,
         mochios_posix_client::process_image::Process {
             image: prepared.executable,

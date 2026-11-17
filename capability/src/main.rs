@@ -90,6 +90,13 @@ fn main() {
         platform::logln!("capability.service: PCI resource initialization failed raw={}", error.raw());
         platform::process::exit(1);
     }
+    let endpoint = server::initialize_endpoint().unwrap_or_else(|error| {
+        platform::logln!(
+            "capability.service: endpoint/resource initialization failed raw={}",
+            error.raw()
+        );
+        platform::process::exit(1)
+    });
     start_required_services(&state.package_index, &state.trusted_images);
-    serve_capability_requests(state);
+    serve_capability_requests(state, endpoint);
 }

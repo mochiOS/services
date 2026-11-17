@@ -199,26 +199,19 @@ fn parse_persistent_query(
         .map_err(|_| mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EINVAL as i64))
 }
 
-pub(crate) fn serve_capability_requests(mut state: CapabilityServiceState) -> ! {
-    // Service startup needs authorization before the POSIX endpoint exists.
-    // The authenticated handoff below switches this phase permanently; a
-    // runtime read failure must never retry through the bootstrap path.
+/// Initialize the common native endpoint before any stopped child can receive
+/// startup-scoped resource references. Serving begins after bootstrap launches.
+pub(crate) fn initialize_endpoint() -> Result<u32, mochi_user_syscall::SysError> {
+    platform::ipc::create()?;
+    let endpoint = platform::ipc::create_handle()?;
+    crate::resource_tokens::initialize(endpoint)?;
+    crate::executable_tokens::initialize(endpoint)?;
+    Ok(endpoint)
+}
+
+pub(crate) fn serve_capability_requests(mut state: CapabilityServiceState, receive_object: u32) -> ! {
+    // An authenticated handoff permanently replaces this bootstrap reader.
     let mut authorization_reader: crate::resolver::FileReader = crate::bootstrap_file::read_file;
-    let receive_object = match platform::ipc::create().and_then(|_| platform::ipc::create_handle())
-    {
-        Ok(endpoint) => endpoint,
-        Err(err) => {
-            platform::logln!(
-                "capability.service: endpoint create failed errno={}",
-                err.errno().unwrap_or(0)
-            );
-            platform::process::exit(1);
-        }
-    };
-    if let Err(error) = crate::resource_tokens::initialize(receive_object).and_then(|()| crate::executable_tokens::initialize(receive_object)) {
-        platform::logln!("capability.service: resource registry failed raw={}", error.raw());
-        platform::process::exit(1);
-    }
     let mut execution_requests = match crate::execution_requests::Registry::new() {
         Ok(registry) => registry,
         Err(error) => {
