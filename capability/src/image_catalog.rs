@@ -196,6 +196,28 @@ fn matches_dependency(
 }
 
 impl Catalog {
+    /// Before POSIX is available, native services may capture only the exact
+    /// authenticated root and package-local declarations. No ambient library
+    /// search or unauthenticated dependency can enter this bootstrap path.
+    pub(crate) fn bootstrap_service(
+        verified: VerifiedManifest,
+        root_path: &str,
+    ) -> Result<Self, syscall::SysError> {
+        let binary = verified.manifest.binary(root_path).ok_or_else(denied)?;
+        if binary.kind.as_deref() != Some("service") {
+            return Err(denied());
+        }
+        let root = image(&verified.manifest, binary)?;
+        Self::collect(
+            root,
+            verified.identity,
+            verified.manifest,
+            verified.manifest_digest,
+            true,
+            |_| Err(denied()),
+        )
+    }
+
     /// The signed standalone root is bound directly to its captured bytes.
     /// Libraries still require explicit dependency edges and authenticated
     /// installed manifests; no library-search path gains implicit trust.

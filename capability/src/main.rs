@@ -63,8 +63,8 @@ fn main() {
     platform::logln!("capability.service: start");
     if let Err(error) = bootstrap_file::initialize() {
         platform::logln!(
-            "capability.service: bootstrap Handle rejected errno={}",
-            error.errno().unwrap_or(0)
+            "capability.service: bootstrap Handle rejected raw={}",
+            error.raw()
         );
         platform::process::exit(1);
     }
@@ -74,13 +74,13 @@ fn main() {
             let _ = platform::write_fmt(
                 platform::io::STDERR,
                 format_args!(
-                    "capability.service: initial package index failed errno={}\n",
-                    error.errno().unwrap_or(0)
+                    "capability.service: initial package index failed raw={}\n",
+                    error.raw()
                 ),
             );
             platform::logln!(
-                "capability.service: initial package index failed errno={}",
-                error.errno().unwrap_or(0)
+                "capability.service: initial package index failed raw={}",
+                error.raw()
             );
             platform::process::exit(1);
         }
@@ -89,6 +89,6 @@ fn main() {
         platform::logln!("capability.service: PCI resource initialization failed raw={}", error.raw());
         platform::process::exit(1);
     }
-    start_required_services(&state.package_index);
+    start_required_services(&state.package_index, &state.trusted_images);
     serve_capability_requests(state);
 }

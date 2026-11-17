@@ -38,6 +38,13 @@ mod resolver;
 #[allow(dead_code)]
 #[path = "../../capability/src/trusted_images.rs"]
 mod trusted_images;
+// This authentication fixture has no physical devices assigned. PCI probing
+// and scoped device grants are covered by the separate resource fixtures.
+mod pci_resources {
+    pub fn grants(capabilities: &[String]) -> Result<Vec<String>, crate::SysError> {
+        Ok(capabilities.to_vec())
+    }
+}
 #[allow(dead_code)]
 mod bootstrap_service {
     include!("../../capability/src/service_bootstrap.rs");
@@ -45,7 +52,9 @@ mod bootstrap_service {
         index: &crate::package_index::PackageIndex,
         package: &str,
     ) -> Result<u64, crate::SysError> {
-        spawn_service_by_package(index, package)
+        let trusted = crate::trusted_images::TrustedImages::bootstrap(index, crate::read)?;
+        crate::STATE.with_borrow_mut(|state| state.reads.clear());
+        spawn_service_by_package(index, package, &trusted)
     }
 }
 mod bootstrap_file {
@@ -115,9 +124,12 @@ mod native_bootstrap {
     pub fn spawn(
         path: &str,
         _: &[String],
+        catalog: &crate::image_catalog::Catalog,
+        _: &crate::trusted_images::TrustedImages,
         authorize: impl FnOnce(&[u8]) -> Result<(), SysError>,
     ) -> Result<u64, SysError> {
         let bytes = read(path)?;
+        catalog.validate(mochios_posix_client::image_preparation::Source::Root, &bytes)?;
         STATE.with_borrow_mut(|s| s.service_image = bytes.clone());
         authorize(&bytes)?;
         native_event("create service")?;

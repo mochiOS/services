@@ -155,6 +155,42 @@ fn loaded_object_inspection_metadata_survives_inline_and_readonly_overflow_trans
         drop(owner);
     }
 }
+
+#[test]
+fn native_launch_overflow_keeps_metadata_readonly_and_preserves_explicit_grants() {
+    use mnu_abi::process_create::{self, HandleGrant, InitialState, Value};
+    use mochios_posix_client::launch_arguments::{
+        encode_native_launch_with_metadata, INHERITED_HANDLE_PREFIX, INHERITED_VALUE_PREFIX,
+    };
+    reset(0);
+    let payload = vec![7; 10000];
+    let rights = mnu_abi::HANDLE_RIGHT_SEND | mnu_abi::HANDLE_RIGHT_TRANSFER;
+    let items = [
+        "argument".into(),
+        format!("{INHERITED_HANDLE_PREFIX}7:19:{rights}"),
+        format!("{INHERITED_VALUE_PREFIX}8:99"),
+    ];
+    let mut owner = Owner::<Fake>::default();
+    let encoded = encode_native_launch_with_metadata(
+        "/image", "example.service", &items, [0; 16],
+        Process { loaded_objects: &payload, ..Default::default() },
+        &mut owner, &Fake,
+    ).unwrap();
+    let request = process_create::decode(&encoded).unwrap();
+    assert_eq!(request.handles().collect::<Vec<_>>(), [HandleGrant {
+        key: 7, source: 19, target: 0, rights,
+    }]);
+    assert_eq!(request.values().collect::<Vec<_>>(), [Value { key: 8, value: 99 }]);
+    let InitialState::Image(startup) = request.startup else { panic!("expected image") };
+    assert!(startup.stack().len() <= mnu_abi::process_image::MAX_STACK_BYTES);
+    let mapping = owner.mapping().unwrap();
+    assert_eq!(startup.mappings().collect::<Vec<_>>(), [mapping]);
+    assert_eq!(mapping.access, mnu_abi::MEMORY_ACCESS_READ);
+    assert_eq!(mapping.backing_handle, 51);
+    STATE.with_borrow(|s| assert_eq!(&s.bytes[..payload.len()], &payload));
+    drop(owner);
+    STATE.with_borrow(|s| assert_eq!(s.closed, [50, 51]));
+}
 #[test]
 fn large_payloads_share_one_readonly_mapping_and_preserve_small_entry_vectors() {
     reset(0);

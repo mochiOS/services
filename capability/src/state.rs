@@ -20,11 +20,17 @@ impl CapabilityServiceState {
                 mochios_posix_protocol::STATUS_EEXIST as i64,
             ));
         }
+        mochi_user_platform::logln!(
+            "capability.service: bootstrap index loaded packages={}",
+            package_index.by_package.len()
+        );
         let app_prompt_policy = load_app_prompt_policy(&package_index)?;
+        mochi_user_platform::logln!("capability.service: bootstrap prompt policy verified");
         let trusted_images = crate::trusted_images::TrustedImages::bootstrap(
             &package_index,
             crate::bootstrap_file::read_file,
         )?;
+        mochi_user_platform::logln!("capability.service: trusted boot images verified");
         Ok(Self {
             package_index,
             app_prompt_policy,

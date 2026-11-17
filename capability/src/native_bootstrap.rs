@@ -2,14 +2,35 @@
 //! authorization remain with the caller; mnu receives only objects/metadata.
 
 use mochi_user_platform as platform;
-use platform::syscall::{EINVAL, EIO, SysError};
+use mochios_posix_client::image_preparation::{Environment, Preparation};
+use platform::syscall::{EINVAL, SysError};
+
+fn failed(path: &str, stage: &str, error: impl core::fmt::Debug) {
+    let _ = platform::logger::write_status_fmt(format_args!(
+        "capability.service: native bootstrap {stage} failed path={path} error={error:?}\n"
+    ));
+}
 
 pub(crate) fn spawn(
     path: &str,
     arguments: &[String],
+    catalog: &crate::image_catalog::Catalog,
+    trusted_images: &crate::trusted_images::TrustedImages,
     authorize: impl FnOnce(&[u8]) -> Result<(), SysError>,
 ) -> Result<u64, SysError> {
     let bytes = crate::bootstrap_file::read_image(path)?;
+    let source = crate::app_image::readonly(&bytes)?;
+    let mechanisms = crate::app_image::Mechanisms(catalog);
+    let mut owner = Preparation::default();
+    let prepared = owner
+        .prepare(
+            &mechanisms,
+            source.handle(),
+            Environment::default(),
+            Default::default(),
+        )
+        .inspect_err(|error| failed(path, "preparation", error))
+        .map_err(crate::app_image::status)?;
     let mut random = [0; 16];
     platform::random::fill(&mut random)?;
     let label = path
@@ -17,23 +38,47 @@ pub(crate) fn spawn(
         .next()
         .filter(|label| !label.is_empty())
         .ok_or(SysError::from_raw(EINVAL as i64))?;
-    let metadata = mochios_posix_client::launch_arguments::encode_native_launch(
-        path, label, arguments, random,
+    let mut metadata_owner = mochios_posix_client::startup_metadata::Owner::default();
+    let metadata = mochios_posix_client::launch_arguments::encode_native_launch_with_metadata(
+        path,
+        label,
+        arguments,
+        random,
+        mochios_posix_client::process_image::Process {
+            image: prepared.executable,
+            lifecycle: prepared.lifecycle,
+            tls: prepared.tls,
+            indirect: prepared.indirect,
+            loaded_objects: prepared.loaded_objects,
+            ..Default::default()
+        },
+        &mut metadata_owner,
+        &mechanisms,
     )
-    .map_err(|_| SysError::from_raw(EINVAL as i64))?;
-    let image = platform::memory_object::MemoryObject::create_resizable(bytes.len() as u64)?;
-    let mut written = 0;
-    while written < bytes.len() {
-        let count = platform::handle::write_at(image.handle(), &bytes[written..], written as u64)?;
-        if count == 0 || count > bytes.len() - written {
-            return Err(SysError::from_raw(EIO as i64));
+    .inspect_err(|error| failed(path, "metadata", error))
+    .map_err(|error| match error {
+        mochios_posix_client::launch_arguments::EncodeError::Metadata(status) => {
+            crate::app_image::status(status)
         }
-        written += count;
-    }
-    authorize(&bytes)?;
+        _ => SysError::from_raw(EINVAL as i64),
+    })?;
+    authorize(prepared.bytes).inspect_err(|error| failed(path, "authorization", error))?;
     let (handle, pid) = mochios_posix_client::process_creation::create_with_rollback(
-        || platform::process::create_stopped(image.handle(), &metadata),
-        |_| Ok(()),
+        || {
+            platform::process::create_stopped(prepared.image, &metadata)
+                .inspect_err(|error| failed(path, "creation", error))
+        },
+        |handle| {
+            trusted_images
+                .record_created(
+                    catalog.identity(),
+                    catalog.manifest_digest(),
+                    &bytes,
+                    prepared.bytes,
+                    handle,
+                )
+                .inspect_err(|error| failed(path, "measurement", error))
+        },
         |handle| platform::process::handle_status(handle).map(|status| status.process_id),
         platform::process::resume_handle,
         |handle| {

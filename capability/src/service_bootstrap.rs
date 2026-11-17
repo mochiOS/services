@@ -18,6 +18,7 @@ fn stderr_line(message: &str) {
 fn spawn_service_by_package(
     index: &PackageIndex,
     package_id: &str,
+    trusted_images: &crate::trusted_images::TrustedImages,
 ) -> Result<u64, mochi_user_syscall::SysError> {
     if index.duplicate {
         return Err(mochi_user_syscall::SysError::from_raw(
@@ -63,8 +64,8 @@ fn spawn_service_by_package(
     );
     let logger_endpoint = platform::logger::endpoint().unwrap_or(0);
     let args = alloc::vec![logger_endpoint.to_string()];
-    crate::native_bootstrap::spawn(service_path, &args, |image| {
-        crate::image_catalog::validate_declared_root(&verified.manifest, service_path, image)?;
+    let catalog = crate::image_catalog::Catalog::bootstrap_service(verified.clone(), service_path)?;
+    crate::native_bootstrap::spawn(service_path, &args, &catalog, trusted_images, |image| {
         authorize_spawn_image(
             0,
             service_path,
@@ -84,8 +85,11 @@ fn spawn_service_by_package(
     })
 }
 
-pub(crate) fn start_required_services(package_index: &PackageIndex) {
-    match spawn_service_by_package(package_index, SIGNATURE_PACKAGE_ID) {
+pub(crate) fn start_required_services(
+    package_index: &PackageIndex,
+    trusted_images: &crate::trusted_images::TrustedImages,
+) {
+    match spawn_service_by_package(package_index, SIGNATURE_PACKAGE_ID, trusted_images) {
         Ok(pid) => {
             platform::logln!("capability.service: signature.service spawned pid={}", pid);
         }
@@ -101,7 +105,7 @@ pub(crate) fn start_required_services(package_index: &PackageIndex) {
             platform::process::exit(1);
         }
     }
-    match spawn_service_by_package(package_index, PACKAGE_PACKAGE_ID) {
+    match spawn_service_by_package(package_index, PACKAGE_PACKAGE_ID, trusted_images) {
         Ok(pid) => {
             platform::logln!("capability.service: package.service spawned pid={}", pid);
         }
@@ -117,7 +121,7 @@ pub(crate) fn start_required_services(package_index: &PackageIndex) {
             platform::process::exit(1);
         }
     }
-    match spawn_service_by_package(package_index, SERVICE_MANAGER_PACKAGE_ID) {
+    match spawn_service_by_package(package_index, SERVICE_MANAGER_PACKAGE_ID, trusted_images) {
         Ok(pid) => {
             platform::logln!(
                 "capability.service: service-manager.service spawned pid={}",

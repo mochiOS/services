@@ -133,6 +133,7 @@ fn native_launch_carries_prepared_process_metadata_without_changing_handle_grant
             lifecycle: b"life\0\xff",
             tls: b"tls\0\xfe",
             indirect: b"irel\0\xfd",
+            loaded_objects: &[],
         },
     )
     .unwrap();
