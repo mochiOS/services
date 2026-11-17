@@ -57,20 +57,22 @@ thread_local!{{
     static LIMIT:Cell<usize>=const{{Cell::new(64)}};
     static COPY_ERROR:Cell<Option<Error>>=const{{Cell::new(None)}};
     static BACKEND_ERROR:Cell<bool>=const{{Cell::new(false)}};
+    static TRANSLATION_ERROR:Cell<bool>=const{{Cell::new(false)}};
     static REENTER_COPY:Cell<bool>=const{{Cell::new(false)}};
     static REENTER_BACKEND:Cell<bool>=const{{Cell::new(false)}};
     static COPIES:Cell<usize>=const{{Cell::new(0)}};
     static PRESENTS:Cell<usize>=const{{Cell::new(0)}};
     static LAST:Cell<u8>=const{{Cell::new(0)}};
 }}
-mod capability{{pub enum Capability{{DisplayRead}}}}
+mod capability{{pub enum Capability{{DisplayPresent}}}}
 mod syscall{{pub mod security{{
     pub fn caller_has_any_capability(_: &[crate::capability::Capability])->bool{{crate::AUTH.get()}}
 }}}}
 mod hypervisor{{pub enum HypercallNumber{{FirmwareFramebufferPresent}}pub const HYPERCALL_SUCCESS:u64=0;}}
-mod util{{pub mod vga{{pub fn get_info()->Option<()>{{crate::FIRMWARE.get().then_some(())}}}}}}
+mod util{{pub mod framebuffer{{pub fn get_info()->Option<()>{{crate::FIRMWARE.get().then_some(())}}}}}}
 mod hypervisor_guest{{
     pub fn is_active()->bool{{crate::FIRMWARE.get()}}
+    pub fn buffer_address(address:u64,_:usize)->Option<u64>{{(!crate::TRANSLATION_ERROR.get()).then_some(address)}}
     pub fn invoke(_:crate::hypervisor::HypercallNumber,_:u64,_:u64,pointer:u64)->u64{{
         assert_eq!(crate::HELD.load(crate::Ordering::Relaxed),1);
         crate::LAST.set(unsafe{{*(pointer as *const u8)}});crate::PRESENTS.set(crate::PRESENTS.get()+1);
@@ -143,7 +145,13 @@ fn main(){
             COPY_ERROR.set(Some(error));let before=PRESENTS.get();
             assert_eq!(present_framebuffer(0,size,4096,4),error.into_raw());assert_eq!(PRESENTS.get(),before);
         }
-        COPY_ERROR.set(None);BACKEND_ERROR.set(true);
+        COPY_ERROR.set(None);
+        if firmware{{
+            TRANSLATION_ERROR.set(true);let before=PRESENTS.get();
+            assert_eq!(present_framebuffer(0,size,4096,4),Error::BackingFailure.into_raw());
+            assert_eq!(PRESENTS.get(),before);TRANSLATION_ERROR.set(false);
+        }}
+        BACKEND_ERROR.set(true);
         assert_eq!(present_framebuffer(0,size,4096,4),Error::BackingFailure.into_raw());BACKEND_ERROR.set(false);
     }
     FIRMWARE.set(false);REENTER_BACKEND.set(true);
