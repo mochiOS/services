@@ -10,15 +10,16 @@ use crate::window::{Window, WindowId, window_frame_rect, window_index_by_id};
 const CURSOR_TEXTURE_KEY: u64 = u64::MAX;
 const WHITE_TEXTURE_KEY: u64 = u64::MAX - 1;
 
-// Cached geometry stays opaque. Fade only the assembled premultiplied scene,
-// preserving texture uploads and expensive rounded-corner tessellation.
-fn extend_with_opacity(output: &mut Vec<Vertex>, source: &[Vertex], opacity: u8) {
-    if opacity == 255 {
+// Keep cached geometry at the resting position. Move and fade the assembled
+// scene without uploading textures again or recomputing rounded corners.
+fn extend_with_reveal(output: &mut Vec<Vertex>, source: &[Vertex], opacity: u8, offset_y: i32) {
+    if opacity == 255 && offset_y == 0 {
         output.extend_from_slice(source);
         return;
     }
     let amount = f32::from(opacity) / 255.;
     output.extend(source.iter().copied().map(|mut vertex| {
+        vertex.y += offset_y as f32;
         for channel in &mut vertex.color {
             *channel *= amount;
         }
@@ -235,7 +236,7 @@ struct WindowChrome {
 #[derive(PartialEq)]
 struct DesktopGeometryKey {
     windows: Vec<WindowChrome>,
-    opacities: Vec<(u64, u8)>,
+    reveals: Vec<(u64, u8, i32)>,
     size: (u32, u32),
     surfaces: Vec<SurfaceGeometryKey>,
 }
@@ -328,7 +329,11 @@ impl GpuCompositor {
             (surface.stack_layer(), surface.z)
         });
         let desktop_key = DesktopGeometryKey {
-            opacities: windows.iter().filter(|w| w.live).map(|w| (w.id.0, w.opening.opacity())).collect(),
+            reveals: windows
+                .iter()
+                .filter(|window| window.live)
+                .map(|window| (window.id.0, window.opening.opacity(), window.reveal_offset_y()))
+                .collect(),
             windows: windows
                 .iter()
                 .filter_map(|window| {
@@ -426,8 +431,10 @@ impl GpuCompositor {
                 .enumerate()
             {
                 let surface = &surfaces[index];
-                let opacity = window_index_by_id(windows, surface.window)
-                    .map_or(255, |index| windows[index].opening.opacity());
+                let reveal_window = window_index_by_id(windows, surface.window)
+                    .map(|index| &windows[index]);
+                let (opacity, offset_y) = reveal_window
+                    .map_or((255, 0), |w| (w.opening.opacity(), w.reveal_offset_y()));
                 let chrome = desktop_key.windows.iter().find(|w| w.id == surface.window);
                 if let Some(chrome) = chrome {
                     if !indices[..position]
@@ -438,7 +445,7 @@ impl GpuCompositor {
                         if let Some(cached) =
                             self.chrome_geometry.iter().find(|c| c.key.id == chrome.id)
                         {
-                            extend_with_opacity(&mut self.vertices, &cached.shadow, opacity);
+                            extend_with_reveal(&mut self.vertices, &cached.shadow, opacity, offset_y);
                         }
                         push_batch(
                             &mut self.batches,
@@ -459,18 +466,25 @@ impl GpuCompositor {
                 });
                 if !valid {
                     let mut vertices = Vec::new();
+                    // Pixels above the viewport can slide into it. Keep those
+                    // pixels in the cache even when the window is at rest.
+                    let source_clip = if reveal_window.is_some() {
+                        crate::window::window_reveal_source_clip(damage)
+                    } else {
+                        damage
+                    };
                     if surface.current_format == PIXEL_FORMAT_GPU_SCENE {
                         append_gpu_surface(
                             &mut vertices,
                             surface,
-                            damage,
+                            source_clip,
                             key.window_clip.as_ref(),
                         )?;
                     } else {
                         append_cpu_surface(
                             &mut vertices,
                             surface,
-                            damage,
+                            source_clip,
                             key.window_clip.as_ref(),
                         );
                     }
@@ -487,7 +501,7 @@ impl GpuCompositor {
                 }
                 let cached =
                     &self.surface_geometry[cached_index.unwrap_or(self.surface_geometry.len() - 1)];
-                extend_with_opacity(&mut self.vertices, &cached.vertices, opacity);
+                extend_with_reveal(&mut self.vertices, &cached.vertices, opacity, offset_y);
                 push_batch(
                     &mut self.batches,
                     surface.handle.0,
@@ -503,7 +517,7 @@ impl GpuCompositor {
                         if let Some(cached) =
                             self.chrome_geometry.iter().find(|c| c.key.id == chrome.id)
                         {
-                            extend_with_opacity(&mut self.vertices, &cached.border, opacity);
+                            extend_with_reveal(&mut self.vertices, &cached.border, opacity, offset_y);
                         }
                         push_batch(
                             &mut self.batches,
@@ -1493,7 +1507,7 @@ fn encode_compositor_scene(
 #[cfg(test)]
 mod tests {
     #[test]
-    fn reveal_scales_all_premultiplied_channels_without_mutating_cached_geometry() {
+    fn reveal_moves_and_fades_without_mutating_cached_geometry() {
         let source = [super::Vertex {
             x: 1.,
             y: 2.,
@@ -1502,15 +1516,16 @@ mod tests {
             color: [0.5, 0.25, 0.1, 0.8],
         }];
         let mut output = alloc::vec::Vec::new();
-        super::extend_with_opacity(&mut output, &source, 128);
+        super::extend_with_reveal(&mut output, &source, 128, 12);
         for index in 0..4 {
             assert!(
                 (output[0].color[index] - source[0].color[index] * 128. / 255.).abs() < 0.00001
             );
         }
         assert_eq!(source[0].color, [0.5, 0.25, 0.1, 0.8]);
+        assert_eq!((output[0].x, output[0].y), (1., 14.));
         output.clear();
-        super::extend_with_opacity(&mut output, &source, 255);
+        super::extend_with_reveal(&mut output, &source, 255, 0);
         assert_eq!(output[0].color, source[0].color);
         assert_eq!((output[0].x, output[0].y), (1., 2.));
     }

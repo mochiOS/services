@@ -1680,11 +1680,7 @@ pub(crate) fn handle_request(
             }
             let window = surfaces[index].window;
             if let Some(window_index) = window_index_by_id(windows, window) {
-                windows[window_index].state = if windows[window_index].presentation.is_some() {
-                    crate::protocol::WINDOW_STATE_MAXIMIZED
-                } else {
-                    WINDOW_STATE_NORMAL
-                };
+                windows[window_index].restore_for_activation();
                 if let Some(content) =
                     content_surface_index_for_window(surfaces, &windows[window_index])
                 {

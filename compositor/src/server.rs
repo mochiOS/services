@@ -165,11 +165,7 @@ fn activate_process_window(
     };
     let window = surfaces[index].window;
     if let Some(window_index) = crate::window::window_index_by_id(windows, window) {
-        windows[window_index].state = if windows[window_index].presentation.is_some() {
-            WINDOW_STATE_MAXIMIZED
-        } else {
-            WINDOW_STATE_NORMAL
-        };
+        windows[window_index].restore_for_activation();
         if let Some(content) =
             crate::window::content_surface_index_for_window(surfaces, &windows[window_index])
         {
@@ -688,7 +684,7 @@ pub(crate) fn run() -> ! {
                     {
                         let damage =
                             crate::window::window_frame_rect(&state.surfaces[index], window)
-                                .expanded(window.shadow_margin());
+                                .expanded(window.shadow_margin() + window.reveal_travel());
                         frame.queue(Some(damage), false);
                     }
                 }

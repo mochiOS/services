@@ -71,6 +71,26 @@ impl Window {
     pub(crate) fn shadow_margin(&self) -> u32 {
         (WINDOW_SHADOW_MARGIN as f32 * self.scale_factor()).ceil() as u32
     }
+    pub(crate) fn reveal_travel(&self) -> u32 {
+        (metrics::TITLE_BAR_HEIGHT as f32 * self.scale_factor()).round() as u32
+    }
+    pub(crate) fn reveal_offset_y(&self) -> i32 {
+        let remaining = u32::from(255 - self.opening.opacity());
+        ((self.reveal_travel() * remaining + 127) / 255) as i32
+    }
+    pub(crate) fn restore_for_activation(&mut self) {
+        if self.state != crate::protocol::WINDOW_STATE_MINIMIZED {
+            return;
+        }
+        if self.presentation.is_none() {
+            self.opening = mochios_viewkit_gpu_protocol::window_motion::Opening::pending();
+        }
+        self.state = if self.presentation.is_some() {
+            crate::protocol::WINDOW_STATE_MAXIMIZED
+        } else {
+            WINDOW_STATE_NORMAL
+        };
+    }
     pub(crate) fn corner_radius(&self) -> f32 {
         if self.state == crate::protocol::WINDOW_STATE_MAXIMIZED {
             0.0
@@ -308,6 +328,13 @@ pub(crate) fn point_inside_window_frame(
     };
     let frame = window_frame_rect(&surfaces[content_index], window);
     rounded_rect_contains(frame, window.corner_radius(), x, y)
+}
+
+pub(crate) fn window_reveal_source_clip(mut viewport: Rect) -> Rect {
+    let travel = (metrics::TITLE_BAR_HEIGHT * metrics::MAX_SCALE).div_ceil(metrics::SCALE_UNIT);
+    viewport.y = viewport.y.saturating_sub(travel as i32);
+    viewport.height = viewport.height.saturating_add(travel);
+    viewport
 }
 
 pub(crate) fn window_frame_rect(content: &Surface, window: &Window) -> Rect {

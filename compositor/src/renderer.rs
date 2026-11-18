@@ -454,23 +454,29 @@ pub(crate) fn composite_and_present(
             if !surface_has_current_pixels(surface) {
                 continue;
             }
-            let opacity = window_index_by_id(windows, surface.window)
-                .map_or(255, |index| windows[index].opening.opacity());
-            if opacity == 0 { continue; }
-            let window_style =
-                window_index_by_id(windows, surface.window).and_then(|window_index| {
-                    let window = &windows[window_index];
-                    let content_index = content_surface_index_for_window(surfaces, window)?;
-                    (window.presentation.is_none()
-                        && window.decoration.is_some()
-                        && surfaces[content_index].visible)
-                        .then_some((
-                            window_index,
-                            window_frame_rect(&surfaces[content_index], window),
-                            active_window == Some(window.id),
-                            window.corner_radius(),
-                        ))
-                });
+            let window_index = window_index_by_id(windows, surface.window);
+            let (opacity, offset_y) = window_index.map_or((255, 0), |index| {
+                let window = &windows[index];
+                (window.opening.opacity(), window.reveal_offset_y())
+            });
+            if opacity == 0 {
+                continue;
+            }
+            let window_style = window_index.and_then(|window_index| {
+                let window = &windows[window_index];
+                let content_index = content_surface_index_for_window(surfaces, window)?;
+                let mut frame = window_frame_rect(&surfaces[content_index], window);
+                frame.y = frame.y.saturating_add(offset_y);
+                (window.presentation.is_none()
+                    && window.decoration.is_some()
+                    && surfaces[content_index].visible)
+                    .then_some((
+                        window_index,
+                        frame,
+                        active_window == Some(window.id),
+                        window.corner_radius(),
+                    ))
+            });
             if let Some((window_index, frame_rect, active, radius)) = window_style
                 && radius != 0.0
                 && !shadow_drawn[window_index]
@@ -479,12 +485,13 @@ pub(crate) fn composite_and_present(
                 shadow_drawn[window_index] = true;
             }
             let surface_left = surface.x.max(0) as i64;
-            let surface_top = surface.y.max(0) as i64;
+            let surface_y = i64::from(surface.y) + i64::from(offset_y);
+            let surface_top = surface_y.max(0);
             let surface_right = (surface.x as i64)
                 .saturating_add(surface.current_width as i64)
                 .min(frame_w as i64)
                 .max(0);
-            let surface_bottom = (surface.y as i64)
+            let surface_bottom = surface_y
                 .saturating_add(surface.current_height as i64)
                 .min(frame_h as i64)
                 .max(0);
@@ -501,7 +508,7 @@ pub(crate) fn composite_and_present(
                 InsetCoverage::new(frame,radius,windows[index].scale_factor())
             });
             for dy in copy_top as usize..copy_bottom as usize {
-                let sy = (dy as i64).saturating_sub(surface.y as i64) as usize;
+                let sy = (dy as i64).saturating_sub(surface_y) as usize;
                 for dx in copy_left as usize..copy_right as usize {
                     let sx = (dx as i64).saturating_sub(surface.x as i64) as usize;
                     let Some(dst) = (dy as usize)
