@@ -400,6 +400,7 @@ pub(crate) fn send_event(endpoint: u64, surface_token: u64, kind: u32, a: i32, b
     }
     let event = encode_surface_event(surface_token, kind, a, b, c);
     if kind != EVENT_KEY
+        && kind != mochios_viewkit_gpu_protocol::window_management::EVENT_SOFTWARE_KEY
         && kind != EVENT_POINTER_BUTTON
         && kind != EVENT_POINTER_SCROLL
         && kind != EVENT_APPEARANCE_CHANGED

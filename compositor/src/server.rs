@@ -1007,6 +1007,43 @@ pub(crate) fn run() -> ! {
             let _ = platform::ipc::reply(sender, &reply);
             continue;
         }
+        if read_u32(&buf[..len], 0) == Some(wm::SET_TEXT_INPUT) {
+            let mut reply = [0; 16];
+            let request = &buf[..len];
+            let mut changed = None;
+            let status = if let (Some(token), Some(active @ 0..=1)) =
+                (read_u64(request, 4), read_u32(request, 12))
+                && request.len() == 16
+                && let Some(surface) = state.surfaces.iter_mut().find(|surface| {
+                    surface.live
+                        && surface.owner == client
+                        && surface.token == token
+                        && surface.role == SurfaceRole::Toplevel
+                        && !surface.is_decoration
+                }) {
+                if surface.text_input != (active != 0) {
+                    surface.text_input = active != 0;
+                    changed = Some(surface.window);
+                }
+                0
+            } else {
+                errno_status(mochi_user_syscall::EACCES)
+            };
+            put_u32(&mut reply, 0, status);
+            let _ = platform::ipc::reply(sender, &reply);
+            if let Some(window) = changed {
+                crate::window_management::text_input_changed(&state, window);
+            }
+            continue;
+        }
+        if matches!(
+            read_u32(&buf[..len], 0),
+            Some(wm::SEND_SOFTWARE_KEY | wm::QUERY_TEXT_INPUT)
+        ) {
+            let reply = crate::window_management::text_input(&state, client, sender, &buf[..len]);
+            let _ = platform::ipc::reply(sender, &reply);
+            continue;
+        }
         if read_u32(&buf[..len], 0) == Some(wm::SET_DEFERRED_INPUT) {
             let reply = crate::window_management::set_deferred_input(
                 &state.clients,

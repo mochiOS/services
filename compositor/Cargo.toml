@@ -7,7 +7,7 @@ build = "build.rs"
 [dependencies]
 mochi-user-platform = { git = "https://github.com/mochiOS/syscalls", package = "mochi-user-platform", default-features = false, features = ["std"] }
 mochi-user-syscall = { git = "https://github.com/mochiOS/syscalls", package = "mochi-user-syscall" }
-mochios-viewkit-gpu-protocol = { git = "https://github.com/mochiOS/syscalls", rev = "977d9a579e1f2b430d6b47e8dce57b516c9d3d9d", package = "mochios-viewkit-gpu-protocol" }
+mochios-viewkit-gpu-protocol = { git = "https://github.com/mochiOS/syscalls", rev = "d711cda9856a0e754f5de14b8ef7259fa480eee4", package = "mochios-viewkit-gpu-protocol" }
 bootui = { git = "https://github.com/mochiOS/BootUI", rev = "4b0fca76023d9484d33a179946dc0fc5b770dd29" }
 
 [build-dependencies]

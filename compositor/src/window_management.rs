@@ -168,6 +168,106 @@ pub(crate) fn snapshot(
     len
 }
 
+pub(crate) fn text_input(
+    state: &crate::state::CompositorState,
+    client: ClientId,
+    sender: u64,
+    request: &[u8],
+) -> [u8; 16] {
+    let mut reply = [0; 16];
+    let operation = read_u32(request, 0);
+    let result = (|| {
+        if request.len() != 16 || !authorized(&state.clients, client, sender) {
+            return Err(mochi_user_syscall::EACCES);
+        }
+        let token = read_u64(request, 4).ok_or(mochi_user_syscall::EINVAL)?;
+        let Some(surface) = text_target(state, client, token) else {
+            return if operation == Some(wire::QUERY_TEXT_INPUT) {
+                Ok(false)
+            } else {
+                Err(mochi_user_syscall::EACCES)
+            };
+        };
+        if operation == Some(wire::SEND_SOFTWARE_KEY) {
+            let key = read_u32(request, 12)
+                .and_then(wire::software_key)
+                .ok_or(mochi_user_syscall::EINVAL)?;
+            send_event(
+                surface.event_endpoint,
+                surface.token,
+                wire::EVENT_SOFTWARE_KEY,
+                key as i32,
+                0,
+                0,
+            );
+        }
+        Ok(true)
+    })();
+    match result {
+        Ok(active) => put_u32(&mut reply, 4, u32::from(active)),
+        Err(error) => put_u32(&mut reply, 0, errno_status(error)),
+    }
+    reply
+}
+
+fn text_target(
+    state: &crate::state::CompositorState,
+    client: ClientId,
+    token: u64,
+) -> Option<&Surface> {
+    let window = &state.windows[window_index_by_token(&state.windows, token)?];
+    let index = content_surface_index_for_window(&state.surfaces, window)?;
+    let surface = &state.surfaces[index];
+    (surface.text_input
+        && state.keyboard_focus == Some(index)
+        && surface.visible
+        && !protected(surface)
+        && state.modal_sessions.is_empty()
+        && !state.context_menu.intercepts_pointer()
+        && !state
+            .surfaces
+            .iter()
+            .any(|surface| surface.live && surface.visible && protected(surface))
+        && window
+            .presentation
+            .is_some_and(|lease| lease.owner == client))
+    .then_some(surface)
+}
+
+pub(crate) fn text_input_changed(
+    state: &crate::state::CompositorState,
+    window: crate::window::WindowId,
+) {
+    let Some(presentation) = crate::window::window_index_by_id(&state.windows, window)
+        .and_then(|index| state.windows[index].presentation)
+    else {
+        return;
+    };
+    let Some(process) = state
+        .clients
+        .iter()
+        .find(|client| client.live && client.id == presentation.owner)
+        .and_then(|client| platform::ipc::endpoint_owner_process(client.sender).ok())
+    else {
+        return;
+    };
+    for panel in state.surfaces.iter().filter(|surface| {
+        surface.live
+            && surface.visible
+            && surface.role == SurfaceRole::Panel
+            && surface.owner_process == process
+    }) {
+        send_event(
+            panel.event_endpoint,
+            panel.token,
+            wire::EVENT_TEXT_INPUT_CHANGED,
+            0,
+            0,
+            0,
+        );
+    }
+}
+
 pub(crate) fn reply_preview(
     clients: &[Client],
     surfaces: &[Surface],
@@ -508,6 +608,46 @@ pub(crate) fn release_orphaned(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn software_keys_are_scoped_to_a_focused_editable_managed_window() {
+        use crate::{state::CompositorState, surface::SurfaceHandle, window::WindowId};
+
+        let mut state = CompositorState::new(0, 640, 480, 640, 0, false, 0);
+        let app = &mut state.surfaces[0];
+        app.live = true;
+        app.width = 640;
+        app.height = 480;
+        app.handle = SurfaceHandle(4);
+        app.token = 4;
+        app.window = WindowId(1);
+        app.text_input = true;
+        state.windows[0].live = true;
+        state.windows[0].id = app.window;
+        state.windows[0].token = 9;
+        state.windows[0].content = app.handle;
+        state.keyboard_focus = Some(0);
+        let manager = ClientId(7);
+        assert!(text_target(&state, manager, 9).is_none());
+        present(
+            &mut state.surfaces,
+            &mut state.windows[0],
+            0,
+            manager,
+            wire::Present {
+                window: 9,
+                flags: wire::LEASE | wire::VISIBLE,
+                bounds: wire::Bounds { x: 0, y: 0, width: 640, height: 480 },
+            },
+        );
+        assert!(text_target(&state, manager, 9).is_some());
+        assert!(text_target(&state, ClientId(2), 9).is_none());
+        state.keyboard_focus = None;
+        assert!(text_target(&state, manager, 9).is_none());
+        state.keyboard_focus = Some(0);
+        state.surfaces[0].protected_presentation = true;
+        assert!(text_target(&state, manager, 9).is_none());
+    }
 
     #[test]
     fn deferred_press_selects_the_original_application_or_panel() {

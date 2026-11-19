@@ -137,6 +137,7 @@ pub(crate) struct GpuSurfaceState {
 #[derive(Clone)]
 pub(crate) struct Surface {
     pub(crate) input_regions: Vec<Rect>,
+    pub(crate) text_input: bool,
     pub(crate) deferred_input: Option<(
         ClientId,
         mochios_viewkit_gpu_protocol::window_management::DeferredInput,
@@ -193,6 +194,7 @@ impl Surface {
     pub(crate) fn empty() -> Self {
         Self {
             input_regions: Vec::new(),
+            text_input: false,
             deferred_input: None,
             live: false,
             owner: ClientId(0),
@@ -237,6 +239,7 @@ impl Surface {
     }
 
     pub(crate) fn reset(&mut self) {
+        self.text_input = false;
         self.deferred_input = None;
         self.keyboard_capture.set(None);
         self.panel_pointer_observed.set(false);
