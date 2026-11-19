@@ -187,10 +187,20 @@ pub(crate) fn clear_focus_for_surface(
 }
 
 fn hit_test(surfaces: &[Surface], windows: &[Window], x: i32, y: i32) -> Option<usize> {
+    hit_test_except(surfaces, windows, x, y, None)
+}
+
+fn hit_test_except(
+    surfaces: &[Surface],
+    windows: &[Window],
+    x: i32,
+    y: i32,
+    excluded: Option<usize>,
+) -> Option<usize> {
     let mut hit = None;
     let mut best_stack = (0u8, 0u32);
     for (index, surface) in surfaces.iter().enumerate() {
-        if !crate::surface::surface_is_visible(surfaces, surface) {
+        if excluded == Some(index) || !crate::surface::surface_is_visible(surfaces, surface) {
             continue;
         }
         let (width, height) = surface_extent(surface);
@@ -240,6 +250,89 @@ fn hit_test(surfaces: &[Surface], windows: &[Window], x: i32, y: i32) -> Option<
         }
     }
     hit
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) struct DeferredPress {
+    panel: SurfaceHandle,
+    application: SurfaceHandle,
+    pub(crate) origin: (i32, i32),
+    slop: u32,
+    cancelled: bool,
+}
+
+impl DeferredPress {
+    pub(crate) fn detect(
+        surfaces: &[Surface],
+        windows: &[Window],
+        origin: (i32, i32),
+    ) -> Option<Self> {
+        if captured_pointer_target(surfaces).is_some()
+            || surfaces.iter().any(|surface| {
+                surface.live && surface.visible && crate::window_management::protected(surface)
+            })
+        {
+            return None;
+        }
+        let (x, y) = origin;
+        let panel_index = hit_test(surfaces, windows, x, y)?;
+        let panel = &surfaces[panel_index];
+        let (manager, region) = panel.deferred_input?;
+        let bounds = region.bounds;
+        if x < bounds.x
+            || y < bounds.y
+            || x.abs_diff(bounds.x) >= bounds.width
+            || y.abs_diff(bounds.y) >= bounds.height
+        {
+            return None;
+        }
+        let index = hit_test_except(surfaces, windows, x, y, Some(panel_index))?;
+        let app = &surfaces[index];
+        let window = window_index_by_id(windows, app.window)?;
+        if !matches!(app.role, SurfaceRole::Toplevel | SurfaceRole::Popup)
+            || windows[window]
+                .presentation
+                .is_none_or(|lease| lease.owner != manager)
+        {
+            return None;
+        }
+        Some(Self {
+            panel: panel.handle,
+            application: app.handle,
+            origin,
+            slop: region.slop,
+            cancelled: false,
+        })
+    }
+
+    pub(crate) fn cancel(mut self) -> Self {
+        self.cancelled = true;
+        self
+    }
+
+    pub(crate) fn dragged(self, x: i32, y: i32) -> bool {
+        let dx = i64::from(x.abs_diff(self.origin.0));
+        let dy = i64::from(y.abs_diff(self.origin.1));
+        let slop = i64::from(self.slop);
+        !self.cancelled && (dx >= slop || dy >= slop || dx * dx + dy * dy >= slop * slop)
+    }
+
+    pub(crate) fn target(
+        self,
+        surfaces: &[Surface],
+        windows: &[Window],
+        dragged: bool,
+    ) -> Option<usize> {
+        if self.cancelled || Self::detect(surfaces, windows, self.origin)? != self {
+            return None;
+        }
+        let handle = if dragged {
+            self.panel
+        } else {
+            self.application
+        };
+        crate::surface::surface_index_by_handle(surfaces, handle)
+    }
 }
 
 pub(crate) fn surface_process(
@@ -661,6 +754,7 @@ pub(crate) fn handle_input_event(
     modal_sessions: &[ModalSession],
     context_menu: &mut ContextMenuBroker,
     event: &platform::input::InputEvent,
+    button_target: Option<usize>,
 ) -> Option<Rect> {
     match event.kind {
         platform::input::EVENT_KIND_POINTER_MOVE | platform::input::EVENT_KIND_POINTER_ABSOLUTE => {
@@ -676,7 +770,7 @@ pub(crate) fn handle_input_event(
             )
         }
         platform::input::EVENT_KIND_POINTER_BUTTON => {
-            let raw_target = captured_pointer_target(surfaces)
+            let raw_target = button_target.or_else(|| captured_pointer_target(surfaces))
                 .or_else(|| hit_test(surfaces, windows, *pointer_x, *pointer_y));
             if event.detail == 1 && event.flags & platform::input::FLAG_RELEASE != 0 {
                 for surface in surfaces.iter() {

@@ -53,12 +53,50 @@ fn authorized(clients: &[Client], client: ClientId, sender: u64) -> bool {
         && crate::decoration::sender_has_decorate_capability(sender)
 }
 
-fn protected(surface: &Surface) -> bool {
+pub(crate) fn protected(surface: &Surface) -> bool {
     surface.protected_presentation
         || matches!(
             surface.role,
             SurfaceRole::SecureOverlay | SurfaceRole::SystemModal
         )
+}
+
+pub(crate) fn set_deferred_input(
+    clients: &[Client],
+    surfaces: &mut [Surface],
+    client: ClientId,
+    sender: u64,
+    request: &[u8],
+    display_width: u32,
+    display_height: u32,
+) -> [u8; 16] {
+    let result = (|| {
+        if !authorized(clients, client, sender) {
+            return Err(mochi_user_syscall::EACCES);
+        }
+        let command = wire::DeferredInput::decode(request).ok_or(mochi_user_syscall::EINVAL)?;
+        let process = platform::ipc::endpoint_owner_process(sender)
+            .map_err(|_| mochi_user_syscall::EACCES)?;
+        if command.slop != 0 && !valid_bounds(command.bounds, display_width, display_height) {
+            return Err(mochi_user_syscall::EINVAL);
+        }
+        let panel = surfaces
+            .iter_mut()
+            .find(|surface| {
+                surface.live
+                    && surface.role == SurfaceRole::Panel
+                    && surface.owner_process == process
+                    && surface.x == 0
+                    && surface.y == 0
+                    && surface_extent(surface) == (display_width, display_height)
+            })
+            .ok_or(mochi_user_syscall::ENOENT)?;
+        panel.deferred_input = (command.slop != 0).then_some((client, command));
+        Ok(())
+    })();
+    let mut reply = [0; 16];
+    put_u32(&mut reply, 0, result.err().map(errno_status).unwrap_or(0));
+    reply
 }
 
 pub(crate) fn snapshot(
@@ -128,6 +166,90 @@ pub(crate) fn snapshot(
     let len = wire::HEADER_LEN + count * wire::RECORD_LEN;
     let _ = wire::snapshot_header(&mut reply[..len], count);
     len
+}
+
+pub(crate) fn reply_preview(
+    clients: &[Client],
+    surfaces: &[Surface],
+    windows: &[Window],
+    sessions: &[ModalSession],
+    client: ClientId,
+    sender: u64,
+    request: &[u8],
+) {
+    use platform::memory_object::{MemoryObject, READONLY_BUFFER_RIGHTS, ReadOnlyOffer};
+
+    let result = (|| {
+        if request.len() != 12 {
+            return Err(mochi_user_syscall::EINVAL);
+        }
+        if !authorized(clients, client, sender) {
+            return Err(mochi_user_syscall::EACCES);
+        }
+        if !sessions.is_empty()
+            || surfaces
+                .iter()
+                .any(|surface| surface.live && surface.visible && protected(surface))
+        {
+            return Err(mochi_user_syscall::EAGAIN);
+        }
+        let token = read_u64(request, 4).ok_or(mochi_user_syscall::EINVAL)?;
+        let index = window_index_by_token(windows, token).ok_or(mochi_user_syscall::ENOENT)?;
+        let window = &windows[index];
+        let content =
+            content_surface_index_for_window(surfaces, window).ok_or(mochi_user_syscall::ENOENT)?;
+        let surface = &surfaces[content];
+        if window
+            .presentation
+            .is_none_or(|lease| lease.owner != client)
+            || surface.role != SurfaceRole::Toplevel
+            || protected(surface)
+        {
+            return Err(mochi_user_syscall::EACCES);
+        }
+        let (width, height) = (surface.current_width, surface.current_height);
+        if width == 0 || height == 0 {
+            return Err(mochi_user_syscall::EAGAIN);
+        }
+        let longest = width.max(height).max(wire::PREVIEW_MAX_SIDE);
+        let width = (width * wire::PREVIEW_MAX_SIDE / longest).max(1);
+        let height = (height * wire::PREVIEW_MAX_SIDE / longest).max(1);
+        let mut image = vec![0; wire::HEADER_LEN + width as usize * height as usize * 4];
+        let (header, pixels) = image.split_at_mut(wire::HEADER_LEN);
+        wire::preview_header(header, width, height).ok_or(mochi_user_syscall::EIO)?;
+        crate::surface::render_window_preview(surface, width as usize, height as usize, pixels)
+            .ok_or(mochi_user_syscall::EAGAIN)?;
+        let length = image.len() as u64;
+        let capacity = image.len().div_ceil(crate::state::PAGE_SIZE) * crate::state::PAGE_SIZE;
+        let errno =
+            |error: platform::syscall::SysError| error.errno().unwrap_or(mochi_user_syscall::EIO);
+        let object = MemoryObject::create(capacity as u64).map_err(errno)?;
+        let mut written = 0;
+        while written < image.len() {
+            let end = (written + crate::state::PAGE_SIZE).min(image.len());
+            let count =
+                platform::handle::write_at(object.handle(), &image[written..end], written as u64)
+                    .map_err(errno)?;
+            if count == 0 || count > end - written {
+                return Err(mochi_user_syscall::EIO);
+            }
+            written += count;
+        }
+        let offer = ReadOnlyOffer { offset: 0, length }
+            .encode()
+            .map_err(errno)?;
+        let mut handles = platform::ipc::IpcObjectHandles::default();
+        handles.count = 1;
+        handles.handles[0].handle = object.handle();
+        handles.handles[0].rights = READONLY_BUFFER_RIGHTS;
+        platform::ipc::reply_object_handles(sender, &offer, &handles).map_err(errno)?;
+        Ok(())
+    })();
+    if let Err(errno) = result {
+        let mut reply = [0; wire::HEADER_LEN];
+        put_u32(&mut reply, 0, errno_status(errno));
+        let _ = platform::ipc::reply(sender, &reply);
+    }
 }
 
 fn valid_bounds(bounds: wire::Bounds, width: u32, height: u32) -> bool {
@@ -386,6 +508,78 @@ pub(crate) fn release_orphaned(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn deferred_press_selects_the_original_application_or_panel() {
+        use crate::{
+            geometry::Rect, input::DeferredPress, surface::SurfaceHandle, window::WindowId,
+        };
+
+        let mut app = Surface::empty();
+        app.live = true;
+        app.handle = SurfaceHandle(4);
+        app.token = 4;
+        app.window = WindowId(1);
+        app.width = 640;
+        app.height = 480;
+        let mut window = Window::empty();
+        window.live = true;
+        window.id = app.window;
+        window.content = app.handle;
+        let mut surfaces = [app, Surface::empty()];
+        let region = wire::Bounds {
+            x: 0,
+            y: 436,
+            width: 640,
+            height: 44,
+        };
+        present(
+            &mut surfaces,
+            &mut window,
+            0,
+            ClientId(7),
+            wire::Present {
+                window: 1,
+                flags: wire::LEASE | wire::VISIBLE,
+                bounds: wire::Bounds {
+                    x: 0,
+                    y: 0,
+                    width: 640,
+                    height: 480,
+                },
+            },
+        );
+        let panel = &mut surfaces[1];
+        panel.live = true;
+        panel.handle = SurfaceHandle(8);
+        panel.token = 8;
+        panel.role = SurfaceRole::Panel;
+        panel.width = 640;
+        panel.height = 480;
+        panel.deferred_input = Some((
+            ClientId(7),
+            wire::DeferredInput {
+                bounds: region,
+                slop: 10,
+            },
+        ));
+        panel.input_regions.push(Rect {
+            x: 0,
+            y: 436,
+            width: 640,
+            height: 44,
+        });
+        let windows = [window];
+        assert!(DeferredPress::detect(&surfaces, &windows, (400, 435)).is_none());
+        let press = DeferredPress::detect(&surfaces, &windows, (400, 460)).unwrap();
+        assert!(!press.dragged(402, 461));
+        assert!(press.dragged(400, 450));
+        assert_eq!(press.target(&surfaces, &windows, false), Some(0));
+        assert_eq!(press.target(&surfaces, &windows, true), Some(1));
+        assert_eq!(press.cancel().target(&surfaces, &windows, false), None);
+        surfaces[0].protected_presentation = true;
+        assert_eq!(press.target(&surfaces, &windows, false), None);
+    }
     #[test]
     fn unregistered_senders_cannot_enumerate_windows() {
         let mut reply = [0; wire::MAX_REPLY];

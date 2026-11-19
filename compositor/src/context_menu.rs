@@ -40,6 +40,10 @@ pub(crate) struct ContextMenuBroker {
 }
 
 impl ContextMenuBroker {
+    pub(crate) fn intercepts_pointer(&self) -> bool {
+        self.pending.is_some() || self.suppress_pointer_release
+    }
+
     pub(crate) fn handle_request(
         &mut self,
         surfaces: &[Surface],

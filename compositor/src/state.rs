@@ -5,7 +5,7 @@ use crate::client::Client;
 use crate::context_menu::ContextMenuBroker;
 use crate::cursor::CursorImage;
 use crate::fps_overlay::FpsOverlay;
-use crate::input::{PointerGrab, PointerSerial};
+use crate::input::{DeferredPress, PointerGrab, PointerSerial};
 use crate::renderer::PresentFrame;
 use crate::surface::Surface;
 use crate::window::Window;
@@ -62,6 +62,7 @@ pub(crate) struct CompositorState {
     pub(crate) pointer_x: i32,
     pub(crate) pointer_y: i32,
     pub(crate) panel_edge_tracking: bool,
+    pub(crate) deferred_press: Option<(DeferredPress, mochi_user_platform::input::InputEvent)>,
     pub(crate) cursor_x: i32,
     pub(crate) cursor_y: i32,
     pub(crate) cursor_visible: bool,
@@ -109,6 +110,7 @@ impl CompositorState {
             pointer_x: (display_width / 2).min(display_width.saturating_sub(1)) as i32,
             pointer_y: (display_height / 2).min(display_height.saturating_sub(1)) as i32,
             panel_edge_tracking: false,
+            deferred_press: None,
             cursor_x: 0,
             cursor_y: 0,
             cursor_visible: false,

@@ -137,6 +137,10 @@ pub(crate) struct GpuSurfaceState {
 #[derive(Clone)]
 pub(crate) struct Surface {
     pub(crate) input_regions: Vec<Rect>,
+    pub(crate) deferred_input: Option<(
+        ClientId,
+        mochios_viewkit_gpu_protocol::window_management::DeferredInput,
+    )>,
     pub(crate) live: bool,
     pub(crate) owner: ClientId,
     pub(crate) owner_process: u64,
@@ -189,6 +193,7 @@ impl Surface {
     pub(crate) fn empty() -> Self {
         Self {
             input_regions: Vec::new(),
+            deferred_input: None,
             live: false,
             owner: ClientId(0),
             owner_process: 0,
@@ -232,6 +237,7 @@ impl Surface {
     }
 
     pub(crate) fn reset(&mut self) {
+        self.deferred_input = None;
         self.keyboard_capture.set(None);
         self.panel_pointer_observed.set(false);
         self.pointer_captured.set(false);
@@ -575,31 +581,140 @@ pub(crate) fn read_background_pixel(surface: &Surface, sx: usize, sy: usize) -> 
         let Some(weights) = barycentric_weights(x, y, vertices[0], vertices[1], vertices[2]) else {
             continue;
         };
-        let interpolate = |offset| -> Option<f32> {
-            Some(
-                read_f32(bytes[0], offset)? * weights[0]
-                    + read_f32(bytes[1], offset)? * weights[1]
-                    + read_f32(bytes[2], offset)? * weights[2],
-            )
-        };
-        let tx = ((interpolate(12)?.clamp(0.0, 1.0) * gpu.atlas_width as f32) as usize)
-            .min(gpu.atlas_width.saturating_sub(1) as usize);
-        let ty = ((interpolate(16)?.clamp(0.0, 1.0) * gpu.atlas_height as f32) as usize)
-            .min(gpu.atlas_height.saturating_sub(1) as usize);
-        let offset = (ty.checked_mul(gpu.atlas_width as usize)?.checked_add(tx)?).checked_mul(4)?;
-        let texel = gpu.atlas.get(offset..offset + 4)?;
-        let remaining = 1.0 - result[3];
-        for (index, texel_index) in [2, 1, 0, 3].into_iter().enumerate() {
-            result[index] += f32::from(texel[texel_index]) / 255.0
-                * interpolate(20 + index * 4)?.clamp(0.0, 1.0)
-                * remaining;
-        }
+        blend_gpu_sample(gpu, bytes, weights, &mut result)?;
         if result[3] >= 0.999 {
             break;
         }
     }
     let channel = |index: usize| (result[index] * 255.0).round().clamp(0.0, 255.0) as u32;
     Some((channel(3) << 24) | (channel(0) << 16) | (channel(1) << 8) | channel(2))
+}
+
+fn blend_gpu_sample(
+    gpu: &GpuSurfaceState,
+    bytes: [&[u8]; 3],
+    weights: [f32; 3],
+    pixel: &mut [f32; 4],
+) -> Option<()> {
+    let interpolate = |offset| -> Option<f32> {
+        Some(
+            read_f32(bytes[0], offset)? * weights[0]
+                + read_f32(bytes[1], offset)? * weights[1]
+                + read_f32(bytes[2], offset)? * weights[2],
+        )
+    };
+    let tx = ((interpolate(12)?.clamp(0.0, 1.0) * gpu.atlas_width as f32) as usize)
+        .min(gpu.atlas_width.saturating_sub(1) as usize);
+    let ty = ((interpolate(16)?.clamp(0.0, 1.0) * gpu.atlas_height as f32) as usize)
+        .min(gpu.atlas_height.saturating_sub(1) as usize);
+    let offset = (ty.checked_mul(gpu.atlas_width as usize)?.checked_add(tx)?).checked_mul(4)?;
+    let texel = gpu.atlas.get(offset..offset + 4)?;
+    let remaining = 1.0 - pixel[3];
+    for (index, texel_index) in [2, 1, 0, 3].into_iter().enumerate() {
+        pixel[index] += f32::from(texel[texel_index]) / 255.0
+            * interpolate(20 + index * 4)?.clamp(0.0, 1.0)
+            * remaining;
+    }
+    Some(())
+}
+
+fn preview_rgba(pixel: [f32; 4]) -> [u8; 4] {
+    let channel = |value: f32| (value.clamp(0.0, 1.0) * 255.0).round() as u8;
+    let alpha = pixel[3];
+    if alpha <= 0.0 {
+        return [0; 4];
+    }
+    [
+        channel(pixel[0] / alpha),
+        channel(pixel[1] / alpha),
+        channel(pixel[2] / alpha),
+        channel(alpha),
+    ]
+}
+
+/// Samples only the committed content, at the requested thumbnail size.
+pub(crate) fn render_window_preview(
+    surface: &Surface,
+    width: usize,
+    height: usize,
+    output: &mut [u8],
+) -> Option<()> {
+    if width == 0 || height == 0 || width.checked_mul(height)?.checked_mul(4)? != output.len() {
+        return None;
+    }
+    let (source_width, source_height) = (
+        surface.current_width as usize,
+        surface.current_height as usize,
+    );
+    if source_width == 0 || source_height == 0 {
+        return None;
+    }
+    if surface.current_format != PIXEL_FORMAT_GPU_SCENE {
+        let opaque = surface.current_format == PIXEL_FORMAT_XRGB8888;
+        for (index, destination) in output.chunks_exact_mut(4).enumerate() {
+            let x = (2 * (index % width) + 1) * source_width / (2 * width);
+            let y = (2 * (index / width) + 1) * source_height / (2 * height);
+            let [b, g, r, a] = read_current_pixel(surface, x, y)?.to_le_bytes();
+            let alpha = if opaque { 1.0 } else { f32::from(a) / 255.0 };
+            destination.copy_from_slice(&preview_rgba([
+                f32::from(r) / 255.0,
+                f32::from(g) / 255.0,
+                f32::from(b) / 255.0,
+                alpha,
+            ]));
+        }
+        return Some(());
+    }
+
+    let gpu = surface.gpu.as_ref()?;
+    let mut samples = alloc::vec![[0.0; 4]; width * height];
+    let stride = mochios_viewkit_gpu_protocol::VERTEX_STRIDE;
+    let pixel_range = |values: [f32; 3], side: usize| {
+        let min = values.into_iter().fold(f32::INFINITY, f32::min);
+        let max = values.into_iter().fold(f32::NEG_INFINITY, f32::max);
+        let lower = (((min + 1.0) * side as f32 * 0.5).floor() as usize).min(side);
+        let upper = (((max + 1.0) * side as f32 * 0.5).ceil() as usize).min(side);
+        lower..upper
+    };
+    // Bound synchronous rendering work for complex or overlapping scenes.
+    let mut budget: usize = 2_000_000;
+    let mut uncovered = samples.len();
+    for triangle in gpu.vertices.rchunks_exact(stride * 3) {
+        let bytes = [
+            &triangle[..stride],
+            &triangle[stride..2 * stride],
+            &triangle[2 * stride..],
+        ];
+        let a = decode_gpu_hit_vertex(bytes[0])?;
+        let b = decode_gpu_hit_vertex(bytes[1])?;
+        let c = decode_gpu_hit_vertex(bytes[2])?;
+        let xs = pixel_range([a.x, b.x, c.x], width);
+        let ys = pixel_range([a.y, b.y, c.y], height);
+        budget = budget.checked_sub(xs.len() * ys.len())?;
+        for y in ys {
+            let point_y = (y as f32 + 0.5) / height as f32 * 2.0 - 1.0;
+            for x in xs.clone() {
+                let pixel = &mut samples[y * width + x];
+                if pixel[3] >= 0.999 {
+                    continue;
+                }
+                let point_x = (x as f32 + 0.5) / width as f32 * 2.0 - 1.0;
+                if let Some(weights) = barycentric_weights(point_x, point_y, a, b, c) {
+                    blend_gpu_sample(gpu, bytes, weights, pixel)?;
+                    if pixel[3] >= 0.999 {
+                        uncovered -= 1;
+                    }
+                }
+            }
+        }
+        if uncovered == 0 {
+            break;
+        }
+    }
+    for (sample, destination) in samples.into_iter().zip(output.chunks_exact_mut(4)) {
+        destination.copy_from_slice(&preview_rgba(sample));
+    }
+    Some(())
 }
 
 fn read_gpu_scene_pixel(surface: &Surface, sx: usize, sy: usize) -> Option<u32> {
@@ -713,6 +828,22 @@ mod gpu_hit_tests {
     use super::*;
 
     #[test]
+    fn window_preview_uses_committed_pixel_alpha_and_order() {
+        let mut surface = Surface::empty();
+        surface.current_width = 2;
+        surface.current_height = 1;
+        surface.current_stride = 2;
+        surface.current = vec![0x00_25_50_75, 0x00_19_28_37];
+        let mut output = [0; 8];
+        assert_eq!(render_window_preview(&surface, 2, 1, &mut output), Some(()));
+        assert_eq!(output, [0x25, 0x50, 0x75, 255, 0x19, 0x28, 0x37, 255]);
+        surface.current_format = PIXEL_FORMAT_ARGB8888_PREMULTIPLIED;
+        surface.current = vec![0x80_40_20_00, 0];
+        assert_eq!(render_window_preview(&surface, 2, 1, &mut output), Some(()));
+        assert_eq!(output, [128, 64, 0, 128, 0, 0, 0, 0]);
+    }
+
+    #[test]
     fn every_composited_role_accepts_gpu_scenes() {
         for role in [
             SurfaceRole::Toplevel,
@@ -754,6 +885,15 @@ mod gpu_hit_tests {
             atlas_dirty_height: 1,
         });
         surface
+    }
+
+    #[test]
+    fn window_preview_samples_gpu_surface_at_reduced_size() {
+        let surface = scene_surface(1.0);
+        let mut output = [0; 16];
+        assert_eq!(render_window_preview(&surface, 2, 2, &mut output), Some(()));
+        assert_eq!(&output[..4], &[255; 4]);
+        assert_eq!(&output[12..], &[0; 4]);
     }
 
     #[test]

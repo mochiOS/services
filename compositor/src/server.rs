@@ -1,4 +1,5 @@
 use mochi_user_platform as platform;
+use mochios_viewkit_gpu_protocol::window_management as wm;
 
 use crate::client::{Client, ClientId, cleanup_client, client_id_for_sender};
 use crate::context_menu::ContextMenuBroker;
@@ -11,7 +12,7 @@ use crate::display::{
 use crate::fps_overlay;
 use crate::geometry::{Rect, merge_damage};
 use crate::input::{
-    PointerGrab, PointerSerial, clear_focus_for_surface, finish_pointer_motion,
+    DeferredPress, PointerGrab, PointerSerial, clear_focus_for_surface, finish_pointer_motion,
     frontmost_process_surface, handle_input_event, raise_window, send_event,
     subscribe_input_events, surface_process, update_keyboard_focus, update_pointer_position,
 };
@@ -68,12 +69,12 @@ fn mirror_panel_edge_motion(state: &mut CompositorState) {
     }
 }
 
-fn process_input_event(
+fn dispatch_input(
     state: &mut CompositorState,
     event: &platform::input::InputEvent,
-    mut damage: Option<Rect>,
+    target: Option<usize>,
 ) -> Option<Rect> {
-    if let Some(event_damage) = handle_input_event(
+    handle_input_event(
         &mut state.surfaces,
         &mut state.windows,
         &mut state.next_z,
@@ -90,8 +91,65 @@ fn process_input_event(
         &state.modal_sessions,
         &mut state.context_menu,
         event,
-    ) {
-        damage = merge_damage(damage, event_damage);
+        target,
+    )
+}
+
+fn deferred_target(state: &CompositorState, press: DeferredPress, dragged: bool) -> Option<usize> {
+    if !state.modal_sessions.is_empty() || state.context_menu.intercepts_pointer() {
+        return None;
+    }
+    press.target(&state.surfaces, &state.windows, dragged)
+}
+
+fn deliver_deferred_press(
+    state: &mut CompositorState,
+    press: DeferredPress,
+    event: &platform::input::InputEvent,
+    target: usize,
+) -> Option<Rect> {
+    let current = (state.pointer_x, state.pointer_y);
+    (state.pointer_x, state.pointer_y) = press.origin;
+    let damage = dispatch_input(state, event, Some(target));
+    (state.pointer_x, state.pointer_y) = current;
+    damage
+}
+
+fn process_input_event(
+    state: &mut CompositorState,
+    event: &platform::input::InputEvent,
+    mut damage: Option<Rect>,
+) -> Option<Rect> {
+    if event.kind == platform::input::EVENT_KIND_POINTER_BUTTON && event.detail == 1 {
+        if event.flags & platform::input::FLAG_RELEASE != 0
+            && let Some((press, down)) = state.deferred_press.take()
+        {
+            if let Some(target) = deferred_target(state, press, false) {
+                if let Some(dirty) = deliver_deferred_press(state, press, &down, target) {
+                    damage = merge_damage(damage, dirty);
+                }
+                if let Some(dirty) = dispatch_input(state, event, Some(target)) {
+                    damage = merge_damage(damage, dirty);
+                }
+            }
+            return damage;
+        }
+        if event.flags & platform::input::FLAG_PRESS != 0
+            && state.pointer_grab.is_none()
+            && state.modal_sessions.is_empty()
+            && !state.context_menu.intercepts_pointer()
+            && let Some(press) = DeferredPress::detect(
+                &state.surfaces,
+                &state.windows,
+                (state.pointer_x, state.pointer_y),
+            )
+        {
+            state.deferred_press = Some((press, *event));
+            return damage;
+        }
+    }
+    if let Some(dirty) = dispatch_input(state, event, None) {
+        damage = merge_damage(damage, dirty);
     }
     if is_pointer_motion(event) {
         mirror_panel_edge_motion(state);
@@ -120,7 +178,18 @@ fn process_input_event(
 }
 
 fn finish_coalesced_pointer_motion(state: &mut CompositorState) -> Option<Rect> {
-    let mut damage = finish_pointer_motion(
+    let mut damage = None;
+    if let Some((press, down)) = state.deferred_press
+        && press.dragged(state.pointer_x, state.pointer_y)
+    {
+        if let Some(target) = deferred_target(state, press, true) {
+            state.deferred_press = None;
+            damage = deliver_deferred_press(state, press, &down, target);
+        } else {
+            state.deferred_press = Some((press.cancel(), down));
+        }
+    }
+    if let Some(dirty) = finish_pointer_motion(
         &mut state.surfaces,
         &mut state.windows,
         &state.pointer_grab,
@@ -128,7 +197,9 @@ fn finish_coalesced_pointer_motion(state: &mut CompositorState) -> Option<Rect> 
         state.pointer_x,
         state.pointer_y,
         &mut state.pointer_focus,
-    );
+    ) {
+        damage = merge_damage(damage, dirty);
+    }
     mirror_panel_edge_motion(state);
     if !state.cursor_image.is_empty() {
         let old = state
@@ -879,7 +950,9 @@ pub(crate) fn run() -> ! {
                     state.display_height,
                     &event,
                 );
-                for _ in 0..32 {
+                // A return to the starting point must not erase a drag.
+                let coalescing_limit = if state.deferred_press.is_some() { 0 } else { 32 };
+                for _ in 0..coalescing_limit {
                     let mut next_handles = ReceivedHandles::default();
                     let Ok(next_msg) =
                         platform::ipc::try_wait_object_handles(buf, &mut next_handles.0)
@@ -934,10 +1007,33 @@ pub(crate) fn run() -> ! {
             let _ = platform::ipc::reply(sender, &reply);
             continue;
         }
-        if read_u32(&buf[..len], 0)
-            == Some(mochios_viewkit_gpu_protocol::window_management::SNAPSHOT)
-        {
-            let mut reply = [0; mochios_viewkit_gpu_protocol::window_management::MAX_REPLY];
+        if read_u32(&buf[..len], 0) == Some(wm::SET_DEFERRED_INPUT) {
+            let reply = crate::window_management::set_deferred_input(
+                &state.clients,
+                &mut state.surfaces,
+                client,
+                sender,
+                &buf[..len],
+                state.display_width,
+                state.display_height,
+            );
+            let _ = platform::ipc::reply(sender, &reply);
+            continue;
+        }
+        if read_u32(&buf[..len], 0) == Some(wm::PREVIEW) {
+            crate::window_management::reply_preview(
+                &state.clients,
+                &state.surfaces,
+                &state.windows,
+                &state.modal_sessions,
+                client,
+                sender,
+                &buf[..len],
+            );
+            continue;
+        }
+        if read_u32(&buf[..len], 0) == Some(wm::SNAPSHOT) {
+            let mut reply = [0; wm::MAX_REPLY];
             let length = crate::window_management::snapshot(
                 &state.clients,
                 &state.surfaces,
