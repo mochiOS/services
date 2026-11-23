@@ -24,22 +24,29 @@ pub(super) fn read_image(path: &str) -> Result<Vec<u8>, SysError> {
 fn read_bounded(path: &str, maximum: usize) -> Result<Vec<u8>, SysError> {
     let mut reader = READER.lock().map_err(|_| SysError::from_raw(EIO as i64))?;
     if reader.is_none() {
-        // Hardware discovery is demand-driven. Request it through the normal
-        // capability-checked control path before the first raw block read;
-        // headless boots cannot depend on a display request doing this first.
-        let devices = platform::storage::control(platform::storage::StorageControlRequest {
-            operation: platform::storage::STORAGE_CONTROL_LIST_DEVICE,
-            ..Default::default()
-        })?;
-        if devices.status != platform::storage::STORAGE_STATUS_OK {
-            return Err(SysError::from_raw(
-                if devices.status == platform::storage::STORAGE_STATUS_END {
-                    -i64::from(mochios_posix_client::newlib_errno::ENODEV)
-                } else {
-                    EIO as i64
-                },
-            ));
-        }
+        // The native disk extension may already be ready. Otherwise discover
+        // it through the normal capability-checked control path; headless
+        // boots must not depend on a display request doing discovery first.
+        crate::boot_storage::prepare(
+            || platform::storage::block_read(0, 0, &mut [0; 512]).map(|_| ()),
+            || {
+                let devices =
+                    platform::storage::control(platform::storage::StorageControlRequest {
+                        operation: platform::storage::STORAGE_CONTROL_LIST_DEVICE,
+                        ..Default::default()
+                    })?;
+                if devices.status != platform::storage::STORAGE_STATUS_OK {
+                    return Err(SysError::from_raw(
+                        if devices.status == platform::storage::STORAGE_STATUS_END {
+                            -i64::from(mochios_posix_client::newlib_errno::ENODEV)
+                        } else {
+                            EIO as i64
+                        },
+                    ));
+                }
+                Ok(())
+            },
+        )?;
         let (first_lba, sector_count) =
             find_system_partition(0).map_err(|_| SysError::from_raw(EIO as i64))?;
         let partition = Arc::new(PartitionIo::new(MochiDisk::new(0), first_lba, sector_count));

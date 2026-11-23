@@ -1,5 +1,6 @@
 extern crate alloc;
 mod boot_files;
+mod boot_storage;
 mod bootstrap_plan;
 mod native_bootstrap;
 
