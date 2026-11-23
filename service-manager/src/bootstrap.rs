@@ -321,9 +321,8 @@ impl Runtime {
         }
         match result {
             Ok(()) => {
-                platform::logln!("service-manager.service: {} ready", service.name());
+                boot_status!("service-manager.service: {} ready", service.name());
                 if service == ReadyService::Binder {
-                    boot_status!("service-manager.service: Binder.app ready");
                     let _ = platform::logger::flush_pending();
                 }
                 true
@@ -1190,7 +1189,18 @@ fn service_name(service: FixedService) -> &'static str {
 }
 
 fn boot_status(message: core::fmt::Arguments<'_>) {
-    let _ = platform::logger::write_status_fmt(format_args!("{message}\n"));
+    // Record at the producer, not when Logger later persists its boot buffer.
+    // Monotonic time is independent of RTC availability and user clock changes.
+    match platform::time::monotonic_milliseconds() {
+        Ok(milliseconds) => {
+            let _ = platform::logger::write_status_fmt(format_args!(
+                "{message} [boot_ms={milliseconds}]\n"
+            ));
+        }
+        Err(_) => {
+            let _ = platform::logger::write_status_fmt(format_args!("{message}\n"));
+        }
+    }
 }
 
 fn log_ready_error(service: ReadyService, error: ReadyError) {

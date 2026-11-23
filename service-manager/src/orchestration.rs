@@ -225,10 +225,6 @@ pub(crate) fn orchestrate<O: BootstrapOperations>(
     // desktop and Installer from starting.
     let discovery_started = operations.start_discovery();
 
-    children.network = operations.spawn_network();
-    if children.network.is_some() {
-        children.update = operations.spawn_update();
-    }
     let Some(user) = operations.spawn_user() else {
         return outcome(children, StopReason::UserSpawnFailed);
     };
@@ -262,7 +258,6 @@ pub(crate) fn orchestrate<O: BootstrapOperations>(
         return outcome(children, StopReason::WorkspaceSpawnFailed);
     };
     children.workspace = Some(workspace);
-    children.linux = operations.spawn_user_session(FixedService::Linux, identity, session_id);
     let Some(binder) = operations.spawn_user_session(FixedService::Binder, identity, session_id)
     else {
         return outcome(children, StopReason::BinderSpawnFailed);
@@ -280,6 +275,12 @@ pub(crate) fn orchestrate<O: BootstrapOperations>(
         children.installer = Some(installer);
     }
     operations.notify_mboot_stage(MbootStage::Desktop);
+    // Optional services must not contend with authentication and the first frame.
+    children.linux = operations.spawn_user_session(FixedService::Linux, identity, session_id);
+    children.network = operations.spawn_network();
+    if children.network.is_some() {
+        children.update = operations.spawn_update();
+    }
     // The desktop is usable before any downloads begin. This is a normal
     // unprivileged Store process in the authenticated session, not a new service
     // or an installer-media job. Failure never prevents login.
@@ -562,18 +563,18 @@ mod tests {
             Event::Spawn(FixedService::Compositor),
             Event::NotifyMbootStage(MbootStage::Display),
             Event::StartDiscovery,
-            Event::Spawn(FixedService::Network),
-            Event::Spawn(FixedService::Update),
             Event::Spawn(FixedService::User),
             Event::WaitUser,
             Event::StartKeychain,
             Event::Spawn(FixedService::SecureUi),
             Event::WaitSecureUiLogin,
             Event::SpawnUserSession(FixedService::Workspace, TEST_IDENTITY),
-            Event::SpawnUserSession(FixedService::Linux, TEST_IDENTITY),
             Event::SpawnUserSession(FixedService::Binder, TEST_IDENTITY),
             Event::WaitBinder,
             Event::NotifyMbootStage(MbootStage::Desktop),
+            Event::SpawnUserSession(FixedService::Linux, TEST_IDENTITY),
+            Event::Spawn(FixedService::Network),
+            Event::Spawn(FixedService::Update),
             Event::SpawnUserSession(FixedService::StandardApplications, TEST_IDENTITY),
             Event::WaitDiscovery,
             Event::WaitNetwork,
